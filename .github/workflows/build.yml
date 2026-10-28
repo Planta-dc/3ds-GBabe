@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: write # only used when release_tag is given
+  pull-requests: write # diagnostic comment when the .cia packaging fails
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -121,19 +122,57 @@ jobs:
           set -o pipefail
           make cia 2>&1 | tee cia-build.log
 
-      # GitHub Actions logs are not always reachable (and a failed step's log is
-      # often the only description of the problem), so mirror the tail of the
-      # packaging output into annotations, which the API does expose.
+      # A failed step's log is often the only description of the problem, and
+      # neither `gh run view --log` nor the raw log download is always
+      # reachable. So on failure: replay the packaging commands one at a time
+      # with tracing, mirror the tail into annotations, and (for pull requests)
+      # post it as a comment, which is readable through the API.
       - name: Report .cia failure
         if: failure() && steps.plan.outputs.want_cia == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          [ -f cia-build.log ] || exit 0
-          echo "--- last 30 lines of the packaging output"
-          tail -n 30 cia-build.log
-          while IFS= read -r line; do
-            [ -n "$line" ] || continue
+          set +e
+          {
+            echo "pwd: $(pwd)"
+            ls -l gbabe.elf gbabe.3dsx build 2>&1 | head -n 10
+            echo "--- tools"
+            command -v bannertool makerom
+            bannertool --version
+            makerom -help | head -n 1
+            echo "--- build log from 'make cia'"
+            if [ -f cia-build.log ]; then
+              tail -n 60 cia-build.log
+            else
+              echo "(no cia-build.log, the step died before make ran)"
+            fi
+            echo "--- replay"
+            bannertool makebanner -i resources/banner.png -a resources/banner.wav -o build/banner.bnr
+            echo "makebanner rc=$?"
+            bannertool makesmdh -s "GBabe" -l "GBabe" -p "GBabe contributors" -i icon.png -o build/icon.icn
+            echo "makesmdh rc=$?"
+            set -x
+            makerom -f cia -o gbabe.cia -target t -exefslogo \
+              -elf gbabe.elf -rsf resources/gbabe.rsf \
+              -icon build/icon.icn -banner build/banner.bnr \
+              -major 0 -minor 1 -micro 0 \
+              -DAPP_TITLE="GBabe" -DAPP_PRODUCT_CODE="CTR-H-GBABE" -DAPP_UNIQUE_ID=0xEABE1
+            echo "makerom rc=$?"
+          } > packaging-report.log 2>&1
+          tail -n 60 packaging-report.log
+          tail -n 12 packaging-report.log | grep -v '^$' | while IFS= read -r line; do
             echo "::error::$line"
-          done < <(tail -n 15 cia-build.log)
+          done
+          {
+            echo "### .cia packaging failed"
+            echo '```'
+            tail -n 40 packaging-report.log
+            echo '```'
+          } > comment.md
+          if [ -n "$PR" ]; then
+            gh pr comment "$PR" --body-file comment.md || true
+          fi
 
       - name: List outputs
         run: ls -la *.3dsx *.smdh *.cia 2>/dev/null || true
