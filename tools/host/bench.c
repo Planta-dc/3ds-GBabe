@@ -33,7 +33,7 @@ int main(int argc, char **argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s ROM [frames]\\n", argv[0]);
+		fprintf(stderr, "usage: %s ROM [frames]\n", argv[0]);
 		return 2;
 	}
 
@@ -50,7 +50,7 @@ int main(int argc, char **argv)
 	const char *err = emu_load(argv[1]);
 	if (err != NULL)
 	{
-		fprintf(stderr, "emu_load: %s\\n", err);
+		fprintf(stderr, "emu_load: %s\n", err);
 		return 1;
 	}
 
@@ -88,11 +88,11 @@ int main(int argc, char **argv)
 	const double blit = (t2 - t1) / frames;
 	const double with_apu = (t4 - t3) / frames;
 
-	printf("core          %6.3f ms/frame  (%6.0f fps)\\n", core, 1000.0 / core);
-	printf("blit + present%6.3f ms/frame  (scale fit, 267x240)\\n", blit);
-	printf("core + APU    %6.3f ms/frame  (%6.0f fps)\\n", with_apu,
+	printf("core          %6.3f ms/frame  (%6.0f fps)\n", core, 1000.0 / core);
+	printf("blit + present%6.3f ms/frame  (scale fit, 267x240)\n", blit);
+	printf("core + APU    %6.3f ms/frame  (%6.0f fps)\n", with_apu,
 	       1000.0 / with_apu);
-	printf("frame total   %6.3f ms  -> %.0f %% of a 16.74 ms budget\\n",
+	printf("frame total   %6.3f ms  -> %.0f %% of a 16.74 ms budget\n",
 	       core + blit, (core + blit) / 16.74 * 100.0);
 
 	return 0;

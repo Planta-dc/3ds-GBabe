@@ -43,9 +43,16 @@ run: $(BIN)
 # Same sources, but with its own main().
 BENCH_SRC := $(filter-out harness.c,$(SRC)) bench.c
 
+# ROM may be given relative to the repository root, which is how the workflows
+# call it (`make -C tools/host bench ROM=test/dmg-acid2.gb`).
 bench: $(BENCH_SRC) bench.c
 	$(CC) $(CFLAGS) $(DEFS) $(INCLUDE) -o gbabe-bench $(BENCH_SRC) -lm
-	./gbabe-bench $(ROM) $(or $(FRAMES),600)
+	@rom="$(ROM)"; \
+	case "$$rom" in \
+	/*) ;; \
+	*) [ -f "$$rom" ] || rom="$(ROOT)/$$rom" ;; \
+	esac; \
+	./gbabe-bench "$$rom" $(or $(FRAMES),600)
 
 clean:
 	rm -f $(BIN) gbabe-bench *.ppm
