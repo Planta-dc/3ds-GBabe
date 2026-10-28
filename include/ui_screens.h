@@ -32,8 +32,11 @@
 void scr_browser(const char *right, const char *path, const char *const *names,
 		 const bool *isdir, int n, int sel, int top, bool ok);
 
-/* Which row of the list is at screen y? Returns an index (absolute, i.e.
- * top + row) or -1. */
+/* Tap targets for the caller: the path panel goes up a folder, this maps a
+ * y coordinate to a list row (absolute, i.e. top + row) or -1. */
+#define UI_PATH_Y 36
+#define UI_PATH_H 22
+
 int scr_browser_hit(int y, int top, int n);
 
 /* ---- pause menu --------------------------------------------------------- */

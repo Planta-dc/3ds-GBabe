@@ -140,12 +140,30 @@ static void try_load_bootrom(bool cgb)
 	gb_reset(&gb);
 }
 
+/* The core reports errors from inside a frame, so nothing here may block or
+ * draw: the message is stored and the main loop picks it up afterwards. */
+static char gb_error_text[64];
+static bool gb_error_pending;
+
+const char *emu_last_error(void)
+{
+	if (!gb_error_pending)
+		return NULL;
+
+	gb_error_pending = false;
+	return gb_error_text;
+}
+
 static void gb_error_cb(struct gb_s *g, const enum gb_error_e err,
 			const uint16_t addr)
 {
 	(void)g;
-	if (err != GB_UNKNOWN_ERROR)
-		printf("core error %d at 0x%04X\n", (int)err, addr);
+	if (err == GB_UNKNOWN_ERROR)
+		return;
+
+	snprintf(gb_error_text, sizeof gb_error_text,
+		 "Core error %d at 0x%04X", (int)err, (unsigned)addr);
+	gb_error_pending = true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -258,6 +276,7 @@ void emu_unload(void)
 
 const char *emu_load(const char *path)
 {
+	gb_error_pending = false;
 	emu_unload();
 
 	FILE *f = fopen(path, "rb");
@@ -380,6 +399,7 @@ void emu_reset(void)
 	if (!loaded)
 		return;
 	emu_flush_save();
+	gb_error_pending = false; /* a stale error is not this run's problem */
 	gb_reset(&gb);
 	gb_init_lcd(&gb, lcd_draw_line_cb);
 }

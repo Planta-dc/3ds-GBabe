@@ -230,7 +230,13 @@ and only the look is shared (gpSP 3D is GPLv2, this is MIT).
 * **Touch.** The 3DS reports touch coordinates in the same 320x240 landscape
   space the canvas uses, so hit-testing is `scr_browser_hit()` /
   `scr_menu_hit_row()` on the layout constants - no second geometry to keep in
-  sync, and every row is a large target.
+  sync, and every row is a large target. In the browser one tap opens the
+  highlighted entry; in the menu a tap selects and a second tap on the same row
+  uses it, because "Reset game" and "Save and quit" must not fire on a stray
+  thumb. The touch bit is taken from `hidKeysDown()`, not
+  `hidKeysDownRepeat()`: repeat re-emits held keys, and a finger resting on the
+  glass reads as "held", which would have activated whatever it was touching
+  every 15 frames.
 * **Offline preview.** `tools/uipreview` links the real `ui_gfx.c`,
   `ui_screens.c` and `ui_font.c` against the host stub and renders every screen
   to an image, through the same rotation the hardware applies. CI attaches the

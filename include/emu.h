@@ -44,3 +44,9 @@ void emu_set_rendering(bool on);
 
 /* Write cartridge RAM (if any) back to the .sav file. Safe to call often. */
 void emu_flush_save(void);
+
+/* The last error the emulator core reported (bad opcode, unmapped read, ...),
+ * or NULL when there is nothing new. Reading it clears it: the front-end polls
+ * this after each frame and shows the message to the user, because the core's
+ * callback happens deep inside a frame and must not block there. */
+const char *emu_last_error(void);

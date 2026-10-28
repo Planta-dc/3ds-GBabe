@@ -58,19 +58,29 @@ static u64      hud_sum_core, hud_sum_blit, hud_sum_wait, hud_sum_frame;
 
 /* Blocking wait for the next input event. Returns the keys just pressed, with
  * KEY_TOUCH set (and `touch` filled in) for a tap; 0 means HOME was pressed and
- * the application should quit. */
+ * the application should quit.
+ *
+ * Buttons repeat while held (hidKeysDownRepeat), but the touch bit must not:
+ * libctru's repeat logic re-emits whatever is in the key state, and on the touch
+ * screen "held" means a finger resting on the glass. Left in, a finger held on a
+ * menu row would select it and then activate it 15 frames later, and a finger on
+ * a folder would walk into it over and over. So the press comes from
+ * hidKeysDown() (first frame only) and repeats are buttons only. */
 static u32 wait_input(touchPosition *touch)
 {
 	while (aptMainLoop())
 	{
 		hidScanInput();
 
-		u32 down = hidKeysDownRepeat();
-		if (down != 0)
+		const u32 down = hidKeysDown();
+		const u32 rep = hidKeysDownRepeat() & ~KEY_TOUCH;
+		const u32 k = down | rep;
+
+		if (k != 0)
 		{
-			if ((down & KEY_TOUCH) && touch != NULL)
+			if ((k & KEY_TOUCH) && touch != NULL)
 				hidTouchRead(touch);
-			return down;
+			return k;
 		}
 
 		gspWaitForVBlank();
@@ -245,28 +255,30 @@ bool ui_browse_rom(char *out, size_t out_len)
 
 		if (k & KEY_TOUCH)
 		{
-			if (touch.py < UI_LIST_Y)
+			if (touch.py >= UI_PATH_Y && touch.py < UI_PATH_Y + UI_PATH_H)
 			{
-				/* Tapping the header or the path goes up a
-				 * folder, which is the touch equivalent of B. */
-				if (!parent_dir())
-					return false;
-				sel = 0;
-				top = 0;
-				rescan = true;
+				/* Tapping the path goes up a folder (the touch
+				 * equivalent of B). At sdmc:/ there is nowhere to
+				 * go, so do nothing - quitting the application on
+				 * a stray tap would be a nasty surprise. B still
+				 * cancels from here, as it always did. */
+				if (parent_dir())
+				{
+					sel = 0;
+					top = 0;
+					rescan = true;
+				}
 				continue;
 			}
 
-			int hit = scr_browser_hit(touch.py, top, entry_count);
+			const int hit = scr_browser_hit(touch.py, top, entry_count);
 			if (hit < 0)
-				continue;
-			if (hit != sel)
-			{
-				sel = hit;
-				dirty = true;
-				continue;
-			}
-			/* Second tap on the selected row opens it. */
+				continue; /* footer, gap, past the end */
+
+			/* One tap opens the row - folders included. Selecting
+			 * something and then requiring a second tap to use it is
+			 * a fine desktop idiom and a bad stylus one. */
+			sel = hit;
 			k = KEY_A;
 		}
 
@@ -411,19 +423,25 @@ static const char *menu_note(int tab, int sel)
 
 static void draw_menu(int tab, int sel)
 {
+	/* A copy, because the settings tab shows live values rather than the
+	 * table above. Only the rows this tab actually has are filled in. */
 	ui_row rows[SETTINGS_ROWS];
 
-	const ui_row *src = (tab == 0) ? game_rows : settings_rows;
-	const int n = (tab == 0) ? GAME_ROWS : SETTINGS_ROWS;
+	const bool settings = (tab != 0);
+	const ui_row *src = settings ? settings_rows : game_rows;
+	const int n = settings ? SETTINGS_ROWS : GAME_ROWS;
 
 	for (int i = 0; i < n; i++)
 		rows[i] = src[i];
 
-	rows[0].value = palette_name(palette_get());
-	rows[1].value = scale_label(g_cfg.scale);
-	rows[2].value = frameskip_label(g_cfg.frameskip);
-	rows[3].value = g_cfg.audio_on ? "on" : "off";
-	rows[4].value = g_cfg.show_hud ? "on" : "off";
+	if (settings)
+	{
+		rows[0].value = palette_name(palette_get());
+		rows[1].value = scale_label(g_cfg.scale);
+		rows[2].value = frameskip_label(g_cfg.frameskip);
+		rows[3].value = g_cfg.audio_on ? "on" : "off";
+		rows[4].value = g_cfg.show_hud ? "on" : "off";
+	}
 
 	ui_menu m = {
 		.title = "GBabe " GBABE_VERSION,
@@ -441,20 +459,23 @@ static void draw_menu(int tab, int sel)
 	ui_present();
 }
 
-/* Run one menu action. delta is -1 / +1 for a change, 0 for "activate".
+/* Run one menu action. delta is -1 / +1 when a value is being stepped, 0 when
+ * the row was activated. *close is set by the three rows that end the menu
+ * (resume, reset, load another ROM) and never by a row that just holds a value -
+ * tapping "Sound" must flip it *in* the menu, not leave the menu.
  * Returns false when the application should exit. */
-static bool run_action(int act, int delta, bool *resume)
+static bool run_action(int act, int delta, bool *close)
 {
 	switch (act)
 	{
 	case ACT_RESUME:
-		*resume = true;
+		*close = true;
 		return true;
 
 	case ACT_RESET:
 		emu_reset();
 		config_save();
-		*resume = true;
+		*close = true;
 		return true;
 
 	case ACT_LOAD:
@@ -472,7 +493,7 @@ static bool run_action(int act, int delta, bool *resume)
 
 			gbabe_copy(g_cfg.rom_path, sizeof g_cfg.rom_path, path);
 			config_save();
-			*resume = true;
+			*close = true;
 		}
 		return true;
 	}
@@ -517,15 +538,29 @@ static bool run_action(int act, int delta, bool *resume)
 	}
 }
 
+/* What kind of row is selected? The tables above are static, so this is a
+ * lookup rather than a field - the screens only need the value, and ui.c needs
+ * to know whether left/right makes sense there. */
+static ui_row_kind row_kind(int tab, int sel)
+{
+	if (tab != 0)
+		return settings_rows[sel].kind;
+	return UI_ROW_ACTION;
+}
+
 bool ui_in_game_menu(void)
 {
 	int tab = 0;
 	int sel = 0;
 	bool dirty = true;
-	bool resume = false;
 
-	while (aptMainLoop())
+	for (;;)
 	{
+		const int n_rows = (tab == 0) ? GAME_ROWS : SETTINGS_ROWS;
+
+		if (sel < 0 || sel >= n_rows)
+			sel = 0;
+
 		if (dirty)
 		{
 			draw_menu(tab, sel);
@@ -537,6 +572,7 @@ bool ui_in_game_menu(void)
 		if (k == 0)
 			return false; /* HOME pressed */
 
+		/* B always means "back to the game", from anywhere. */
 		if (k & KEY_B)
 		{
 			config_save();
@@ -545,90 +581,93 @@ bool ui_in_game_menu(void)
 			return true;
 		}
 
+		/* delta == 0 means "the row was activated"; -1/+1 means a value
+		 * is being stepped. Nothing else distinguishes the two below. */
+		int delta = 0;
+
 		if (k & KEY_TOUCH)
 		{
 			const int t = scr_menu_hit_tab(touch.px, touch.py,
 						       menu_tabs, MENU_TABS);
 			if (t >= 0)
 			{
-				if (t != tab)
-				{
-					tab = t;
-					sel = 0;
-				}
-				dirty = true;
-				continue;
-			}
-
-			const int n = (tab == 0) ? GAME_ROWS : SETTINGS_ROWS;
-			const int row = scr_menu_hit_row(touch.py, n);
-			if (row < 0)
-				continue;
-
-			if (row != sel)
-			{
-				sel = row;
-				dirty = true;
-				continue;
-			}
-			k = KEY_A; /* second tap activates */
-		}
-
-		if (k & (KEY_DDOWN | KEY_CPAD_DOWN))
-		{
-			const int n = (tab == 0) ? GAME_ROWS : SETTINGS_ROWS;
-			sel = (sel + 1) % n;
-			dirty = true;
-			continue;
-		}
-		if (k & (KEY_DUP | KEY_CPAD_UP))
-		{
-			const int n = (tab == 0) ? GAME_ROWS : SETTINGS_ROWS;
-			sel = (sel == 0) ? n - 1 : sel - 1;
-			dirty = true;
-			continue;
-		}
-		if (k & (KEY_L | KEY_R | KEY_DLEFT | KEY_DRIGHT | KEY_CPAD_LEFT |
-			 KEY_CPAD_RIGHT))
-		{
-			/* L/R and left/right both move: L/R switch tabs, the
-			 * D-Pad changes the value on the current row. */
-			if (k & (KEY_L | KEY_R))
-			{
-				tab = (tab + 1) % MENU_TABS;
+				tab = t;
 				sel = 0;
 				dirty = true;
 				continue;
 			}
 
-			const int dir = (k & (KEY_DRIGHT | KEY_CPAD_RIGHT)) ? 1
-									     : -1;
-			const int act = (tab == 0) ? game_actions[sel]
-						   : settings_actions[sel];
-			if (!run_action(act, dir, &resume))
-				return false;
+			const int row = scr_menu_hit_row(touch.py,
+							 (tab == 0) ? GAME_ROWS
+								    : SETTINGS_ROWS);
+			if (row < 0)
+				continue; /* the note, the footer, empty space */
+
+			if (row != sel)
+			{
+				/* First tap selects. Menu rows are not like
+				 * browser rows: one of them restarts the game
+				 * and another quits, and neither should happen
+				 * because a thumb brushed the glass. */
+				sel = row;
+				dirty = true;
+				continue;
+			}
+			/* Tapping the row that is already selected uses it. */
+			dirty = true;
+		}
+		else if (k & (KEY_DDOWN | KEY_CPAD_DOWN))
+		{
+			sel = (sel + 1) % n_rows;
 			dirty = true;
 			continue;
 		}
-
-		if (k & (KEY_A | KEY_START))
+		else if (k & (KEY_DUP | KEY_CPAD_UP))
 		{
-			const int act = (tab == 0) ? game_actions[sel]
-						   : settings_actions[sel];
-			if (!run_action(act, 0, &resume))
-				return false;
-
-			if (resume)
-			{
-				if (!g_cfg.show_hud)
-					ui_blank();
-				return true;
-			}
+			sel = (sel + n_rows - 1) % n_rows;
 			dirty = true;
+			continue;
 		}
-	}
+		else if (k & (KEY_L | KEY_R))
+		{
+			tab = (tab + 1) % MENU_TABS;
+			sel = 0;
+			dirty = true;
+			continue;
+		}
+		else if (k & (KEY_DLEFT | KEY_DRIGHT | KEY_CPAD_LEFT |
+			      KEY_CPAD_RIGHT))
+		{
+			/* Left/right changes a value, and does nothing at all on a
+			 * row that is an action: a nudge on "Save and quit" must
+			 * not quit, and one on "Reset game" must not reset. */
+			if (row_kind(tab, sel) == UI_ROW_ACTION)
+				continue;
 
-	return false;
+			delta = (k & (KEY_DRIGHT | KEY_CPAD_RIGHT)) ? 1 : -1;
+		}
+		else if (!(k & (KEY_A | KEY_START)))
+		{
+			continue; /* a key this screen does not use */
+		}
+
+		const int act = (tab == 0) ? game_actions[sel]
+					   : settings_actions[sel];
+
+		bool close = false;
+		if (!run_action(act, delta, &close))
+			return false; /* asked to quit */
+
+		if (close)
+		{
+			if (!g_cfg.show_hud)
+				ui_blank();
+			return true;
+		}
+
+		/* A value changed: stay in the menu and redraw it. */
+		dirty = true;
+	}
 }
 
 /* ------------------------------------------------------------------------- */

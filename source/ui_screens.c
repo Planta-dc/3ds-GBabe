@@ -29,12 +29,22 @@
 #define MARGIN   10
 #define CONTENT_W (UI_W - 2 * MARGIN)
 
+
 /* ------------------------------------------------------------------------- */
 /* Shared chrome                                                             */
 /* ------------------------------------------------------------------------- */
 
+/* Screens take optional strings; draw nothing rather than crash on a NULL. */
+static const char *or_empty(const char *s)
+{
+	return (s != NULL) ? s : "";
+}
+
 static void draw_header(const char *title, const char *right)
 {
+	if (title == NULL)
+		title = "";
+
 	ui_vgradient(0, 0, UI_W, UI_HEADER_H, C_HEADER, C_BG);
 	ui_fill(0, UI_HEADER_H - 1, UI_W, 1, C_LINE);
 
@@ -64,6 +74,13 @@ static void draw_footer(const char *const *hints, int n)
 static void path_short(char *out, size_t out_len, const char *path)
 {
 	const size_t len = strlen(path);
+
+	if (out_len < 12)
+	{
+		/* Too small to elide anything; snprintf still terminates it. */
+		snprintf(out, out_len, "%s", path);
+		return;
+	}
 
 	if (len + 1 <= out_len)
 	{
@@ -106,18 +123,19 @@ void scr_browser(const char *right, const char *path, const char *const *names,
 	draw_header("GBabe", right);
 
 	/* Path panel; a tap here goes up a folder. */
-	ui_rrect(MARGIN, 36, CONTENT_W, 22, 8, C_PANEL);
+	ui_rrect(MARGIN, UI_PATH_Y, CONTENT_W, UI_PATH_H, 8, C_PANEL);
 
 	char short_path[48];
 	path_short(short_path, sizeof short_path, path);
-	ui_text_vc(&ui_font_body, MARGIN + 8, 36, 22, short_path, C_TEXT,
-		   CONTENT_W - 74);
+	ui_text_vc(&ui_font_body, MARGIN + 8, UI_PATH_Y, UI_PATH_H, short_path,
+		   C_TEXT, CONTENT_W - 74);
 
 	if (n > 0)
 	{
 		char count[24];
 		snprintf(count, sizeof count, "%d/%d", sel + 1, n);
-		ui_text_right(&ui_font_small, UI_W - MARGIN - 8, 43, count, C_DIM);
+		ui_text_right(&ui_font_small, UI_W - MARGIN - 8,
+			      UI_PATH_Y + 7, count, C_DIM);
 	}
 
 	if (n == 0)
@@ -150,9 +168,10 @@ void scr_browser(const char *right, const char *path, const char *const *names,
 			const int name_w = CONTENT_W - 46;
 
 			ui_text_vc(&ui_font_body, MARGIN + 10, y, UI_LIST_H,
-				   names[idx], col, name_w);
+				   or_empty(names != NULL ? names[idx] : NULL), col,
+				   name_w);
 
-			if (isdir[idx])
+			if (isdir != NULL && isdir[idx])
 			{
 				ui_arrow(UI_W - MARGIN - 12,
 					 y + UI_LIST_H / 2, 3, 1,
@@ -161,7 +180,9 @@ void scr_browser(const char *right, const char *path, const char *const *names,
 			else
 			{
 				/* Extension tag, right aligned, sized to fit. */
-				const char *dot = strrchr(names[idx], '.');
+				const char *dot = strrchr(
+					or_empty(names != NULL ? names[idx] : NULL),
+					'.');
 				char tag[6];
 				snprintf(tag, sizeof tag, "%s", dot ? dot + 1 : "");
 
@@ -170,14 +191,20 @@ void scr_browser(const char *right, const char *path, const char *const *names,
 						    ? *p - 'a' + 'A'
 						    : *p);
 
-				const int tw = ui_text_w(&ui_font_small, tag);
-				const int pill_w = tw + 10;
-				const int pill_x = UI_W - MARGIN - 8 - pill_w;
+				if (tag[0] != '\0')
+				{
+					const int tw = ui_text_w(&ui_font_small,
+								 tag);
+					const int pill_w = tw + 10;
+					const int pill_x = UI_W - MARGIN - 8 -
+							   pill_w;
 
-				ui_rrect(pill_x, y + 4, pill_w, 11, 4,
-					 is_sel ? C_ACCENT : C_PANEL2);
-				ui_text(&ui_font_small, pill_x + 5, y + 3, tag,
-					is_sel ? C_BG : C_DIM, 0);
+					ui_rrect(pill_x, y + 4, pill_w, 11, 4,
+						 is_sel ? C_ACCENT : C_PANEL2);
+					ui_text(&ui_font_small, pill_x + 5,
+						y + 3, tag,
+						is_sel ? C_BG : C_DIM, 0);
+				}
 			}
 		}
 	}
@@ -194,8 +221,12 @@ int scr_browser_hit(int y, int top, int n)
 	if (y < UI_LIST_Y)
 		return -1;
 
-	const int row = (y - UI_LIST_Y) / UI_LIST_PITCH;
-	if (row < 0 || row >= UI_LIST_ROWS)
+	const int rel = y - UI_LIST_Y;
+	const int row = rel / UI_LIST_PITCH;
+
+	/* Rows are 19px tall with a 2px gap: a tap in the gap is not a tap on
+	 * the row below it. */
+	if (row < 0 || row >= UI_LIST_ROWS || rel % UI_LIST_PITCH >= UI_LIST_H)
 		return -1;
 	if (top + row >= n)
 		return -1;
@@ -212,15 +243,28 @@ int scr_browser_hit(int y, int top, int n)
 #define ROW_PITCH 22
 #define ROW_H   19
 
+/* Only this many tabs / rows fit on the screen; a larger count would walk off
+ * the caller's array and draw over the footer. */
+#define UI_MAX_TABS 4
+#define UI_MAX_ROWS 7
+
+static int clamp(int v, int hi)
+{
+	if (v < 0) return 0;
+	if (v > hi) return hi;
+	return v;
+}
+
+
 int scr_menu_hit_tab(int x, int y, const char *const *tabs, int n_tabs)
 {
-	if (y < TAB_Y || y >= TAB_Y + TAB_H)
+	if (tabs == NULL || y < TAB_Y || y >= TAB_Y + TAB_H)
 		return -1;
 
 	int tx = MARGIN;
-	for (int i = 0; i < n_tabs; i++)
+	for (int i = 0; i < clamp(n_tabs, UI_MAX_TABS); i++)
 	{
-		const int w = ui_text_w(&ui_font_small, tabs[i]) + 20;
+		const int w = ui_text_w(&ui_font_small, or_empty(tabs[i])) + 20;
 		if (x >= tx && x < tx + w)
 			return i;
 		tx += w + 6;
@@ -233,8 +277,11 @@ int scr_menu_hit_row(int y, int n_rows)
 	if (y < ROW_Y)
 		return -1;
 
-	const int row = (y - ROW_Y) / ROW_PITCH;
-	if (row < 0 || row >= n_rows || row >= 7)
+	const int rel = y - ROW_Y;
+	const int row = rel / ROW_PITCH;
+
+	/* Same as the browser: the 3px gap between rows is not a row. */
+	if (row >= clamp(n_rows, UI_MAX_ROWS) || rel % ROW_PITCH >= ROW_H)
 		return -1;
 	return row;
 }
@@ -243,14 +290,14 @@ static void draw_tabs(const ui_menu *m)
 {
 	int x = MARGIN;
 
-	for (int i = 0; i < m->n_tabs; i++)
+	for (int i = 0; i < clamp(m->n_tabs, UI_MAX_TABS); i++)
 	{
-		const int w = ui_text_w(&ui_font_small, m->tabs[i]) + 20;
+		const int w = ui_text_w(&ui_font_small, or_empty(m->tabs[i])) + 20;
 		const bool on = (i == m->tab);
 
 		ui_rrect(x, TAB_Y, w, TAB_H, 10, on ? C_ACCENT : C_PANEL);
-		ui_text(&ui_font_small, x + 10, TAB_Y + 5, m->tabs[i],
-			on ? C_BG : C_DIM, 0);
+		ui_text(&ui_font_small, x + 10, TAB_Y + 5,
+			or_empty(m->tabs[i]), on ? C_BG : C_DIM, 0);
 		x += w + 6;
 	}
 }
@@ -270,11 +317,13 @@ static void draw_toggle(int right, int y, bool on)
 
 void scr_menu(const ui_menu *m)
 {
+	const int n_rows = clamp(m->n_rows, UI_MAX_ROWS);
+
 	ui_clear(C_BG);
 	draw_header(m->title, m->status);
 	draw_tabs(m);
 
-	for (int i = 0; i < m->n_rows; i++)
+	for (int i = 0; i < n_rows; i++)
 	{
 		const ui_row *r = &m->rows[i];
 		const int y = ROW_Y + i * ROW_PITCH;
@@ -286,8 +335,8 @@ void scr_menu(const ui_menu *m)
 			ui_rrect(MARGIN, y + 3, 3, ROW_H - 6, 1, C_ACCENT);
 		}
 
-		ui_text_vc(&ui_font_body, MARGIN + 10, y, ROW_H, r->label,
-			   is_sel ? C_TEXT : C_DIM, 170);
+		ui_text_vc(&ui_font_body, MARGIN + 10, y, ROW_H,
+			   or_empty(r->label), is_sel ? C_TEXT : C_DIM, 170);
 
 		if (r->kind == UI_ROW_TOGGLE)
 		{
@@ -296,7 +345,7 @@ void scr_menu(const ui_menu *m)
 		}
 		else if (r->kind == UI_ROW_CHOICE)
 		{
-			const char *val = r->value ? r->value : "";
+			const char *val = or_empty(r->value);
 			const int vw = ui_text_w(&ui_font_body, val);
 			/* The right-hand arrow keeps its slot whether or not the row
 			 * is selected, so the value never jumps about. */
@@ -316,14 +365,14 @@ void scr_menu(const ui_menu *m)
 
 	if (m->note != NULL && m->note[0] != '\0')
 	{
-		const int note_y = ROW_Y + m->n_rows * ROW_PITCH + 5;
+		const int note_y = ROW_Y + n_rows * ROW_PITCH + 5;
 		ui_text(&ui_font_small, MARGIN, note_y, m->note, C_DIM,
 			CONTENT_W);
 	}
 
 	const char *hints[] = {
 		"D-Pad move   Left/Right change   A select",
-		"B resume   L/R or tap a tab",
+		"B resume   L/R or a tap switches tab",
 	};
 	draw_footer(hints, 2);
 }
@@ -363,9 +412,9 @@ void scr_hud(const ui_hud *h)
 	ui_vgradient(0, 0, UI_W, 44, C_HEADER, C_BG);
 	ui_fill(0, 43, UI_W, 1, C_LINE);
 	ui_rrect(MARGIN, 9, 3, 26, 1, C_ACCENT);
-	ui_text(&ui_font_title, MARGIN + 10, 5, h->title, C_TEXT,
+	ui_text(&ui_font_title, MARGIN + 10, 5, or_empty(h->title), C_TEXT,
 		CONTENT_W - 60);
-	if (h->sub != NULL)
+	if (h->sub != NULL && h->sub[0] != '\0')
 		ui_text(&ui_font_small, MARGIN + 10, 25, h->sub, C_DIM,
 			CONTENT_W - 60);
 
@@ -407,15 +456,18 @@ void scr_hud(const ui_hud *h)
 	/* Two columns of label/value pairs. */
 	for (int i = 0; i < h->n_stats && i < UI_HUD_STATS; i++)
 	{
+		if (h->stat_label[i] == NULL && h->stat_value[i] == NULL)
+			continue;
+
 		const int col = i & 1;
 		const int row = i >> 1;
 		const int x = MARGIN + col * (CONTENT_W / 2 + 4);
 		const int y = 134 + row * 19;
 
-		ui_text(&ui_font_small, x, y + 2,
-			h->stat_label[i] ? h->stat_label[i] : "", C_DIM, 0);
+		ui_text(&ui_font_small, x, y + 2, or_empty(h->stat_label[i]),
+			C_DIM, 0);
 		ui_text_right(&ui_font_small, x + CONTENT_W / 2 - 8, y + 2,
-			      h->stat_value[i] ? h->stat_value[i] : "", C_TEXT);
+			      or_empty(h->stat_value[i]), C_TEXT);
 	}
 
 	/* Touch target for the menu. */

@@ -1,9 +1,10 @@
 /**
  * Software rasteriser for the bottom screen UI.
  *
- * See ui_gfx.h for why this is CPU-drawn. Shapes are drawn with integer
- * coverage so the edges are smooth without a per-pixel float square root:
- * rounded corners and circles use a small distance table built once.
+ * See ui_gfx.h for why this is CPU-drawn. Edges are anti-aliased with integer
+ * coverage: the squared distance to the shape's edge is compared against the
+ * radii r-1 and r+1 and ramped between them, so there is no square root, no
+ * floating point and no look-up table to keep in sync with the radius.
  *
  * MIT licensed.
  */
@@ -19,14 +20,19 @@ uint16_t ui_canvas[UI_W * UI_H];
 /* Colour helpers                                                            */
 /* ------------------------------------------------------------------------- */
 
+/* src over dst, a in 0..256. Signed on purpose: the interpolation goes both
+ * ways, and a>>8 on a negative value is defined by GCC/ARM as an arithmetic
+ * shift, which is what this wants. */
 static inline uint16_t blend(uint16_t dst, uint16_t src, int a)
 {
-	unsigned dr = (dst >> 11) & 0x1F, dg = (dst >> 5) & 0x3F, db = dst & 0x1F;
-	unsigned sr = (src >> 11) & 0x1F, sg = (src >> 5) & 0x3F, sb = src & 0x1F;
+	int dr = (dst >> 11) & 0x1F, dg = (dst >> 5) & 0x3F, db = dst & 0x1F;
+	const int sr = (src >> 11) & 0x1F, sg = (src >> 5) & 0x3F;
+	const int sb = src & 0x1F;
 
-	dr += (int)(sr - (int)dr) * a >> 8;
-	dg += (int)(sg - (int)dg) * a >> 8;
-	db += (int)(sb - (int)db) * a >> 8;
+	dr += ((sr - dr) * a) >> 8;
+	dg += ((sg - dg) * a) >> 8;
+	db += ((sb - db) * a) >> 8;
+
 	return (uint16_t)((dr << 11) | (dg << 5) | db);
 }
 
@@ -88,7 +94,8 @@ void ui_clear(uint16_t c)
 /* ------------------------------------------------------------------------- */
 
 /* 0..256 coverage of the pixel (px,py) inside a rounded rect whose corner
- * circles have radius r. Integer only, so no libm and no division in the loop. */
+ * circles have radius r. Straight rows never get here (ui_rrect fills them in
+ * bulk), so the one division is only paid on the edges. */
 static int rrect_cov(int px, int py, int x, int y, int w, int h, int r)
 {
 	/* Coordinates of the pixel centre in "corner space". */
@@ -251,15 +258,25 @@ static int glyph_index(char ch)
 int ui_text_w(const ui_font *f, const char *s)
 {
 	int w = 0;
+
+	if (s == NULL)
+		return 0;
+
 	for (; *s; s++)
 		w += f->g[glyph_index(*s)].adv;
 	return w;
 }
 
-/* Width of s clipped to max_w, including the ellipsis if it has to clip. */
-static int clipped_w(const ui_font *f, const char *s, int max_w, int *used)
+/* How many characters of s fit in max_w, and how wide they are. When max_w > 0
+ * and the text does not fit, room is left for the three dots ui_text() will
+ * add. *ellipsis tells the caller whether it has to. */
+static int fit_prefix(const ui_font *f, const char *s, int max_w, int *used,
+		      bool *ellipsis)
 {
+	const int dots = 3 * f->g[glyph_index('.')].adv;
 	int w = 0, n = 0;
+
+	*ellipsis = false;
 
 	if (max_w <= 0)
 	{
@@ -269,25 +286,23 @@ static int clipped_w(const ui_font *f, const char *s, int max_w, int *used)
 
 	for (; s[n]; n++)
 	{
-		int adv = f->g[glyph_index(s[n])].adv;
+		const int adv = f->g[glyph_index(s[n])].adv;
 		if (w + adv > max_w)
 			break;
 		w += adv;
 	}
-	*used = n;
 
 	if (s[n])
 	{
-		/* make room for "..." */
-		int dots = 3 * f->g[glyph_index('.')].adv;
+		*ellipsis = true;
 		while (n > 0 && w + dots > max_w)
 		{
 			n--;
 			w -= f->g[glyph_index(s[n])].adv;
 		}
-		*used = n;
-		return ui_text_w(f, s) > 0 ? w : 0;
 	}
+
+	*used = n;
 	return w;
 }
 
@@ -313,9 +328,19 @@ static void draw_glyph(const ui_font *f, const ui_glyph *g, int x, int y,
 int ui_text(const ui_font *f, int x, int y, const char *s, uint16_t c,
 	    int max_w)
 {
-	int used = 0;
-	int w = clipped_w(f, s, max_w, &used);
-	int cx = x;
+	int used = 0, cx = x;
+	bool ellipsis;
+
+	if (s == NULL)
+		return x;
+
+	const int w = fit_prefix(f, s, max_w, &used, &ellipsis);
+
+	/* Nothing fits at all: say nothing rather than poke the dots out of the
+	 * panel they were clipped to. */
+	if (max_w > 0 && ellipsis && used == 0 &&
+	    w + 3 * f->g[glyph_index('.')].adv > max_w)
+		ellipsis = false;
 
 	for (int i = 0; i < used; i++)
 	{
@@ -324,7 +349,7 @@ int ui_text(const ui_font *f, int x, int y, const char *s, uint16_t c,
 		cx += g->adv;
 	}
 
-	if (max_w > 0 && s[used])
+	if (ellipsis)
 	{
 		for (int i = 0; i < 3; i++)
 		{
@@ -334,7 +359,7 @@ int ui_text(const ui_font *f, int x, int y, const char *s, uint16_t c,
 		}
 	}
 
-	return w ? cx : x;
+	return cx;
 }
 
 void ui_text_center(const ui_font *f, int cx, int y, const char *s, uint16_t c)

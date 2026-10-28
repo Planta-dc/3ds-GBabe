@@ -49,6 +49,9 @@ make -C tools/host check
 tools/host/gbabe-host test/dmg-acid2.gb 300 "$ROOT/build/acid2.ppm" 0
 test -s "$ROOT/build/acid2.ppm"
 
+echo "=== ui stress test ==="
+make -C tools/uipreview asan
+
 echo "=== ui preview ==="
 make -C tools/uipreview -j"$jobs"
 mkdir -p "$ROOT/build/ui-preview"

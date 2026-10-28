@@ -82,6 +82,13 @@ jobs:
           fi
           exit $fail
 
+      # The UI under ASan/UBSan with hostile input: over-long strings, NULL
+      # optionals, counts past what the layout holds, negative rectangles. On
+      # the 3DS an out-of-bounds write there is a crash with no debugger
+      # attached, so it is checked here instead.
+      - name: UI stress test (sanitizers)
+        run: make -C tools/uipreview asan
+
       # Renders browser/menu/HUD/message screens with the same ui_gfx.c and
       # ui_screens.c the 3DS runs, so a layout that breaks is visible in the
       # run's artifacts instead of only on hardware.
@@ -270,11 +277,14 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: sh .github/scripts/check-version.sh
 
+      # A manual run may have built only one of the two.
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: gbabe-cia
 
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: gbabe-3dsx
 
@@ -289,7 +299,10 @@ jobs:
       - name: Create or update the release
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # --target so a tag created here points at the commit that was
+            # actually built, not at the default branch's head.
             gh release create "$TAG" --title "GBabe ${TAG#v}" \
+              --target "$GITHUB_SHA" \
               --notes "GBabe for the Nintendo 3DS (Old 3DS, Old 2DS and up)."
           fi
           files=()
@@ -297,7 +310,8 @@ jobs:
             if [ -f "$f" ]; then files+=("$f"); fi
           done
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "nothing to upload"; exit 1
+            echo "::error::the build produced nothing to attach"
+            exit 1
           fi
           gh release upload "$TAG" "${files[@]}" --clobber
 

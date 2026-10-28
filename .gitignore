@@ -15,6 +15,7 @@ tools/host/*.png
 
 # UI preview renderer
 tools/uipreview/uipreview
+tools/uipreview/uistress
 tools/uipreview/out/
 
 # Anything the build or the workflows leave behind

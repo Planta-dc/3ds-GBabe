@@ -251,6 +251,14 @@ int main(int argc, char **argv)
 
 			emu_run_frame();
 
+			/* The core reports bad opcodes and unmapped reads from
+			 * inside a frame; the message is shown here, between
+			 * frames, so the game keeps its timing model intact. */
+			const char *core_err = emu_last_error();
+			if (core_err != NULL)
+				ui_message("Emulation error", core_err,
+					   "The game may keep running.");
+
 			const u64 after_core = svcGetSystemTick();
 
 			if (draw)

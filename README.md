@@ -248,7 +248,9 @@ In the menu: D-Pad to move, Left/Right to change a value, A to select, B to
 resume, and L/R (or a tap on the tab) to switch between the *Game* and
 *Settings* tabs. The menu has palette, scaling, frame skip, sound, the status
 readout, reset, "load another ROM" and "quit". Everything in it is also
-reachable with the stylus: tap a row to select it, tap it again to activate it.
+reachable with the stylus: tap a row to select it and tap the same row again to
+use it (one tap only selects, because "Reset game" and "Save and quit" should
+not fire on a misplaced thumb).
 
 ---
 
@@ -309,6 +311,8 @@ The bottom screen can be rendered the same way — same `ui_gfx.c`, same
 
 ```sh
 make -C tools/uipreview run          # writes tools/uipreview/out/*.ppm
+make -C tools/uipreview png          # ... and converts them to PNG
+make -C tools/uipreview asan         # the UI under ASan/UBSan, hostile input
 ```
 
 CI runs this on every push and attaches the PNGs as the `ui-preview` artifact,
