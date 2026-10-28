@@ -428,19 +428,36 @@ void scr_hud(const ui_hud *h)
 		77, "fps", C_DIM, 0);
 
 	snprintf(buf, sizeof buf, "%.1f ms/frame", h->frame_ms);
-	ui_text_right(&ui_font_body, UI_W - MARGIN - 12, 62, buf,
+	ui_text_right(&ui_font_body, UI_W - MARGIN - 12, 55, buf,
 		      h->fps >= 55.0f ? C_GOOD : C_BAD);
 
-	/* The emulator is either fast enough or it is not: say so. */
-	ui_text_right(&ui_font_small, UI_W - MARGIN - 12, 80,
-		      h->fps >= 55.0f ? "full speed" : "below full speed",
-		      h->fps >= 55.0f ? C_DIM : C_BAD);
+	snprintf(buf, sizeof buf, "worst %.1f ms", h->worst_ms);
+	ui_text_right(&ui_font_small, UI_W - MARGIN - 12, 71, buf, C_DIM);
 
-	/* Frame budget: how much of a 16.7 ms frame each part takes. */
-	float core = h->core_ms / 16.74f;
-	float blit = h->blit_ms / 16.74f;
+	/* Say what is limiting it, or that nothing is: an fps number on its own
+	 * tells the player nothing they can act on. */
+	const bool full = (h->fps >= 55.0f);
+	if (h->limit != NULL)
+		ui_text_right(&ui_font_small, UI_W - MARGIN - 12, 83, h->limit,
+			      full ? C_DIM : C_BAD);
+
+	/* Frame budget: how much of a 16.7 ms frame each part takes. Anything
+	 * the three known parts do not account for shows up in the tail, which
+	 * is how a service call or a syscall in the loop becomes visible. */
+	const float core = h->core_ms / 16.74f;
+	const float blit = h->blit_ms / 16.74f;
+	const float other = h->other_ms / 16.74f;
 
 	draw_bar(MARGIN + 12, 98, CONTENT_W - 24, 8, core, blit);
+
+	if (other > 0.0f)
+	{
+		const int w = (int)(other * (float)(CONTENT_W - 24));
+		if (w > 3)
+			ui_fill(MARGIN + 12 + CONTENT_W - 24 - w, 98,
+				w < CONTENT_W - 24 ? w : CONTENT_W - 24, 8,
+				C_BAD);
+	}
 
 	/* Legend for the bar, in the same order the segments are stacked. */
 	int lx = MARGIN + 12;
@@ -451,7 +468,8 @@ void scr_hud(const ui_hud *h)
 	ui_rrect(lx, 110, 7, 7, 2, C_ACCENT2);
 	lx += 11;
 	ui_text(&ui_font_small, lx, 107, "blit", C_DIM, 0);
-	ui_text_right(&ui_font_small, UI_W - MARGIN - 12, 107, "wait", C_DIM);
+	ui_text_right(&ui_font_small, UI_W - MARGIN - 12, 107,
+		      h->other_ms > 0.5f ? "other / wait" : "wait", C_DIM);
 
 	/* Two columns of label/value pairs. */
 	for (int i = 0; i < h->n_stats && i < UI_HUD_STATS; i++)

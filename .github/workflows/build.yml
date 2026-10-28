@@ -57,6 +57,12 @@ jobs:
           tools/host/gbabe-host test/dmg-acid2.gb 300 build/acid2.ppm 0
           test -s build/acid2.ppm
 
+      # Not a performance gate (a shared runner is far too noisy for that) - it
+      # prints the per-frame split next to every build, so a regression that
+      # doubles the blit or the core shows up in the log as a number.
+      - name: Per-frame cost (host benchmark, informational)
+        run: make -C tools/host bench ROM=test/dmg-acid2.gb FRAMES=200
+
       - name: Version numbers agree
         run: sh .github/scripts/check-version.sh
 

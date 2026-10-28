@@ -186,24 +186,43 @@ If a game *is* too slow, the bottom screen tells you why — it redraws a
 per-frame breakdown once a second:
 
 ```
-59.7 fps            16.8 ms/frame          <- fps, and the wall time per frame
-core #########.....  blit  wait            <- how the 16.7 ms budget is spent
+59.7 fps            16.8 ms/frame   green    <- fps / wall time per frame
+                    worst 17.4 ms            <- the slowest frame that second
+core ############...  blit  wait   full speed <- how the 16.7 ms budget went
 core 11.4   blit 1.9
 wait  3.5   frame 16.8
 ```
+
+The line under the bar names the bottleneck, so the numbers do not have to be
+interpreted: **CPU-bound (interpreter)**, **draw-bound (blit)**,
+**overhead (see other)**, or **full speed**. The *other* colour in the bar is
+whatever the three measured parts do not account for — service calls, syscalls,
+the loop itself.
 
 * a large **core** figure is the interpreter: nothing else is competing for
   that time, so it needs a faster core (see below) or frame skip;
 * a large **blit** figure means the scaled copy is the cost, which scale mode
   changes (the pixel-perfect 160x144 mode is the cheapest to fill);
 * a large **wait** figure is normal — it is the time the console spends idle
-  waiting for the next Game Boy frame.
+  waiting for the next Game Boy frame;
+* a large **other** figure is the port's own fault, not the console's: something
+  in the loop is waiting on a service or a syscall. That is worth reporting,
+  because it is fixable;
+* a large **frame** with a much smaller **core + blit + wait** is the same
+  story, seen from the other side.
+
+The same split can be measured on the PC, which is how flag and setting changes
+are compared without the console:
+
+```sh
+make -C tools/host bench ROM=game.gb     # core / blit / core+APU per frame
+```
 
 Known speed levers, in order of effect:
 
 | lever | effect |
 |---|---|
-| `-O3 -flto` (the default, `OPT=` in the `Makefile`) | ~45% faster emulation loop than `-O2` |
+| `-O3 -flto` (the default, `OPT=` in the `Makefile`) | a couple of percent over `-O2` on the host; kept because a header-only giant-switch core should benefit more from LTO on ARM |
 | X (turbo) | runs two emulated frames per presented one, at the cost of dropped frames |
 | frame skip in the menu | halves the blit cost, keeps emulation speed |
 | sound off in the menu | removes the APU mixing and the CSND hand-off |

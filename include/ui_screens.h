@@ -85,9 +85,14 @@ typedef struct
 	const char *sub;
 	float fps;
 	float frame_ms;
-	float core_ms; /* core + blit, used for the frame-time bar */
-	float blit_ms;
-	float wait_ms;
+	float worst_ms; /* slowest frame in the last window */
+	float core_ms;  /* emulation: CPU + PPU + APU */
+	float blit_ms;  /* scaling + cache flush + present */
+	float wait_ms;  /* idle, waiting for the next Game Boy frame */
+	float other_ms; /* everything else in the loop: syscalls, services */
+	/* What is keeping it from full speed, in words ("core", "blit",
+	 * "overhead", "nothing"). */
+	const char *limit;
 	const char *stat_label[UI_HUD_STATS];
 	const char *stat_value[UI_HUD_STATS];
 	int n_stats;

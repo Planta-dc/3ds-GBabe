@@ -10,6 +10,7 @@ build/
 
 # Host harness
 tools/host/gbabe-host
+tools/host/gbabe-bench
 tools/host/*.ppm
 tools/host/*.png
 

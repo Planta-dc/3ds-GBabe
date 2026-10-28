@@ -3,6 +3,7 @@
 #   make            build ./gbabe-host
 #   make check      compile main.c as well (type check)
 #   make run ROM=game.gb FRAMES=300 OUT=shot.ppm
+#   make bench ROM=game.gb     per-frame cost of the core and the blit
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -39,7 +40,14 @@ check:
 run: $(BIN)
 	./$(BIN) $(ROM) $(or $(FRAMES),300) $(or $(OUT),screen.ppm)
 
-clean:
-	rm -f $(BIN) *.ppm
+# Same sources, but with its own main().
+BENCH_SRC := $(filter-out harness.c,$(SRC)) bench.c
 
-.PHONY: all check run clean
+bench: $(BENCH_SRC) bench.c
+	$(CC) $(CFLAGS) $(DEFS) $(INCLUDE) -o gbabe-bench $(BENCH_SRC) -lm
+	./gbabe-bench $(ROM) $(or $(FRAMES),600)
+
+clean:
+	rm -f $(BIN) gbabe-bench *.ppm
+
+.PHONY: all check run bench clean

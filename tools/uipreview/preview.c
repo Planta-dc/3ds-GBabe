@@ -111,6 +111,34 @@ static void show_menu(const char *dir)
 	emit(dir, "menu-game");
 }
 
+/* The stat table is built from the same numbers as the headline, so the
+ * preview cannot show a HUD that disagrees with itself. */
+static void fill_stats(ui_hud *h, const char *sound, const char *palette)
+{
+	static char core[16], blit[16], wait[16], frame[16];
+	static const char *labels[] = { "core", "blit", "wait", "frame",
+					"sound", "palette" };
+
+	snprintf(core, sizeof core, "%.1f ms", h->core_ms);
+	snprintf(blit, sizeof blit, "%.1f ms", h->blit_ms);
+	snprintf(wait, sizeof wait, "%.1f ms", h->wait_ms);
+	snprintf(frame, sizeof frame, "%.1f ms", h->frame_ms);
+
+	h->stat_label[0] = labels[0];
+	h->stat_value[0] = core;
+	h->stat_label[1] = labels[1];
+	h->stat_value[1] = blit;
+	h->stat_label[2] = labels[2];
+	h->stat_value[2] = wait;
+	h->stat_label[3] = labels[3];
+	h->stat_value[3] = frame;
+	h->stat_label[4] = labels[4];
+	h->stat_value[4] = sound;
+	h->stat_label[5] = labels[5];
+	h->stat_value[5] = palette;
+	h->n_stats = 6;
+}
+
 static void show_hud(const char *dir)
 {
 	ui_hud h = {
@@ -118,21 +146,43 @@ static void show_hud(const char *dir)
 		.sub = "CGB   2 Mbit   MBC5",
 		.fps = 59.7f,
 		.frame_ms = 16.8f,
+		.worst_ms = 17.4f,
 		.core_ms = 11.4f,
 		.blit_ms = 1.9f,
-		.wait_ms = 3.5f,
-		.stat_label = { "core", "blit", "wait", "frame", "sound", "palette" },
-		.stat_value = { "11.4 ms", "1.9 ms", "3.5 ms", "16.8 ms", "42 ms",
-				"green" },
-		.n_stats = 6,
+		.wait_ms = 3.1f,
+		.other_ms = 0.4f,
+		.limit = "full speed",
 	};
+	fill_stats(&h, "42 ms", "green");
 	scr_hud(&h);
 	emit(dir, "hud");
 
-	h.fps = 21.3f;
-	h.frame_ms = 46.9f;
+	/* The case that matters on an Old 3DS: the interpreter cannot keep up. */
+	h.fps = 43.1f;
+	h.frame_ms = 23.2f;
+	h.worst_ms = 31.8f;
+	h.core_ms = 19.6f;
+	h.blit_ms = 1.7f;
+	h.wait_ms = 0.4f;
+	h.other_ms = 1.5f;
+	h.limit = "CPU-bound (interpreter)";
+	fill_stats(&h, "18 ms", "green");
 	scr_hud(&h);
 	emit(dir, "hud-slow");
+
+	/* And the case where the loop itself is the problem, which the old
+	 * readout hid: core and blit are fine but the frames are still late. */
+	h.fps = 51.0f;
+	h.frame_ms = 19.6f;
+	h.worst_ms = 28.2f;
+	h.core_ms = 9.1f;
+	h.blit_ms = 1.2f;
+	h.wait_ms = 0.2f;
+	h.other_ms = 9.1f;
+	h.limit = "overhead (see other)";
+	fill_stats(&h, "off", "auto");
+	scr_hud(&h);
+	emit(dir, "hud-overhead");
 }
 
 static void show_message(const char *dir)

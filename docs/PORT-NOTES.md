@@ -144,9 +144,11 @@ throughput, which is the open question on real hardware (see §4).
    means guessing. What the host harness says, and therefore what the code is
    shaped around:
 
-   * emulating a DMG frame costs ~0.06 ms on a desktop x86 (17k fps), so the
-     interpreter is not what is slow; an Old 3DS should be one to two orders of
-     magnitude slower and still clear 60 Hz comfortably;
+   * emulating a DMG frame costs ~0.06-0.10 ms on a desktop x86 (10-16k fps),
+     so the interpreter is not what is slow on a PC; an Old 3DS is one to two
+     orders of magnitude slower, which is the whole question. `tools/host bench`
+     prints the same split as the HUD so a change can be compared without the
+     console, but it cannot answer what the ARM11 does;
    * the scaled copy into the 3DS's column-major framebuffer is *as expensive
      as the whole emulator core* on the same machine (~0.03 ms, a third to a
      half of a presented frame) because every store lands 480 bytes from the
@@ -154,12 +156,27 @@ throughput, which is the open question on real hardware (see §4).
      both came out slower than the simple version on the only machine this port
      could be measured on, so it stays simple until the HUD numbers from real
      hardware say otherwise;
-   * `-O3 -flto` is worth ~45% over `-O2` end to end on that harness — the core
-     is one enormous switch, so link-time inlining of the front-end hooks is
-     the win. It is the default now (`make OPT=-O2` to go back);
+   * compiler flags are *not* the lever this was first believed to be: with a
+     real ROM, `-O2`, `-O3` and `-O3 -flto` come out within 2% of each other
+     on the host (`make -C tools/host bench ROM=...`). An earlier note here
+     claimed 45%; that was one unrepresentative measurement and is withdrawn.
+     LTO stays on because the core is one enormous switch in a header-only
+     library and the win should be larger where the inliner is weaker, but on
+     the evidence available it is a bet, not a measurement;
    * the pacing bug that cost the most was a unit error: `svcSleepThread()`
      takes nanoseconds and was being handed ARM11 ticks, i.e. 3.7x too short, so
-     the loop spun through the whole idle period instead of sleeping.
+     the loop spun through the whole idle period instead of sleeping;
+   * the readout used to hide overhead: core + blit + wait did not have to add
+     up to the frame time, so anything else in the loop (a blocking service
+     call, a syscall) simply made "fps" lower with no explanation. The HUD now
+     reports the unaccounted remainder as *other*, shows the worst frame in the
+     last second (a smooth average hides a stutter), and names the bottleneck
+     in words: "core", "draw", "overhead" or "full speed".
+   * one such overhead was real: the CSND pump called `CSND_UpdateInfo(true)`
+     and `csndIsPlaying()` on **every frame** - 120 service calls a second, each
+     of which waits for the command queue - to decide whether a 31 ms audio
+     block had finished. It now tracks the block's deadline and asks once per
+     block, and the FIFO is copied with `memcpy` instead of a sample at a time.
 
 4. **Audio latency.** CSND blocks of 1024 samples ≈ 31 ms; the FIFO adds up to
    ~100 ms of slack. Tunable, but until this runs on hardware the exact numbers

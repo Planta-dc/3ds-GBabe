@@ -46,11 +46,12 @@ static int       entry_count;
 static char      cur_dir[512];
 static bool      last_scan_ok;
 
-/* HUD statistics. */
+/* HUD statistics, accumulated over a one second window. */
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_wait, hud_sum_frame;
+static u64      hud_worst; /* slowest single frame in the window */
 
 /* ------------------------------------------------------------------------- */
 /* Input                                                                     */
@@ -691,6 +692,21 @@ void ui_message(const char *title, const char *line1, const char *line2)
 /* Status readout                                                            */
 /* ------------------------------------------------------------------------- */
 
+/* One sentence about what is costing the frames, from the profile itself. The
+ * thresholds are deliberately generous: a frame has 16.7 ms and the Game Boy
+ * runs at 59.7275 Hz, so ~15.5 ms of work is still full speed with margin. */
+static const char *limit_text(float fps, float core, float blit, float other)
+{
+	if (fps >= 55.0f)
+		return "full speed";
+
+	if (core >= blit && core >= other)
+		return "CPU-bound (interpreter)";
+	if (blit >= other)
+		return "draw-bound (blit)";
+	return "overhead (see other)";
+}
+
 void ui_draw_hud(void)
 {
 	const emu_info *info = emu_get_info();
@@ -700,6 +716,9 @@ void ui_draw_hud(void)
 	const char *labels[] = { "core", "blit", "wait", "frame", "sound",
 				 "palette" };
 	const char *values[6];
+
+	const float other = g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
+					       g_perf.wait_ms);
 
 	snprintf(fps, sizeof fps, "%.1f", g_perf.fps);
 	snprintf(frame, sizeof frame, "%.1f ms/frame", g_perf.frame_ms);
@@ -724,6 +743,10 @@ void ui_draw_hud(void)
 		.sub = sub,
 		.fps = g_perf.fps,
 		.frame_ms = g_perf.frame_ms,
+		.worst_ms = g_perf.worst_ms,
+		.other_ms = (other > 0.0f) ? other : 0.0f,
+		.limit = limit_text(g_perf.fps, g_perf.core_ms, g_perf.blit_ms,
+				    other),
 		.core_ms = g_perf.core_ms,
 		.blit_ms = g_perf.blit_ms,
 		.wait_ms = g_perf.wait_ms,
@@ -746,6 +769,8 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
 	hud_sum_blit += blit_ticks;
 	hud_sum_wait += wait_ticks;
 	hud_sum_frame += frame_ticks;
+	if (frame_ticks > hud_worst)
+		hud_worst = frame_ticks;
 
 	u64 now = svcGetSystemTick();
 	if (hud_last_tick == 0)
@@ -768,9 +793,11 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
 	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
 	g_perf.wait_ms = (float)((double)hud_sum_wait * ticks_to_ms / n);
 	g_perf.frame_ms = (float)((double)hud_sum_frame * ticks_to_ms / n);
+	g_perf.worst_ms = (float)((double)hud_worst * ticks_to_ms);
 
 	hud_frames = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_wait = hud_sum_frame = 0;
+	hud_worst = 0;
 	hud_last_tick = now;
 
 	/* The status readout is on the bottom screen, so it costs a redraw once

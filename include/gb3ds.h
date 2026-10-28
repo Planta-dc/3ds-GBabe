@@ -48,6 +48,7 @@ typedef struct
 {
 	float fps;      /* presented frames per second                          */
 	float frame_ms; /* wall time per presented frame (all of it)            */
+	float worst_ms; /* the slowest single frame in the last second           */
 	float core_ms;  /* emulation: CPU + PPU + APU                           */
 	float blit_ms;  /* scaled copy into the framebuffer + present           */
 	float wait_ms;  /* paced off waiting for the next Game Boy frame        */

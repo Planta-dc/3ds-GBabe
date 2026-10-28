@@ -33,8 +33,10 @@
 
 /* CSND wants the sample rate as an integer and resamples on its own. */
 #define OUT_RATE        AUDIO_SAMPLE_RATE /* 32768 Hz */
-#define FIFO_SAMPLES    (AUDIO_SAMPLES * 6) /* ~100 ms of slack */
-#define BLOCK_SAMPLES   1024             /* per hardware block, stereo */
+/* Power of two so the ring buffer wraps with a mask and can be copied in (at
+ * most) two runs instead of a sample at a time. ~125 ms of slack. */
+#define FIFO_SAMPLES    4096u
+#define BLOCK_SAMPLES   1024u            /* per hardware block, stereo */
 #define BLOCK_BYTES     (BLOCK_SAMPLES * 2 * sizeof(s16))
 #define CHANNEL         8                /* a CSND channel we own */
 
@@ -48,6 +50,17 @@ static int block_current;
 static bool csnd_ok;
 static bool enabled = true;
 
+/* When the last block was handed over, and therefore when it is worth asking
+ * the sound service again. */
+static u64 block_started;
+static bool block_pending;
+
+/* A 1024-frame block is 31 ms of audio, in ARM11 ticks. */
+#define BLOCK_TICKS ((u64)((double)BLOCK_SAMPLES * SYSCLOCK_ARM11 / OUT_RATE))
+/* If the channel still reports "playing" after its block must have run out,
+ * retry this much later rather than on the very next frame. */
+#define RETRY_TICKS (SYSCLOCK_ARM11 / 200) /* 5 ms */
+
 /* ------------------------------------------------------------------------- */
 
 static void fifo_reset(void)
@@ -57,47 +70,76 @@ static void fifo_reset(void)
 
 static unsigned fifo_used(void)
 {
-	return (fifo_head - fifo_tail + FIFO_SAMPLES) % FIFO_SAMPLES;
+	return (fifo_head - fifo_tail) & (FIFO_SAMPLES - 1);
 }
 
 static void fifo_push(const s16 *src, unsigned frames)
 {
-	unsigned room = FIFO_SAMPLES - 1 - fifo_used();
+	const unsigned room = FIFO_SAMPLES - 1 - fifo_used();
 	if (frames > room)
 		frames = room; /* drop rather than overwrite the backlog */
 
-	while (frames--)
-	{
-		fifo[fifo_head * 2 + 0] = *src++;
-		fifo[fifo_head * 2 + 1] = *src++;
-		fifo_head = (fifo_head + 1) % FIFO_SAMPLES;
-	}
+	/* Two memcpy()s at most, because the ring is a power of two. */
+	unsigned first = FIFO_SAMPLES - fifo_head;
+	if (first > frames)
+		first = frames;
+
+	memcpy(&fifo[fifo_head * 2], src, (size_t)first * 2 * sizeof(s16));
+	if (frames > first)
+		memcpy(fifo, src + (size_t)first * 2,
+		       (size_t)(frames - first) * 2 * sizeof(s16));
+
+	fifo_head = (fifo_head + frames) & (FIFO_SAMPLES - 1);
 }
 
 static unsigned fifo_pop(s16 *dst, unsigned frames)
 {
-	unsigned n = 0;
+	unsigned n = fifo_used();
+	if (frames < n)
+		n = frames;
 
-	while (n < frames && fifo_tail != fifo_head)
-	{
-		*dst++ = fifo[fifo_tail * 2 + 0];
-		*dst++ = fifo[fifo_tail * 2 + 1];
-		fifo_tail = (fifo_tail + 1) % FIFO_SAMPLES;
-		n++;
-	}
+	if (n == 0)
+		return 0;
+
+	unsigned first = FIFO_SAMPLES - fifo_tail;
+	if (first > n)
+		first = n;
+
+	memcpy(dst, &fifo[fifo_tail * 2], (size_t)first * 2 * sizeof(s16));
+	if (n > first)
+		memcpy(dst + (size_t)first * 2, fifo,
+		       (size_t)(n - first) * 2 * sizeof(s16));
+
+	fifo_tail = (fifo_tail + n) & (FIFO_SAMPLES - 1);
 	return n;
 }
 
-/* Hand a full block to CSND, if the channel is free. */
+/* Hand a full block to CSND, if the channel is free.
+ *
+ * The interesting part is what this does *not* do: ask the service on every
+ * frame. CSND_UpdateInfo(true) blocks until the command queue has been
+ * processed, and at 60 frames a second that is 120 service calls per second
+ * sitting in the emulation loop, for a block that lasts 31 ms. Instead the
+ * deadline of the block already queued is tracked, and the service is asked
+ * once per block. */
 static void pump(void)
 {
 	if (!csnd_ok || !enabled)
 		return;
 
+	const u64 now = svcGetSystemTick();
+
+	if (block_pending && now - block_started < BLOCK_TICKS)
+		return; /* the block we queued cannot have finished yet */
+
 	u8 status = 0;
 	CSND_UpdateInfo(true);
 	if (R_SUCCEEDED(csndIsPlaying(CHANNEL, &status)) && status)
-		return; /* still playing the previous block */
+	{
+		/* Still busy: ask again in a few ms, not on the next frame. */
+		block_started = now - BLOCK_TICKS + RETRY_TICKS;
+		return;
+	}
 
 	if (fifo_used() < BLOCK_SAMPLES / 2)
 		return; /* not enough samples; wait for the next frame */
@@ -121,6 +163,8 @@ static void pump(void)
 		return;
 	}
 
+	block_started = now;
+	block_pending = true;
 	block_current ^= 1;
 }
 
@@ -147,6 +191,8 @@ bool audio_init(void)
 	memset(blocks[1], 0, BLOCK_BYTES);
 
 	block_current = 0;
+	block_pending = false;
+	block_started = 0;
 	fifo_reset();
 	minigb_apu_audio_init(&apu);
 
@@ -187,6 +233,7 @@ void audio_set_enabled(bool on)
 	{
 		CSND_SetPlayStateR(CHANNEL, 0);
 		csndExecCmds(true);
+		block_pending = false;
 		fifo_reset();
 	}
 }

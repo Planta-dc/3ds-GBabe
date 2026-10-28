@@ -53,10 +53,11 @@ BANNERTOOL  ?=  bannertool
 #---------------------------------------------------------------------------------
 ARCH    :=  -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-# -O3 -flto is worth ~45% over -O2 on the emulation loop: the core is one giant
-# switch inside a header-only library, so link-time inlining of the front-end
-# hooks into it is what costs the time. Override with `make OPT=-O2` if a
-# toolchain update ever miscompiles something.
+# -O3 -flto. Measured on the host build (`make -C tools/host bench`), the
+# difference from -O2 is only a couple of percent there; LTO is kept because the
+# core is one giant switch in a header-only library and the win should be bigger
+# where the compiler inlines worse (ARM11), but that part is unmeasured.
+# Override with `make OPT=-O2` if a toolchain update ever miscompiles something.
 OPT     ?=  -O3 -flto -DNDEBUG
 
 CFLAGS  :=  -g -Wall -Wextra $(OPT) -ffunction-sections -fdata-sections \
