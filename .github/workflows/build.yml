@@ -111,13 +111,29 @@ jobs:
         if: steps.plan.outputs.want_3dsx == 'true'
         run: make -j"$(nproc)"
 
-      - name: Install makerom and bannertool
+      - name: Build makerom and bannertool
         if: steps.plan.outputs.want_cia == 'true'
         run: bash .github/scripts/install-3ds-packaging-tools.sh
 
       - name: Build .cia
         if: steps.plan.outputs.want_cia == 'true'
-        run: make cia -j"$(nproc)"
+        run: |
+          set -o pipefail
+          make cia 2>&1 | tee cia-build.log
+
+      # GitHub Actions logs are not always reachable (and a failed step's log is
+      # often the only description of the problem), so mirror the tail of the
+      # packaging output into annotations, which the API does expose.
+      - name: Report .cia failure
+        if: failure() && steps.plan.outputs.want_cia == 'true'
+        run: |
+          [ -f cia-build.log ] || exit 0
+          echo "--- last 30 lines of the packaging output"
+          tail -n 30 cia-build.log
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            echo "::error::$line"
+          done < <(tail -n 15 cia-build.log)
 
       - name: List outputs
         run: ls -la *.3dsx *.smdh *.cia 2>/dev/null || true
