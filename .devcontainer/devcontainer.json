@@ -1,0 +1,23 @@
+{
+    "name": "GBabe - 3DS Homebrew",
+    "build": {
+        "dockerfile": "../docker/gbabe-devcontainer.Dockerfile",
+        "context": ".."
+    },
+    "remoteEnv": {
+        "DEVKITPRO": "/opt/devkitpro",
+        "DEVKITARM": "/opt/devkitpro/devkitARM",
+        "PATH": "${containerEnv:PATH}:/opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.makefile-tools"
+            ],
+            "settings": {
+                "C_Cpp.default.compilerPath": "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc"
+            }
+        }
+    }
+}

@@ -5,6 +5,11 @@
 
 #include <stdint.h>
 
+/* Included from C++ as well (the Gambatte backend is C++). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Build the RGB565 lookup tables. Call once at start-up. */
 void palette_init(void);
 
@@ -20,3 +25,7 @@ const char *palette_name(int index);
 /* "Auto" (index 0) follows the cartridge header hash, the same way the Game Boy
  * Color colourises monochrome games. */
 void palette_set_auto_hash(uint8_t hash);
+
+#ifdef __cplusplus
+}
+#endif

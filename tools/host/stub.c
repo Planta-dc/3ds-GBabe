@@ -5,6 +5,14 @@
  * gfxSwapBuffers() alternates them, so the harness exercises the exact pixel
  * path video.c uses on hardware (including the 90 degree rotation).
  *
+ * Double buffering is modelled the way libctru does it, because the difference
+ * matters: gfxGetFramebuffer() returns the *back* buffer (cur ^ isDoubleBuf) and
+ * gfxScreenSwapBuffers() flips the presented one. A screen that is swapped
+ * without being drawn therefore shows whatever the other buffer holds - which
+ * is how "the UI flickers, and only every other frame is right" bugs happen - so
+ * a test here can catch that. gfxSwapBuffers() swaps *both* screens, as on the
+ * real thing.
+ *
  * This file is NOT part of the 3DS build.
  */
 #include <3ds.h>
@@ -13,12 +21,15 @@
 #include <time.h>
 
 u16 g_host_fb[400 * 240];
+u16 g_host_bottom_fb[320 * 240];
 int g_host_frames;
 int g_host_max_frames = 300;
 bool g_host_quit;
 
-static u16 fb_backing[2][240 * 400];
-static int fb_index;
+static u16 fb_backing[2][240 * 400]; /* top, 240x400 in panel layout */
+static u16 fb_bottom[2][240 * 320];  /* bottom, ditto */
+static int fb_cur[2];                /* presented buffer, per screen */
+static int fb_double[2] = { 1, 1 };  /* gfxInitDefault() enables it */
 static int fb_top_format = GSP_BGR8_OES;
 
 u64 svcGetSystemTick(void)
@@ -60,7 +71,30 @@ bool aptMainLoop(void)
 Result APT_SetAppCpuTimeLimit(u32 percent) { (void)percent; return 0; }
 Result APT_CheckNew3DS(bool *out) { *out = false; return 0; }
 
-void gfxInitDefault(void) { fb_index = 0; }
+void g_host_poison_framebuffers(u16 value)
+{
+	for (int b = 0; b < 2; b++)
+	{
+		for (int i = 0; i < 240 * 400; i++)
+			fb_backing[b][i] = value;
+		for (int i = 0; i < 240 * 320; i++)
+			fb_bottom[b][i] = value;
+	}
+
+	/* The stand-in presents immediately, unlike a real swap chain. */
+	for (int i = 0; i < 400 * 240; i++)
+		g_host_fb[i] = value;
+	for (int i = 0; i < 320 * 240; i++)
+		g_host_bottom_fb[i] = value;
+}
+
+void gfxInitDefault(void)
+{
+	/* Like libctru: both screens enabled for double buffering, buffer 0
+	 * presented, and the other buffer left as it was (uninitialised). */
+	fb_double[0] = fb_double[1] = 1;
+	fb_cur[0] = fb_cur[1] = 0;
+}
 void gfxExit(void) {}
 void gfxSet3D(bool enable) { (void)enable; }
 void gfxSetScreenFormat(gfxScreen_t screen, GSPGPU_FramebufferFormat format)
@@ -71,8 +105,7 @@ void gfxSetScreenFormat(gfxScreen_t screen, GSPGPU_FramebufferFormat format)
 }
 void gfxSetDoubleBuffering(gfxScreen_t screen, bool enable)
 {
-	(void)screen;
-	(void)enable;
+	fb_double[(int)screen] = enable ? 1 : 0;
 }
 
 u8 *gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height)
@@ -82,21 +115,56 @@ u8 *gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *hei
 		*width = 240;
 	if (height != NULL)
 		*height = (screen == GFX_TOP) ? 400 : 320;
-	return (u8 *)fb_backing[fb_index];
+	/* The back buffer: what you draw into before swapping. */
+	const int id = fb_cur[(int)screen] ^ fb_double[(int)screen];
+	return (screen == GFX_TOP) ? (u8 *)fb_backing[id]
+				   : (u8 *)fb_bottom[id];
+}
+
+Result GSPGPU_FlushDataCache(const void *adr, u32 size)
+{
+	(void)adr;
+	(void)size;
+	return 0;
+}
+
+void gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo)
+{
+	(void)hasStereo;
+
+	/* Toggle first: the buffer that becomes current is the one presented,
+	 * which is what the caller just drew into. */
+	fb_cur[(int)scr] ^= fb_double[(int)scr];
+
+	/* Undo the panel rotation so the host sees a landscape image: the panel
+	 * is 240 wide in memory, so landscape (x, y) sits at
+	 * x * 240 + (239 - y) - the same constant for both screens, because both
+	 * panels are 240 pixels on their short side. */
+	if (scr == GFX_TOP)
+	{
+		const u16 *src = fb_backing[fb_cur[0]];
+		for (int y = 0; y < 240; y++)
+			for (int x = 0; x < 400; x++)
+				g_host_fb[y * 400 + x] =
+					src[x * 240 + (239 - y)];
+		return;
+	}
+
+	const u16 *src = fb_bottom[fb_cur[1]];
+	for (int y = 0; y < 240; y++)
+		for (int x = 0; x < 320; x++)
+			g_host_bottom_fb[y * 320 + x] = src[x * 240 + (239 - y)];
 }
 
 void gfxFlushBuffers(void) {}
 
 void gfxSwapBuffers(void)
 {
-	/* Copy what was presented so the harness can dump the last frame.  On the
-	 * 3DS the LCD scanout already produces landscape pixels; here we undo the
-	 * 90 degree storage rotation to get a normal 400x240 image. */
-	const u16 *src = fb_backing[fb_index];
-	for (int y = 0; y < 240; y++)
-		for (int x = 0; x < 400; x++)
-			g_host_fb[y * 400 + x] = src[x * 240 + (239 - y)];
-	fb_index ^= 1;
+	/* libctru's gfxSwapBuffers() swaps *both* screens - which is why video.c
+	 * calls gfxScreenSwapBuffers(GFX_TOP, true) alone, and why this stand-in
+	 * does the same thing rather than only the top. */
+	gfxScreenSwapBuffers(GFX_TOP, true);
+	gfxScreenSwapBuffers(GFX_BOTTOM, true);
 }
 
 void gspWaitForVBlank(void) {}

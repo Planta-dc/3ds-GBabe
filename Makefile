@@ -15,7 +15,35 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
-TARGET      :=  gbabe
+#---------------------------------------------------------------------------------
+# Which emulation core to build.
+#
+#   CORE=gambatte   (default) Gambatte 0.5.0. On the PC it needs 1.6x-3.4x less
+#                   time per frame than Walnut-CGB, which is the whole reason
+#                   this port exists: 268 MHz is not much.
+#   CORE=walnut     Walnut-CGB. Kept so both cores can be put on the same
+#                   console, with the same ROM, and compared from the debug
+#                   log's "core=" figure instead of from an opinion.
+#
+# Both backends implement include/emu.h; nothing else changes.
+#---------------------------------------------------------------------------------
+CORE        ?=  gambatte
+
+ifeq ($(CORE),gambatte)
+# TOPDIR, not CURDIR: this Makefile is re-invoked from build/, where CURDIR is
+# the build directory.
+CORE_DEFS   :=  -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 -DHAVE_STDINT_H \
+                -I$(TOPDIR)/third_party/gambatte/libgambatte/include
+CORE_LIB    :=  $(TOPDIR)/third_party/gambatte/libgambatte.a
+CORE_STRAY  :=  emu.c
+else ifeq ($(CORE),walnut)
+CORE_DEFS   :=  -DGBABE_CORE_WALNUT
+CORE_LIB    :=
+CORE_STRAY  :=  emu_gambatte.cpp
+else
+$(error CORE must be gambatte or walnut, not '$(CORE)')
+endif
+
 BUILD       :=  build
 SOURCES     :=  source third_party/minigb_apu
 DATA        :=  data
@@ -28,14 +56,30 @@ APP_DESCRIPTION := Game Boy / Game Boy Color
 APP_AUTHOR      := GBabe contributors
 
 #---------------------------------------------------------------------------------
+# Two installable builds must not share an id, or the second one replaces the
+# first instead of sitting next to it.
+#---------------------------------------------------------------------------------
+ifeq ($(CORE),walnut)
+TARGET      :=  gbabe-walnut
+APP_TITLE   :=  GBabe (Walnut)
+else
+TARGET      :=  gbabe
+endif
+
+#---------------------------------------------------------------------------------
 # packaging (CIA)
 #---------------------------------------------------------------------------------
 VERSION_MAJOR   :=  0
 VERSION_MINOR   :=  1
 VERSION_MICRO   :=  0
 
+ifeq ($(CORE),walnut)
+APP_PRODUCT_CODE :=  CTR-H-GBAW
+APP_UNIQUE_ID    :=  0xEABE2
+else
 APP_PRODUCT_CODE :=  CTR-H-GBABE
 APP_UNIQUE_ID    :=  0xEABE1
+endif
 
 ICON_PNG    :=  icon.png
 BANNER_PNG  :=  resources/banner.png
@@ -53,16 +97,31 @@ BANNERTOOL  ?=  bannertool
 #---------------------------------------------------------------------------------
 ARCH    :=  -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS  :=  -g -Wall -Wextra -O2 -ffunction-sections -fdata-sections \
+# -O3 -flto. Measured on the host build (`make -C tools/host bench`), the
+# difference from -O2 is only a couple of percent there; LTO is kept because the
+# core is one giant switch in a header-only library and the win should be bigger
+# where the compiler inlines worse (ARM11), but that part is unmeasured.
+# Override with `make OPT=-O2` if a toolchain update ever miscompiles something.
+OPT     ?=  -O3 -flto -DNDEBUG
+
+CFLAGS  :=  -g -Wall -Wextra $(OPT) -ffunction-sections -fdata-sections \
             -fno-strict-aliasing -fomit-frame-pointer \
             -std=gnu11 $(ARCH)
 
-CFLAGS  +=  $(INCLUDE) -D__3DS__ -DMINIGB_APU_AUDIO_FORMAT_S16SYS
+CFLAGS  +=  $(INCLUDE) -D__3DS__ -DMINIGB_APU_AUDIO_FORMAT_S16SYS $(CORE_DEFS)
+
+# The Gambatte backend is C++, and devkitARM's rules hand CFLAGS to g++ as well.
+# -std=gnu11 is not a C++ mode, so it is dropped here and the C++ standard is
+# set explicitly; the core is built without exceptions and RTTI, like its own
+# Makefile.libretro does it.
+CXXFLAGS :=  $(filter-out -std=gnu11,$(CFLAGS)) -std=gnu++11 \
+             -fno-exceptions -fno-rtti
 
 ASFLAGS :=  -g $(ARCH)
-LDFLAGS  =  -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# -flto has to be given to the link as well for the objects to be optimised.
+LDFLAGS  =  -specs=3dsx.specs -g $(ARCH) $(OPT) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  -lctru -lm
+LIBS    :=  $(CORE_LIB) -lctru -lm
 
 LIBDIRS :=  $(CTRULIB)
 
@@ -79,6 +138,10 @@ export DEPSDIR  :=  $(CURDIR)/$(BUILD)
 
 CFILES      :=  $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES    :=  $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+
+# Only one backend is compiled: the other one's symbols would be duplicated.
+CFILES      :=  $(filter-out $(CORE_STRAY),$(CFILES))
+CPPFILES    :=  $(filter-out $(CORE_STRAY),$(CPPFILES))
 SFILES      :=  $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 PICAFILES   :=  $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.v.pica)))
 SHLISTFILES :=  $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.shlist)))
@@ -109,10 +172,23 @@ ifeq ($(strip $(NO_SMDH)),)
 export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
 endif
 
-.PHONY: all clean cia artwork check-tools
+.PHONY: all clean distclean cia artwork check-tools core-lib
 
-all: $(BUILD)
+all: core-lib $(BUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+# The vendored core is its own small project with its own flags; building it
+# here means `make` alone still produces a working .3dsx from a clean tree.
+ifeq ($(CORE),gambatte)
+core-lib:
+	@$(MAKE) --no-print-directory -C $(TOPDIR)/third_party/gambatte \
+		CXX="$(if $(strip $(CXX)),$(CXX),arm-none-eabi-g++)" \
+		AR="$(if $(strip $(AR)),$(AR),arm-none-eabi-ar)" \
+		ARCH="$(ARCH)" OPT="$(OPT)"
+else
+core-lib:
+	@:
+endif
 
 $(BUILD):
 	@mkdir -p $@
@@ -156,9 +232,15 @@ check-tools:
 artwork:
 	@python3 tools/make-artwork.py
 
+# `clean` leaves the vendored core's objects alone: switching CORE back and
+# forth should not cost a full rebuild of 30 C++ files. `distclean` removes
+# those too.
 clean:
 	@echo clean ...
 	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf $(CIA_TARGET)
+
+distclean: clean
+	@$(MAKE) --no-print-directory -C $(TOPDIR)/third_party/gambatte clean
 
 else
 

@@ -1,5 +1,5 @@
 /**
- * Sound: the emulated APU (minigb_apu) feeds the 3DS CSND service.
+ * Sound: the emulated APU feeds the 3DS CSND service.
  *
  * Why CSND and not NDSP? NDSP on an Old 3DS needs the DSP firmware dumped to
  * sdmc:/3ds/dspfirm.cdc. CSND needs no such file, which matters a lot on the
@@ -14,6 +14,17 @@
  * the 3DS's 60 Hz vblank; when it runs empty we output silence rather than
  * blocking the emulator.
  *
+ * Which APU? Whichever core is built in:
+ *
+ *   GBABE_CORE_WALNUT   minigb_apu is driven by the Walnut-CGB hook functions
+ *                       at the bottom of this file (audio_read/audio_write and
+ *                       one audio_frame() per emulated frame);
+ *   GBABE_CORE_GAMBATTE Gambatte's own APU renders 35112 stereo samples per
+ *                       frame at 2097152 Hz and the backend decimates them to
+ *                       OUT_RATE before calling audio_push_frames().
+ *
+ * Everything above that - the FIFO and the CSND block pump - is shared.
+ *
  * MIT licensed.
  */
 #include "audio.h"
@@ -25,20 +36,29 @@
 
 #include <3ds/allocator/linear.h>
 
+#include "log.h"
+
+#if defined(GBABE_CORE_WALNUT)
 /* minigb_apu needs to know the sample format at compile time. */
 #ifndef MINIGB_APU_AUDIO_FORMAT_S16SYS
 #define MINIGB_APU_AUDIO_FORMAT_S16SYS
 #endif
 #include "minigb_apu.h"
+#endif
 
-/* CSND wants the sample rate as an integer and resamples on its own. */
-#define OUT_RATE        AUDIO_SAMPLE_RATE /* 32768 Hz */
-#define FIFO_SAMPLES    (AUDIO_SAMPLES * 6) /* ~100 ms of slack */
-#define BLOCK_SAMPLES   1024             /* per hardware block, stereo */
+/* CSND wants the sample rate as an integer and resamples on its own. Both
+ * cores deliver 32768 Hz, which is what the CSND channel below is opened at. */
+#define OUT_RATE        GBABE_AUDIO_RATE
+/* Power of two so the ring buffer wraps with a mask and can be copied in (at
+ * most) two runs instead of a sample at a time. ~125 ms of slack. */
+#define FIFO_SAMPLES    4096u
+#define BLOCK_SAMPLES   1024u            /* per hardware block, stereo */
 #define BLOCK_BYTES     (BLOCK_SAMPLES * 2 * sizeof(s16))
 #define CHANNEL         8                /* a CSND channel we own */
 
+#if defined(GBABE_CORE_WALNUT)
 static struct minigb_apu_ctx apu;
+#endif
 
 static s16 *fifo;          /* ring buffer, FIFO_SAMPLES stereo frames */
 static unsigned fifo_head, fifo_tail;
@@ -47,6 +67,17 @@ static s16 *blocks[2];     /* linear memory, one block each */
 static int block_current;
 static bool csnd_ok;
 static bool enabled = true;
+
+/* When the last block was handed over, and therefore when it is worth asking
+ * the sound service again. */
+static u64 block_started;
+static bool block_pending;
+
+/* A 1024-frame block is 31 ms of audio, in ARM11 ticks. */
+#define BLOCK_TICKS ((u64)((double)BLOCK_SAMPLES * SYSCLOCK_ARM11 / OUT_RATE))
+/* If the channel still reports "playing" after its block must have run out,
+ * retry this much later rather than on the very next frame. */
+#define RETRY_TICKS (SYSCLOCK_ARM11 / 200) /* 5 ms */
 
 /* ------------------------------------------------------------------------- */
 
@@ -57,47 +88,76 @@ static void fifo_reset(void)
 
 static unsigned fifo_used(void)
 {
-	return (fifo_head - fifo_tail + FIFO_SAMPLES) % FIFO_SAMPLES;
+	return (fifo_head - fifo_tail) & (FIFO_SAMPLES - 1);
 }
 
 static void fifo_push(const s16 *src, unsigned frames)
 {
-	unsigned room = FIFO_SAMPLES - 1 - fifo_used();
+	const unsigned room = FIFO_SAMPLES - 1 - fifo_used();
 	if (frames > room)
 		frames = room; /* drop rather than overwrite the backlog */
 
-	while (frames--)
-	{
-		fifo[fifo_head * 2 + 0] = *src++;
-		fifo[fifo_head * 2 + 1] = *src++;
-		fifo_head = (fifo_head + 1) % FIFO_SAMPLES;
-	}
+	/* Two memcpy()s at most, because the ring is a power of two. */
+	unsigned first = FIFO_SAMPLES - fifo_head;
+	if (first > frames)
+		first = frames;
+
+	memcpy(&fifo[fifo_head * 2], src, (size_t)first * 2 * sizeof(s16));
+	if (frames > first)
+		memcpy(fifo, src + (size_t)first * 2,
+		       (size_t)(frames - first) * 2 * sizeof(s16));
+
+	fifo_head = (fifo_head + frames) & (FIFO_SAMPLES - 1);
 }
 
 static unsigned fifo_pop(s16 *dst, unsigned frames)
 {
-	unsigned n = 0;
+	unsigned n = fifo_used();
+	if (frames < n)
+		n = frames;
 
-	while (n < frames && fifo_tail != fifo_head)
-	{
-		*dst++ = fifo[fifo_tail * 2 + 0];
-		*dst++ = fifo[fifo_tail * 2 + 1];
-		fifo_tail = (fifo_tail + 1) % FIFO_SAMPLES;
-		n++;
-	}
+	if (n == 0)
+		return 0;
+
+	unsigned first = FIFO_SAMPLES - fifo_tail;
+	if (first > n)
+		first = n;
+
+	memcpy(dst, &fifo[fifo_tail * 2], (size_t)first * 2 * sizeof(s16));
+	if (n > first)
+		memcpy(dst + (size_t)first * 2, fifo,
+		       (size_t)(n - first) * 2 * sizeof(s16));
+
+	fifo_tail = (fifo_tail + n) & (FIFO_SAMPLES - 1);
 	return n;
 }
 
-/* Hand a full block to CSND, if the channel is free. */
+/* Hand a full block to CSND, if the channel is free.
+ *
+ * The interesting part is what this does *not* do: ask the service on every
+ * frame. CSND_UpdateInfo(true) blocks until the command queue has been
+ * processed, and at 60 frames a second that is 120 service calls per second
+ * sitting in the emulation loop, for a block that lasts 31 ms. Instead the
+ * deadline of the block already queued is tracked, and the service is asked
+ * once per block. */
 static void pump(void)
 {
 	if (!csnd_ok || !enabled)
 		return;
 
+	const u64 now = svcGetSystemTick();
+
+	if (block_pending && now - block_started < BLOCK_TICKS)
+		return; /* the block we queued cannot have finished yet */
+
 	u8 status = 0;
 	CSND_UpdateInfo(true);
 	if (R_SUCCEEDED(csndIsPlaying(CHANNEL, &status)) && status)
-		return; /* still playing the previous block */
+	{
+		/* Still busy: ask again in a few ms, not on the next frame. */
+		block_started = now - BLOCK_TICKS + RETRY_TICKS;
+		return;
+	}
 
 	if (fifo_used() < BLOCK_SAMPLES / 2)
 		return; /* not enough samples; wait for the next frame */
@@ -117,10 +177,13 @@ static void pump(void)
 				  BLOCK_BYTES)))
 	{
 		/* Channel refused (another app owns it?): go quiet for good. */
+		log_line("audio: channel %d refused, running silent", CHANNEL);
 		csnd_ok = false;
 		return;
 	}
 
+	block_started = now;
+	block_pending = true;
 	block_current ^= 1;
 }
 
@@ -147,12 +210,19 @@ bool audio_init(void)
 	memset(blocks[1], 0, BLOCK_BYTES);
 
 	block_current = 0;
+	block_pending = false;
+	block_started = 0;
 	fifo_reset();
+#if defined(GBABE_CORE_WALNUT)
 	minigb_apu_audio_init(&apu);
+#endif
 
 	/* Sound is a nice-to-have: if CSND will not start, keep emulating. */
-	if (R_FAILED(csndInit()))
+	Result rc = csndInit();
+	if (R_FAILED(rc))
 	{
+		log_line("audio: csndInit failed (0x%08lX), running silent",
+			 (unsigned long)rc);
 		csnd_ok = false;
 		return false;
 	}
@@ -187,6 +257,7 @@ void audio_set_enabled(bool on)
 	{
 		CSND_SetPlayStateR(CHANNEL, 0);
 		csndExecCmds(true);
+		block_pending = false;
 		fifo_reset();
 	}
 }
@@ -201,6 +272,23 @@ unsigned audio_queue_ms(void)
 	return (fifo_used() * 1000u) / OUT_RATE;
 }
 
+/* Hand the APU's output to the hardware. `frames` stereo frames at OUT_RATE,
+ * interleaved int16. A core that already produces OUT_RATE calls this once per
+ * emulated frame; the FIFO absorbs the difference between 59.73 and 60 Hz. */
+void audio_push_frames(const int16_t *stereo, unsigned frames)
+{
+	if (!enabled || fifo == NULL || stereo == NULL || frames == 0)
+		return;
+
+	fifo_push((const s16 *)stereo, frames);
+	pump();
+}
+
+#if defined(GBABE_CORE_WALNUT)
+/* ------------------------------------------------------------------------- */
+/* Hooks required by the Walnut-CGB core                                     */
+/* ------------------------------------------------------------------------- */
+
 void audio_frame(void)
 {
 	if (!enabled || fifo == NULL)
@@ -214,10 +302,6 @@ void audio_frame(void)
 	pump();
 }
 
-/* ------------------------------------------------------------------------- */
-/* Hooks required by the Walnut-CGB core                                     */
-/* ------------------------------------------------------------------------- */
-
 uint8_t audio_read(uint16_t addr)
 {
 	return minigb_apu_audio_read(&apu, addr);
@@ -227,3 +311,4 @@ void audio_write(uint16_t addr, uint8_t val)
 {
 	minigb_apu_audio_write(&apu, addr, val);
 }
+#endif

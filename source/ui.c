@@ -1,10 +1,17 @@
 /**
- * Bottom screen UI: ROM browser, in-game menu and status readout.
+ * Bottom screen UI: the ROM browser, the pause menu and the status readout.
  *
- * libctru's text console gives 30 columns x 40 rows of 8x8 characters on the
- * bottom screen, so every layout below stays inside that box. The console owns
- * the bottom framebuffer (it turns double buffering off for that screen); the
- * emulator keeps the top screen to itself.
+ * Everything is drawn by our own rasteriser (ui_gfx.c) into a 320x240 canvas
+ * and pushed to the bottom screen with one ui_present(). That replaced a
+ * libctru text console, which was the reason the browser felt unusable on an
+ * Old 3DS: the console flushes the 300 KiB framebuffer on every newline, and
+ * every write re-parses escape sequences and redraws glyph by glyph. Drawing
+ * the screen ourselves costs a fraction of a millisecond and only happens when
+ * something actually changes.
+ *
+ * The directory is likewise only rescanned when it changes, and a name that
+ * already has a ROM extension is never stat()'d (each stat() is a round trip to
+ * the SD filesystem).
  *
  * MIT licensed.
  */
@@ -13,7 +20,6 @@
 #include <3ds.h>
 
 #include <dirent.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,12 +28,13 @@
 
 #include "audio.h"
 #include "emu.h"
+#include "log.h"
 #include "palette.h"
+#include "ui_gfx.h"
+#include "ui_screens.h"
 #include "video.h"
 
-#define UI_COLS     30
 #define MAX_ENTRIES 400
-#define LIST_ROWS   22
 
 typedef struct
 {
@@ -38,47 +45,46 @@ typedef struct
 static dir_entry entries[MAX_ENTRIES];
 static int       entry_count;
 static char      cur_dir[512];
+static bool      last_scan_ok;
 
-/* HUD statistics. */
+/* HUD statistics, accumulated over a one second window. */
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static float    hud_fps;
+static u64      hud_sum_core, hud_sum_blit, hud_sum_wait, hud_sum_frame;
+static u64      hud_worst; /* slowest single frame in the window */
 
 /* ------------------------------------------------------------------------- */
-/* Helpers                                                                   */
+/* Input                                                                     */
 /* ------------------------------------------------------------------------- */
 
-/* Row/column addressing, 1-based like the VT sequences the console supports. */
-static void at(int row, int col)
-{
-	printf("\x1b[%d;%dH", row, col);
-}
-
-static void line_at(int row, int col, const char *fmt, ...)
-	__attribute__((format(printf, 3, 4)));
-
-static void line_at(int row, int col, const char *fmt, ...)
-{
-	char buf[UI_COLS + 1];
-	va_list ap;
-
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof buf, fmt, ap);
-	va_end(ap);
-
-	at(row, col);
-	fputs(buf, stdout);
-}
-
-/* Blocking wait for a key press. Returns 0 when the user pressed HOME. */
-static u32 wait_key(void)
+/* Blocking wait for the next input event. Returns the keys just pressed, with
+ * KEY_TOUCH set (and `touch` filled in) for a tap; 0 means HOME was pressed and
+ * the application should quit.
+ *
+ * Buttons repeat while held (hidKeysDownRepeat), but the touch bit must not:
+ * libctru's repeat logic re-emits whatever is in the key state, and on the touch
+ * screen "held" means a finger resting on the glass. Left in, a finger held on a
+ * menu row would select it and then activate it 15 frames later, and a finger on
+ * a folder would walk into it over and over. So the press comes from
+ * hidKeysDown() (first frame only) and repeats are buttons only. */
+static u32 wait_input(touchPosition *touch)
 {
 	while (aptMainLoop())
 	{
 		hidScanInput();
-		u32 down = hidKeysDownRepeat();
-		if (down != 0)
-			return down;
+
+		const u32 down = hidKeysDown();
+		const u32 rep = hidKeysDownRepeat() & ~KEY_TOUCH;
+		const u32 k = down | rep;
+
+		if (k != 0)
+		{
+			if ((k & KEY_TOUCH) && touch != NULL)
+				hidTouchRead(touch);
+			return k;
+		}
+
 		gspWaitForVBlank();
 	}
 	return 0;
@@ -93,6 +99,10 @@ static bool has_rom_extension(const char *name)
 	       !strcasecmp(dot, ".sgb") || !strcasecmp(dot, ".dmg");
 }
 
+/* ------------------------------------------------------------------------- */
+/* Directory scanning                                                        */
+/* ------------------------------------------------------------------------- */
+
 static int compare_entries(const void *a, const void *b)
 {
 	const dir_entry *x = a, *y = b;
@@ -102,13 +112,20 @@ static int compare_entries(const void *a, const void *b)
 	return strcasecmp(x->name, y->name);
 }
 
-static void scan_dir(const char *path)
+static bool scan_dir(const char *path)
 {
 	entry_count = 0;
 
 	DIR *dir = opendir(path);
 	if (dir == NULL)
-		return;
+	{
+		last_scan_ok = false;
+		return false;
+	}
+	last_scan_ok = true;
+
+	const size_t path_len = strlen(path);
+	const bool trailing_slash = (path_len > 0 && path[path_len - 1] == '/');
 
 	struct dirent *de;
 	while ((de = readdir(dir)) != NULL && entry_count < MAX_ENTRIES)
@@ -116,15 +133,20 @@ static void scan_dir(const char *path)
 		if (de->d_name[0] == '.')
 			continue;
 
-		char full[768];
-		snprintf(full, sizeof full, "%s%s%s", path,
-			 (path[strlen(path) - 1] == '/') ? "" : "/", de->d_name);
+		/* A name with a ROM extension is a file: no need to ask the
+		 * filesystem, which costs an IPC round trip per entry. */
+		bool is_dir = false;
+		if (!has_rom_extension(de->d_name))
+		{
+			char full[768];
+			snprintf(full, sizeof full, "%s%s%s", path,
+				 trailing_slash ? "" : "/", de->d_name);
 
-		struct stat st;
-		bool is_dir = (stat(full, &st) == 0) && S_ISDIR(st.st_mode);
-
-		if (!is_dir && !has_rom_extension(de->d_name))
-			continue;
+			struct stat st;
+			is_dir = (stat(full, &st) == 0) && S_ISDIR(st.st_mode);
+			if (!is_dir)
+				continue; /* not a ROM and not a folder */
+		}
 
 		snprintf(entries[entry_count].name,
 			 sizeof entries[entry_count].name, "%s", de->d_name);
@@ -134,6 +156,7 @@ static void scan_dir(const char *path)
 	closedir(dir);
 
 	qsort(entries, entry_count, sizeof entries[0], compare_entries);
+	return true;
 }
 
 static void join_path(char *out, size_t out_len, const char *dir,
@@ -144,17 +167,35 @@ static void join_path(char *out, size_t out_len, const char *dir,
 		 (n > 0 && dir[n - 1] == '/') ? "" : "/", name);
 }
 
-/* Move up one directory, never above sdmc:/. */
-static void parent_dir(void)
+/* Move up one directory, never above sdmc:/. Returns false at the root. */
+static bool parent_dir(void)
 {
 	if (!strcmp(cur_dir, "sdmc:/"))
-		return;
+		return false;
 
 	char *slash = strrchr(cur_dir, '/');
 	if (slash != NULL && slash != cur_dir)
 		*slash = '\0';
 	if (strlen(cur_dir) < 6)
 		strcpy(cur_dir, "sdmc:/");
+	return true;
+}
+
+/* First visit: open the folder the last ROM came from, so a ROM that failed to
+ * load does not mean walking the whole card again. */
+static void dir_from_last_rom(void)
+{
+	if (g_cfg.rom_path[0] != '\0')
+	{
+		gbabe_copy(cur_dir, sizeof cur_dir, g_cfg.rom_path);
+		char *slash = strrchr(cur_dir, '/');
+		if (slash != NULL && slash != cur_dir)
+		{
+			*slash = '\0';
+			return;
+		}
+	}
+	strcpy(cur_dir, "sdmc:/");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -164,60 +205,114 @@ static void parent_dir(void)
 bool ui_browse_rom(char *out, size_t out_len)
 {
 	if (cur_dir[0] == '\0')
-		strcpy(cur_dir, "sdmc:/");
+		dir_from_last_rom();
 
 	int sel = 0;
-	int first = 0;
+	int top = 0;
+	bool rescan = true;
+	bool dirty = true;
 
 	for (;;)
 	{
-		scan_dir(cur_dir);
-
-		consoleClear();
-		line_at(1, 1, "GBabe " GBABE_VERSION " - pick a ROM");
-		line_at(2, 1, "%.29s", cur_dir);
-		line_at(3, 1, "-----------------------------");
-
-		if (entry_count == 0)
-			line_at(6, 1, "(no ROMs here)");
-
-		if (sel < first)
-			first = sel;
-		if (sel >= first + LIST_ROWS)
-			first = sel - LIST_ROWS + 1;
-
-		for (int i = 0; i < LIST_ROWS && first + i < entry_count; i++)
+		if (rescan)
 		{
-			int idx = first + i;
-			line_at(5 + i, 1, "%c%c%.26s",
-				(idx == sel) ? '>' : ' ',
-				entries[idx].is_dir ? '/' : ' ',
-				entries[idx].name);
+			scan_dir(cur_dir);
+			rescan = false;
+			dirty = true;
+
+			if (sel >= entry_count)
+				sel = (entry_count > 0) ? entry_count - 1 : 0;
 		}
 
-		line_at(29, 1, "A:open   B:back");
-		line_at(30, 1, "START:quit");
+		if (dirty)
+		{
+			if (sel < top)
+				top = sel;
+			if (sel >= top + UI_LIST_ROWS)
+				top = sel - UI_LIST_ROWS + 1;
+			if (top < 0)
+				top = 0;
 
-		u32 k = wait_key();
+			/* Build the array of name pointers the screen wants. */
+			const char *names[MAX_ENTRIES];
+			bool isdir[MAX_ENTRIES];
+			for (int i = 0; i < entry_count; i++)
+			{
+				names[i] = entries[i].name;
+				isdir[i] = entries[i].is_dir;
+			}
+
+			scr_browser("v" GBABE_VERSION, cur_dir, names, isdir,
+				    entry_count, sel, top, last_scan_ok);
+			ui_present();
+			dirty = false;
+		}
+
+		touchPosition touch = { 0, 0 };
+		u32 k = wait_input(&touch);
 		if (k == 0 || (k & KEY_START))
 			return false;
 
+		const int prev_sel = sel;
+
+		if (k & KEY_TOUCH)
+		{
+			if (touch.py >= UI_PATH_Y && touch.py < UI_PATH_Y + UI_PATH_H)
+			{
+				/* Tapping the path goes up a folder (the touch
+				 * equivalent of B). At sdmc:/ there is nowhere to
+				 * go, so do nothing - quitting the application on
+				 * a stray tap would be a nasty surprise. B still
+				 * cancels from here, as it always did. */
+				if (parent_dir())
+				{
+					sel = 0;
+					top = 0;
+					rescan = true;
+				}
+				continue;
+			}
+
+			const int hit = scr_browser_hit(touch.py, top, entry_count);
+			if (hit < 0)
+				continue; /* footer, gap, past the end */
+
+			/* One tap opens the row - folders included. Selecting
+			 * something and then requiring a second tap to use it is
+			 * a fine desktop idiom and a bad stylus one. */
+			sel = hit;
+			k = KEY_A;
+		}
+
 		if (k & (KEY_DDOWN | KEY_CPAD_DOWN))
-			sel = (sel + 1 < entry_count) ? sel + 1 : sel;
+		{
+			if (sel + 1 < entry_count)
+				sel++;
+		}
 		else if (k & (KEY_DUP | KEY_CPAD_UP))
-			sel = (sel > 0) ? sel - 1 : 0;
-		else if (k & (KEY_DRIGHT | KEY_CPAD_RIGHT))
-			sel = (sel + LIST_ROWS < entry_count) ? sel + LIST_ROWS
-							     : entry_count - 1;
-		else if (k & (KEY_DLEFT | KEY_CPAD_LEFT))
-			sel = (sel > LIST_ROWS) ? sel - LIST_ROWS : 0;
+		{
+			if (sel > 0)
+				sel--;
+		}
+		else if (k & (KEY_DRIGHT | KEY_CPAD_RIGHT | KEY_R))
+		{
+			sel = (sel + UI_LIST_ROWS < entry_count)
+				      ? sel + UI_LIST_ROWS
+				      : entry_count - 1;
+			if (sel < 0)
+				sel = 0;
+		}
+		else if (k & (KEY_DLEFT | KEY_CPAD_LEFT | KEY_L))
+		{
+			sel = (sel > UI_LIST_ROWS) ? sel - UI_LIST_ROWS : 0;
+		}
 		else if (k & KEY_B)
 		{
-			if (!strcmp(cur_dir, "sdmc:/"))
+			if (!parent_dir())
 				return false; /* B at the root cancels */
-
-			parent_dir();
-			sel = first = 0;
+			sel = 0;
+			top = 0;
+			rescan = true;
 		}
 		else if (k & KEY_A)
 		{
@@ -230,21 +325,26 @@ bool ui_browse_rom(char *out, size_t out_len)
 			if (entries[sel].is_dir)
 			{
 				gbabe_copy(cur_dir, sizeof cur_dir, full);
-				sel = first = 0;
+				sel = 0;
+				top = 0;
+				rescan = true;
 			}
 			else
 			{
-				/* Leave cur_dir on the ROM's folder so the browser
-				 * reopens there next time. */
+				/* Leave cur_dir on the ROM's folder so the
+				 * browser reopens there next time. */
 				gbabe_copy(out, out_len, full);
 				return true;
 			}
 		}
+
+		if (sel != prev_sel)
+			dirty = true;
 	}
 }
 
 /* ------------------------------------------------------------------------- */
-/* In-game menu                                                              */
+/* Pause menu                                                                */
 /* ------------------------------------------------------------------------- */
 
 static const char *scale_label(int m)
@@ -264,223 +364,435 @@ static const char *frameskip_label(int m)
 
 enum
 {
-	ROW_RESUME = 3,
-	ROW_PALETTE,
-	ROW_VIDEO,
-	ROW_SKIP,
-	ROW_SOUND,
-	ROW_STATUS,
-	ROW_RESET,
-	ROW_LOAD,
-	ROW_QUIT,
-	MENU_ROWS = 9,
+	ACT_RESUME,
+	ACT_RESET,
+	ACT_LOAD,
+	ACT_QUIT,
+	ACT_PALETTE,
+	ACT_VIDEO,
+	ACT_SKIP,
+	ACT_SOUND,
+	ACT_HUD,
+	ACT_LOG,
 };
 
-static void draw_menu(int sel)
+static const ui_row game_rows[] = {
+	{ "Resume", NULL, UI_ROW_ACTION },
+	{ "Reset game", NULL, UI_ROW_ACTION },
+	{ "Load another ROM", NULL, UI_ROW_ACTION },
+	{ "Save and quit", NULL, UI_ROW_ACTION },
+};
+#define GAME_ROWS ((int)(sizeof game_rows / sizeof game_rows[0]))
+
+static const ui_row settings_rows[] = {
+	{ "Palette", NULL, UI_ROW_CHOICE },
+	{ "Video", NULL, UI_ROW_CHOICE },
+	{ "Frameskip", NULL, UI_ROW_CHOICE },
+	{ "Sound", NULL, UI_ROW_TOGGLE },
+	{ "Status on screen", NULL, UI_ROW_TOGGLE },
+	{ "Debug log", NULL, UI_ROW_TOGGLE },
+};
+#define SETTINGS_ROWS ((int)(sizeof settings_rows / sizeof settings_rows[0]))
+
+static const int game_actions[] = { ACT_RESUME, ACT_RESET, ACT_LOAD,
+				    ACT_QUIT };
+static const int settings_actions[] = { ACT_PALETTE, ACT_VIDEO, ACT_SKIP,
+					ACT_SOUND, ACT_HUD, ACT_LOG };
+
+static const char *const menu_tabs[] = { "Game", "Settings" };
+#define MENU_TABS ((int)(sizeof menu_tabs / sizeof menu_tabs[0]))
+
+static const char *menu_note(int tab, int sel)
 {
-	consoleClear();
-	line_at(1, 1, "GBabe " GBABE_VERSION " - paused");
+	if (tab == 0)
+	{
+		switch (game_actions[sel])
+		{
+		case ACT_RESET: return "Restart the game from the beginning.";
+		case ACT_LOAD: return "Saves the current game first.";
+		case ACT_QUIT: return "Writes the save file, then exits.";
+		default: return "Back to the game.";
+		}
+	}
 
-	const char *rows[MENU_ROWS];
-	char buf[MENU_ROWS][32];
+	switch (settings_actions[sel])
+	{
+	case ACT_PALETTE: return "Colour scheme for monochrome games.";
+	case ACT_VIDEO: return "How the 160x144 screen is scaled up.";
+	case ACT_SKIP: return "Fold an occasional frame when running late.";
+	case ACT_SOUND: return "Turn the emulated audio output on or off.";
+	case ACT_LOG: return "Writes sdmc:/3ds/gbabe/debug.log.";
+	default: return "The status readout on this screen.";
+	}
+}
 
-	snprintf(buf[0], 32, "Resume");
-	snprintf(buf[1], 32, "Palette  <%s>", palette_name(palette_get()));
-	snprintf(buf[2], 32, "Video    <%s>", scale_label(g_cfg.scale));
-	snprintf(buf[3], 32, "Skip     <%s>", frameskip_label(g_cfg.frameskip));
-	snprintf(buf[4], 32, "Sound    <%s>", g_cfg.audio_on ? "on" : "off");
-	snprintf(buf[5], 32, "Status   <%s>", g_cfg.show_hud ? "on" : "off");
-	snprintf(buf[6], 32, "Reset game");
-	snprintf(buf[7], 32, "Load another ROM");
-	snprintf(buf[8], 32, "Save and quit");
+static void draw_menu(int tab, int sel)
+{
+	/* A copy, because the settings tab shows live values rather than the
+	 * table above. Only the rows this tab actually has are filled in. */
+	ui_row rows[SETTINGS_ROWS];
 
-	for (int i = 0; i < MENU_ROWS; i++)
-		rows[i] = buf[i];
+	const bool settings = (tab != 0);
+	const ui_row *src = settings ? settings_rows : game_rows;
+	const int n = settings ? SETTINGS_ROWS : GAME_ROWS;
 
-	for (int i = 0; i < MENU_ROWS; i++)
-		line_at(ROW_RESUME + i, 1, "%c%.28s", (sel == i) ? '>' : ' ',
-			rows[i]);
+	for (int i = 0; i < n; i++)
+		rows[i] = src[i];
 
-	const emu_info *info = emu_get_info();
-	line_at(15, 1, "%.16s %s", info->title, info->cgb ? "CGB" : "DMG");
-	line_at(16, 1, "%u Mbit  MBC%d", (unsigned)(info->rom_banks * 16 / 128),
-		info->mbc);
+	if (settings)
+	{
+		rows[0].value = palette_name(palette_get());
+		rows[1].value = scale_label(g_cfg.scale);
+		rows[2].value = frameskip_label(g_cfg.frameskip);
+		rows[3].value = g_cfg.audio_on ? "on" : "off";
+		rows[4].value = g_cfg.show_hud ? "on" : "off";
+		rows[5].value = g_cfg.debug_log ? "on" : "off";
+	}
 
-	line_at(20, 1, "D-Pad      move");
-	line_at(21, 1, "L/R        change");
-	line_at(22, 1, "A/START    select");
-	line_at(23, 1, "B          resume");
-	line_at(25, 1, "In game: X turbo");
-	line_at(26, 1, "         Y palette");
-	line_at(27, 1, "Touch = this menu");
+	ui_menu m = {
+		.title = "GBabe " GBABE_VERSION,
+		.status = "paused",
+		.tabs = menu_tabs,
+		.n_tabs = MENU_TABS,
+		.tab = tab,
+		.rows = rows,
+		.n_rows = n,
+		.sel = sel,
+		.note = menu_note(tab, sel),
+	};
+
+	scr_menu(&m);
+	ui_present();
+}
+
+/* Run one menu action. delta is -1 / +1 when a value is being stepped, 0 when
+ * the row was activated. *close is set by the three rows that end the menu
+ * (resume, reset, load another ROM) and never by a row that just holds a value -
+ * tapping "Sound" must flip it *in* the menu, not leave the menu.
+ * Returns false when the application should exit. */
+static bool run_action(int act, int delta, bool *close)
+{
+	switch (act)
+	{
+	case ACT_RESUME:
+		*close = true;
+		return true;
+
+	case ACT_RESET:
+		emu_reset();
+		config_save();
+		*close = true;
+		return true;
+
+	case ACT_LOAD:
+	{
+		char path[768];
+		if (ui_browse_rom(path, sizeof path))
+		{
+			const char *err = emu_load(path);
+			if (err != NULL)
+			{
+				ui_message("Cannot open ROM", err,
+					   "Press A or B.");
+				return true;
+			}
+
+			gbabe_copy(g_cfg.rom_path, sizeof g_cfg.rom_path, path);
+			config_save();
+			*close = true;
+		}
+		return true;
+	}
+
+	case ACT_QUIT:
+		config_save();
+		return false;
+
+	case ACT_PALETTE:
+		delta = (delta == 0) ? 1 : delta;
+		palette_set((palette_get() + delta + palette_count()) %
+			    palette_count());
+		emu_palette_changed();
+		g_cfg.palette = palette_get();
+		log_line("setting palette=%d (%s)", g_cfg.palette,
+			 palette_name(palette_get()));
+		config_save();
+		return true;
+
+	case ACT_VIDEO:
+		delta = (delta == 0) ? 1 : delta;
+		g_cfg.scale = (g_cfg.scale + delta + SCALE_COUNT) % SCALE_COUNT;
+		video_set_scale(g_cfg.scale);
+		log_line("setting scale=%d", g_cfg.scale);
+		config_save();
+		return true;
+
+	case ACT_SKIP:
+		g_cfg.frameskip = (g_cfg.frameskip + 1) % 2;
+		log_line("setting frameskip=%d", g_cfg.frameskip);
+		config_save();
+		return true;
+
+	case ACT_SOUND:
+		g_cfg.audio_on = !g_cfg.audio_on;
+		audio_set_enabled(g_cfg.audio_on);
+		log_line("setting sound=%d", g_cfg.audio_on);
+		config_save();
+		return true;
+
+	case ACT_HUD:
+		g_cfg.show_hud = !g_cfg.show_hud;
+		log_line("setting hud=%d", g_cfg.show_hud);
+		config_save();
+		return true;
+
+	case ACT_LOG:
+		g_cfg.debug_log = !g_cfg.debug_log;
+		/* Turning it on has to reopen the file, which needs the path. */
+		if (g_cfg.debug_log)
+			log_init(GBABE_LOG_PATH, true);
+		else
+			log_set_enabled(false);
+		config_save();
+		return true;
+
+	default:
+		return true;
+	}
+}
+
+/* What kind of row is selected? The tables above are static, so this is a
+ * lookup rather than a field - the screens only need the value, and ui.c needs
+ * to know whether left/right makes sense there. */
+static ui_row_kind row_kind(int tab, int sel)
+{
+	if (tab != 0)
+		return settings_rows[sel].kind;
+	return UI_ROW_ACTION;
 }
 
 bool ui_in_game_menu(void)
 {
+	int tab = 0;
 	int sel = 0;
-	bool redraw = true;
+	bool dirty = true;
 
-	while (aptMainLoop())
+	for (;;)
 	{
-		if (redraw)
+		const int n_rows = (tab == 0) ? GAME_ROWS : SETTINGS_ROWS;
+
+		if (sel < 0 || sel >= n_rows)
+			sel = 0;
+
+		if (dirty)
 		{
-			draw_menu(sel);
-			redraw = false;
+			draw_menu(tab, sel);
+			dirty = false;
 		}
 
-		u32 k = wait_key();
+		touchPosition touch = { 0, 0 };
+		u32 k = wait_input(&touch);
 		if (k == 0)
 			return false; /* HOME pressed */
 
-		if (k & (KEY_DDOWN | KEY_CPAD_DOWN))
+		/* B always means "back to the game", from anywhere. */
+		if (k & KEY_B)
 		{
-			sel = (sel + 1) % MENU_ROWS;
-			redraw = true;
+			config_save();
+			if (!g_cfg.show_hud)
+				ui_blank();
+			return true;
 		}
-		else if (k & (KEY_DUP | KEY_CPAD_UP))
-		{
-			sel = (sel == 0) ? MENU_ROWS - 1 : sel - 1;
-			redraw = true;
-		}
-		else if (k & (KEY_DRIGHT | KEY_CPAD_RIGHT))
-		{
-			switch (sel)
-			{
-			case ROW_PALETTE - ROW_RESUME:
-				palette_set((palette_get() + 1) % palette_count());
-				g_cfg.palette = palette_get();
-				break;
-			case ROW_VIDEO - ROW_RESUME:
-				g_cfg.scale = (g_cfg.scale + 1) % SCALE_COUNT;
-				video_set_scale(g_cfg.scale);
-				break;
-			case ROW_SKIP - ROW_RESUME:
-				g_cfg.frameskip = (g_cfg.frameskip + 1) % 2;
-				break;
-			case ROW_SOUND - ROW_RESUME:
-				g_cfg.audio_on = true;
-				audio_set_enabled(true);
-				break;
-			case ROW_STATUS - ROW_RESUME:
-				g_cfg.show_hud = true;
-				break;
-			default:
-				break;
-			}
-			redraw = true;
-		}
-		else if (k & (KEY_DLEFT | KEY_CPAD_LEFT))
-		{
-			switch (sel)
-			{
-			case ROW_PALETTE - ROW_RESUME:
-				palette_set((palette_get() + palette_count() - 1) %
-					    palette_count());
-				g_cfg.palette = palette_get();
-				break;
-			case ROW_VIDEO - ROW_RESUME:
-				g_cfg.scale = (g_cfg.scale + SCALE_COUNT - 1) %
-					      SCALE_COUNT;
-				video_set_scale(g_cfg.scale);
-				break;
-			case ROW_SKIP - ROW_RESUME:
-				g_cfg.frameskip = (g_cfg.frameskip + 1) % 2;
-				break;
-			case ROW_SOUND - ROW_RESUME:
-				g_cfg.audio_on = false;
-				audio_set_enabled(false);
-				break;
-			case ROW_STATUS - ROW_RESUME:
-				g_cfg.show_hud = false;
-				break;
-			default:
-				break;
-			}
-			redraw = true;
-		}
-		else if (k & (KEY_A | KEY_START))
-		{
-			if (sel == 0 || sel == ROW_QUIT - ROW_RESUME)
-			{
-				/* Resume, or save and quit. */
-				config_save();
-				consoleClear();
-				return sel == 0;
-			}
 
-			if (sel == ROW_RESET - ROW_RESUME)
-			{
-				emu_reset();
-				config_save();
-				consoleClear();
-				return true;
-			}
+		/* delta == 0 means "the row was activated"; -1/+1 means a value
+		 * is being stepped. Nothing else distinguishes the two below. */
+		int delta = 0;
 
-			if (sel == ROW_LOAD - ROW_RESUME)
+		if (k & KEY_TOUCH)
+		{
+			const int t = scr_menu_hit_tab(touch.px, touch.py,
+						       menu_tabs, MENU_TABS);
+			if (t >= 0)
 			{
-				char path[768];
-				if (ui_browse_rom(path, sizeof path))
-				{
-					const char *err = emu_load(path);
-					if (err == NULL)
-					{
-						gbabe_copy(g_cfg.rom_path,
-							  sizeof g_cfg.rom_path,
-							  path);
-						config_save();
-						consoleClear();
-						return true;
-					}
-
-					consoleClear();
-					line_at(2, 1, "%.28s", err);
-					line_at(5, 1, "Press any button.");
-					wait_key();
-				}
-				redraw = true;
+				tab = t;
+				sel = 0;
+				dirty = true;
 				continue;
 			}
 
-			/* Value rows: A flips the setting. */
-			switch (sel)
+			const int row = scr_menu_hit_row(touch.py,
+							 (tab == 0) ? GAME_ROWS
+								    : SETTINGS_ROWS);
+			if (row < 0)
+				continue; /* the note, the footer, empty space */
+
+			if (row != sel)
 			{
-			case ROW_SOUND - ROW_RESUME:
-				g_cfg.audio_on = !g_cfg.audio_on;
-				audio_set_enabled(g_cfg.audio_on);
-				break;
-			case ROW_STATUS - ROW_RESUME:
-				g_cfg.show_hud = !g_cfg.show_hud;
-				break;
-			case ROW_VIDEO - ROW_RESUME:
-				g_cfg.scale = (g_cfg.scale + 1) % SCALE_COUNT;
-				video_set_scale(g_cfg.scale);
-				break;
-			case ROW_SKIP - ROW_RESUME:
-				g_cfg.frameskip = (g_cfg.frameskip + 1) % 2;
-				break;
-			default:
-				break;
+				/* First tap selects. Menu rows are not like
+				 * browser rows: one of them restarts the game
+				 * and another quits, and neither should happen
+				 * because a thumb brushed the glass. */
+				sel = row;
+				dirty = true;
+				continue;
 			}
-			redraw = true;
+			/* Tapping the row that is already selected uses it. */
+			dirty = true;
 		}
-		else if (k & (KEY_B | KEY_TOUCH))
+		else if (k & (KEY_DDOWN | KEY_CPAD_DOWN))
 		{
-			config_save();
-			consoleClear();
+			sel = (sel + 1) % n_rows;
+			dirty = true;
+			continue;
+		}
+		else if (k & (KEY_DUP | KEY_CPAD_UP))
+		{
+			sel = (sel + n_rows - 1) % n_rows;
+			dirty = true;
+			continue;
+		}
+		else if (k & (KEY_L | KEY_R))
+		{
+			tab = (tab + 1) % MENU_TABS;
+			sel = 0;
+			dirty = true;
+			continue;
+		}
+		else if (k & (KEY_DLEFT | KEY_DRIGHT | KEY_CPAD_LEFT |
+			      KEY_CPAD_RIGHT))
+		{
+			/* Left/right changes a value, and does nothing at all on a
+			 * row that is an action: a nudge on "Save and quit" must
+			 * not quit, and one on "Reset game" must not reset. */
+			if (row_kind(tab, sel) == UI_ROW_ACTION)
+				continue;
+
+			delta = (k & (KEY_DRIGHT | KEY_CPAD_RIGHT)) ? 1 : -1;
+		}
+		else if (!(k & (KEY_A | KEY_START)))
+		{
+			continue; /* a key this screen does not use */
+		}
+
+		const int act = (tab == 0) ? game_actions[sel]
+					   : settings_actions[sel];
+
+		bool close = false;
+		if (!run_action(act, delta, &close))
+			return false; /* asked to quit */
+
+		if (close)
+		{
+			if (!g_cfg.show_hud)
+				ui_blank();
 			return true;
 		}
-	}
 
-	return false;
+		/* A value changed: stay in the menu and redraw it. */
+		dirty = true;
+	}
 }
 
 /* ------------------------------------------------------------------------- */
-/* HUD                                                                       */
+/* Messages                                                                  */
 /* ------------------------------------------------------------------------- */
 
-void ui_note_frame(void)
+void ui_message(const char *title, const char *line1, const char *line2)
+{
+	scr_message(title, line1, line2, "Press A or B");
+	ui_present();
+
+	for (;;)
+	{
+		u32 k = wait_input(NULL);
+		if (k == 0 || (k & (KEY_A | KEY_B | KEY_START | KEY_TOUCH)))
+			return;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Status readout                                                            */
+/* ------------------------------------------------------------------------- */
+
+/* One sentence about what is costing the frames, from the profile itself. The
+ * thresholds are deliberately generous: a frame has 16.7 ms and the Game Boy
+ * runs at 59.7275 Hz, so ~15.5 ms of work is still full speed with margin. */
+static const char *limit_text(float fps, float core, float blit, float other)
+{
+	if (fps >= 55.0f)
+		return "full speed";
+
+	if (core >= blit && core >= other)
+		return "CPU-bound (interpreter)";
+	if (blit >= other)
+		return "draw-bound (blit)";
+	return "overhead (see other)";
+}
+
+void ui_draw_hud(void)
+{
+	const emu_info *info = emu_get_info();
+	char fps[16], frame[24];
+	char stack[6][24];
+
+	const char *labels[] = { "core", "blit", "wait", "frame", "sound",
+				 "palette" };
+	const char *values[6];
+
+	const float other = g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
+					       g_perf.wait_ms);
+
+	snprintf(fps, sizeof fps, "%.1f", g_perf.fps);
+	snprintf(frame, sizeof frame, "%.1f ms/frame", g_perf.frame_ms);
+
+	snprintf(stack[0], sizeof stack[0], "%.1f ms", g_perf.core_ms);
+	snprintf(stack[1], sizeof stack[1], "%.1f ms", g_perf.blit_ms);
+	snprintf(stack[2], sizeof stack[2], "%.1f ms", g_perf.wait_ms);
+	snprintf(stack[3], sizeof stack[3], "%.1f ms", g_perf.frame_ms);
+	snprintf(stack[4], sizeof stack[4], "%u ms", audio_queue_ms());
+	snprintf(stack[5], sizeof stack[5], "%s", palette_name(palette_get()));
+
+	for (int i = 0; i < 6; i++)
+		values[i] = stack[i];
+
+	char sub[64];
+	snprintf(sub, sizeof sub, "%s   %u Mbit   MBC%d",
+		 info->cgb ? "CGB" : "DMG",
+		 (unsigned)(info->rom_banks * 16 / 128), info->mbc);
+
+	ui_hud h = {
+		.title = info->title,
+		.sub = sub,
+		.fps = g_perf.fps,
+		.frame_ms = g_perf.frame_ms,
+		.worst_ms = g_perf.worst_ms,
+		.other_ms = (other > 0.0f) ? other : 0.0f,
+		.limit = limit_text(g_perf.fps, g_perf.core_ms, g_perf.blit_ms,
+				    other),
+		.core_ms = g_perf.core_ms,
+		.blit_ms = g_perf.blit_ms,
+		.wait_ms = g_perf.wait_ms,
+		.stat_label = { labels[0], labels[1], labels[2], labels[3],
+				labels[4], labels[5] },
+		.stat_value = { values[0], values[1], values[2], values[3],
+				values[4], values[5] },
+		.n_stats = 6,
+	};
+
+	scr_hud(&h);
+	ui_present();
+}
+
+void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
+		   u64 frame_ticks)
 {
 	hud_frames++;
+	hud_sum_core += core_ticks;
+	hud_sum_blit += blit_ticks;
+	hud_sum_wait += wait_ticks;
+	hud_sum_frame += frame_ticks;
+	if (frame_ticks > hud_worst)
+		hud_worst = frame_ticks;
 
 	u64 now = svcGetSystemTick();
 	if (hud_last_tick == 0)
@@ -489,42 +801,54 @@ void ui_note_frame(void)
 		return;
 	}
 
-	double elapsed = (double)(now - hud_last_tick) / SYSCLOCK_ARM11;
+	const double elapsed = (double)(now - hud_last_tick) / SYSCLOCK_ARM11;
 	if (elapsed < 1.0)
 		return;
 
 	hud_fps = (float)(hud_frames / elapsed);
+
+	/* Milliseconds per presented frame, from the tick sums. */
+	const double ticks_to_ms = 1000.0 / SYSCLOCK_ARM11;
+	const double n = (hud_frames > 0) ? (double)hud_frames : 1.0;
+	g_perf.fps = hud_fps;
+	g_perf.core_ms = (float)((double)hud_sum_core * ticks_to_ms / n);
+	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
+	g_perf.wait_ms = (float)((double)hud_sum_wait * ticks_to_ms / n);
+	g_perf.frame_ms = (float)((double)hud_sum_frame * ticks_to_ms / n);
+	g_perf.worst_ms = (float)((double)hud_worst * ticks_to_ms);
+
+	/* The same numbers the status readout shows, in the log: this is the
+	 * measurement a slow-console report needs, and a screenshot of the bottom
+	 * screen is a lot to ask of someone. */
+	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
+		 "wait=%.1f other=%.1f audio=%ums", g_perf.fps, g_perf.frame_ms,
+		 g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms, g_perf.wait_ms,
+		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
+				    g_perf.wait_ms),
+		 audio_queue_ms());
+
 	hud_frames = 0;
+	hud_sum_core = hud_sum_blit = hud_sum_wait = hud_sum_frame = 0;
+	hud_worst = 0;
 	hud_last_tick = now;
 
+	/* The status readout is on the bottom screen, so it costs a redraw once
+	 * a second - nothing during the frames in between. */
 	if (g_cfg.show_hud && emu_loaded())
 		ui_draw_hud();
 }
 
-void ui_draw_hud(void)
+/* ------------------------------------------------------------------------- */
+/* Setup                                                                     */
+/* ------------------------------------------------------------------------- */
+
+void ui_blank(void)
 {
-	const emu_info *info = emu_get_info();
-
-	consoleClear();
-	line_at(1, 1, "%.16s %s", info->title, info->cgb ? "CGB" : "DMG");
-	line_at(2, 1, "%d.%d fps", (int)hud_fps, (int)(hud_fps * 10) % 10);
-	line_at(3, 1, "sound %s  out %ums", g_cfg.audio_on ? "on" : "off",
-		audio_queue_ms());
-	line_at(4, 1, "skip  %s", frameskip_label(g_cfg.frameskip));
-
-	line_at(6, 1, "pal %.18s", palette_name(palette_get()));
-	line_at(7, 1, "vid %s", scale_label(g_cfg.scale));
-
-	line_at(9, 1, "A/B Start/Select");
-	line_at(10, 1, "D-Pad or Circle Pad");
-	line_at(11, 1, "X turbo, Y palette");
-	line_at(12, 1, "Touch here for menu");
-
-	line_at(14, 1, "rom %u ram %u banks", info->rom_banks, info->ram_banks);
+	scr_blank();
+	ui_present();
 }
 
 void ui_init(void)
 {
-	consoleInit(GFX_BOTTOM, NULL);
-	consoleClear();
+	ui_blank();
 }

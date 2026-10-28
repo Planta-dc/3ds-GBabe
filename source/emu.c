@@ -19,6 +19,7 @@
 #include "emu.h"
 #include "video.h"
 #include "audio.h"
+#include "log.h"
 #include "palette.h"
 
 /* The core wants these two before it is included. */
@@ -38,6 +39,7 @@ static size_t   rom_size;
 static uint8_t *bootrom;   /* optional, sdmc:/3ds/gbabe/bootrom */
 static uint8_t *cart_ram;
 static size_t   cart_ram_size;
+static uint32_t cart_ram_mask; /* cart_ram_size - 1; every GB RAM size is 2^n */
 static char     save_path[512];
 static bool     sram_dirty;
 static bool     loaded;
@@ -74,12 +76,14 @@ static uint32_t rom_dword(struct gb_s *g, const uint_fast32_t addr)
 	return v;
 }
 
+/* Cartridge RAM is a power of two bytes (2K..128K), so wrap with a mask: a
+ * modulo here would compile to a software divide in the hot read callback. */
 static uint8_t cart_ram_byte(struct gb_s *g, const uint_fast32_t addr)
 {
 	(void)g;
 	if (cart_ram == NULL)
 		return 0xFF;
-	return cart_ram[addr % (cart_ram_size ? cart_ram_size : 1)];
+	return cart_ram[addr & cart_ram_mask];
 }
 
 static void cart_ram_write_byte(struct gb_s *g, const uint_fast32_t addr,
@@ -88,7 +92,7 @@ static void cart_ram_write_byte(struct gb_s *g, const uint_fast32_t addr,
 	(void)g;
 	if (cart_ram == NULL)
 		return;
-	cart_ram[addr % (cart_ram_size ? cart_ram_size : 1)] = val;
+	cart_ram[addr & cart_ram_mask] = val;
 	sram_dirty = true;
 }
 
@@ -137,12 +141,33 @@ static void try_load_bootrom(bool cgb)
 	gb_reset(&gb);
 }
 
+/* The core reports errors from inside a frame, so nothing here may block or
+ * draw: the message is stored and the main loop picks it up afterwards. */
+static char gb_error_text[64];
+static bool gb_error_pending;
+
+const char *emu_last_error(void)
+{
+	if (!gb_error_pending)
+		return NULL;
+
+	gb_error_pending = false;
+	return gb_error_text;
+}
+
 static void gb_error_cb(struct gb_s *g, const enum gb_error_e err,
 			const uint16_t addr)
 {
 	(void)g;
-	if (err != GB_UNKNOWN_ERROR)
-		printf("core error %d at 0x%04X\n", (int)err, addr);
+	if (err == GB_UNKNOWN_ERROR)
+		return;
+
+	snprintf(gb_error_text, sizeof gb_error_text,
+		 "Core error %d at 0x%04X", (int)err, (unsigned)addr);
+	gb_error_pending = true;
+
+	/* The log gets it even if the user dismisses the message on screen. */
+	log_line("core: %s", gb_error_text);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -248,12 +273,14 @@ void emu_unload(void)
 	}
 	rom_size = 0;
 	cart_ram_size = 0;
+	cart_ram_mask = 0;
 	loaded = false;
 	memset(&info, 0, sizeof info);
 }
 
 const char *emu_load(const char *path)
 {
+	gb_error_pending = false;
 	emu_unload();
 
 	FILE *f = fopen(path, "rb");
@@ -320,6 +347,9 @@ const char *emu_load(const char *path)
 			emu_unload();
 			return "Not enough memory for the save RAM.";
 		}
+		/* 0 when the size is not a power of two, which gives the plain
+		 * truncating behaviour of the modulo it replaces. */
+		cart_ram_mask = (uint32_t)cart_ram_size - 1;
 	}
 
 	make_save_path(path);
@@ -373,8 +403,15 @@ void emu_reset(void)
 	if (!loaded)
 		return;
 	emu_flush_save();
+	gb_error_pending = false; /* a stale error is not this run's problem */
 	gb_reset(&gb);
 	gb_init_lcd(&gb, lcd_draw_line_cb);
+}
+
+void emu_palette_changed(void)
+{
+	/* The line callback reads palette_dmg565() every line, so a new choice is
+	 * picked up on the next frame with nothing to do here. */
 }
 
 void emu_set_rendering(bool on)

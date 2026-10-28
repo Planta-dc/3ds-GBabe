@@ -3,6 +3,11 @@
 
 #include "gb3ds.h"
 
+/* Included from C++ as well (the Gambatte backend is C++). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void video_init(void);
 void video_exit(void);
 
@@ -21,3 +26,7 @@ void video_end_frame(void);
 
 /* Fill the top screen with black (used by menus). */
 void video_clear(void);
+
+#ifdef __cplusplus
+}
+#endif
