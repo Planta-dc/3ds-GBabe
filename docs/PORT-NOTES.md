@@ -72,6 +72,24 @@ throughput, which is the open question on real hardware (see §4).
 * **Line-exact scaling.** `video_draw_line()` maps source line `n` to destination
   rows `[n*H/144, (n+1)*H/144)`, so scaling stays coherent per scanline and
   there is no tearing inside a line.
+* **One screen each, and only one.** The game writes the top framebuffer and
+  the UI writes the bottom one; each screen is flushed and swapped on its own.
+  It has to be that way: `gfxFlushBuffers()` and `gfxSwapBuffers()` act on
+  *both* screens, so calling them per frame flushes 153 KiB of unchanged
+  bottom-screen buffer and flips the bottom buffer out from under the UI (with
+  double buffering, the screen then shows the other buffer - a frame that is
+  one old, or never drawn). `video_end_frame()` and `ui_present()` therefore
+  call `GSPGPU_FlushDataCache()` plus `gfxScreenSwapBuffers()` for their own
+  screen, and nothing else. `tools/host`'s stub models double buffering the way
+  libctru does, so `make -C tools/uipreview asan` fails if either side starts
+  swapping both.
+* **The letterbox is cleared every frame.** `video_draw_line()` writes only the
+  scaled picture rectangle, and libctru hands out framebuffers from
+  `linearAlloc()` without clearing them, so with the default "fit height" scale
+  the ~66 px beside the picture would show uninitialised memory. A column of the
+  rotated panel is `FB_STRIDE` contiguous halfwords, so the bars are cleared
+  with two `memset`s; the pixel-perfect mode clears the whole screen instead.
+  The top screen is also blacked at startup and whenever the browser is open.
 * **Frame skip = render skip.** `emu_set_rendering(false)` swaps the core's
   `lcd_draw_line` pointer to `NULL` (the core explicitly supports this), so a
   skipped frame costs no blit and never leaves two hardware buffers showing

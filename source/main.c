@@ -178,6 +178,11 @@ int main(int argc, char **argv)
 				err = NULL;
 			}
 
+			/* Nothing is playing while the browser is up: black the top
+			 * screen instead of leaving the last game frame (or, on the
+			 * first run, uninitialised framebuffer memory) there. */
+			video_clear();
+
 			if (!ui_browse_rom(path, sizeof path))
 				break;
 

@@ -90,6 +90,12 @@ void video_init(void)
 	fb = NULL;
 	fb_ready = false;
 	current_scale = -1;
+
+	/* Both framebuffers come from linearAlloc(): nothing is cleared yet, and
+	 * gfxInit() has already presented one of them. video_clear() draws into
+	 * the back buffer and swaps, so two calls black both of them. */
+	video_clear();
+	video_clear();
 }
 
 void video_exit(void)
@@ -116,17 +122,64 @@ static inline u16 *fb_pixel(int x, int y)
 	return (u16 *)&fb[((x * FB_STRIDE) + (FB_STRIDE - 1 - y)) * sizeof(u16)];
 }
 
+/* Nothing outside the picture rectangle is ever written by video_draw_line(),
+ * and libctru hands out framebuffers straight from linearAlloc() without
+ * clearing them (gfxInit() does not memset). So the bars beside and above the
+ * picture would show uninitialised memory - coloured static - unless they are
+ * cleared. With the default "fit height" scale that is ~66 px on each side.
+ *
+ * The layout makes this cheap: a column of the panel is FB_STRIDE contiguous
+ * halfwords, so every column left of the picture is one contiguous memset.
+ * Only the pixel-perfect mode has bars above and below as well, and there the
+ * whole screen is cleared instead - it is the rare mode. */
+static void clear_letterbox(void)
+{
+	if (!fb_ready)
+		return;
+
+	const int cols_left = dst_x0;
+	const int cols_right = LCD_TOP_W - dst_x0 - dst_w;
+
+	if (dst_h != LCD_TOP_H)
+	{
+		memset(fb, 0, LCD_TOP_W * FB_STRIDE * sizeof(u16));
+		return;
+	}
+
+	if (cols_left > 0)
+		memset(fb, 0, (size_t)cols_left * FB_STRIDE * sizeof(u16));
+
+	if (cols_right > 0)
+	{
+		/* Byte offset of the first column of the bar: fb_pixel() would add
+		 * the row offset for a single pixel, which is not where the block
+		 * starts. */
+		u8 *right = &fb[(size_t)(dst_x0 + dst_w) * FB_STRIDE *
+				sizeof(u16)];
+		memset(right, 0, (size_t)cols_right * FB_STRIDE * sizeof(u16));
+	}
+}
+
 void video_begin_frame(void)
 {
 	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
 	fb_ready = (fb != NULL);
+	clear_letterbox();
 }
 
+/* Black the top screen and show it. Used at startup, so the browser is not
+ * surrounded by whatever was in the framebuffer, and while the browser is up
+ * (nothing is playing then). */
 void video_clear(void)
 {
-	if (!fb_ready)
+	u16 *f = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+	if (f == NULL)
 		return;
-	memset(fb, 0, LCD_TOP_W * FB_STRIDE * sizeof(u16));
+
+	const size_t bytes = LCD_TOP_W * FB_STRIDE * sizeof(u16);
+	memset(f, 0, bytes);
+	GSPGPU_FlushDataCache(f, bytes);
+	gfxScreenSwapBuffers(GFX_TOP, true);
 }
 
 void video_draw_line(const uint16_t *line565, int line)

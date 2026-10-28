@@ -21,8 +21,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gb3ds.h"
 #include "ui_gfx.h"
 #include "ui_screens.h"
+#include "video.h"
 
 static void long_strings(char *name, size_t name_len, char *path,
 			 size_t path_len)
@@ -217,6 +219,171 @@ static int check_present(void)
 	return bad == 0;
 }
 
+/* Which screen gets what.
+ *
+ * The game is drawn by video.c into the top framebuffer and the UI by ui_gfx.c
+ * into the bottom one; neither may touch the other's, because a stray write
+ * there is a torn or flickering screen that is very hard to diagnose on a
+ * handheld. Two things went wrong here for real:
+ *
+ *   - gfxSwapBuffers()/gfxFlushBuffers() act on *both* screens, so the game's
+ *     per-frame present used to flip the bottom screen's buffer too (and the
+ *     UI's present flipped the top one). With double buffering that shows the
+ *     other buffer - a frame that is one old, or never drawn at all;
+ *   - video_draw_line() only writes the picture rectangle, and libctru does
+ *     not clear framebuffers, so the letterbox bars showed uninitialised
+ *     memory - static - unless something cleared them.
+ *
+ * Every frame is checked, and with different content each time: checking after
+ * a pair of frames would not see a stray swap, because two flips land back on
+ * the buffer that was already on screen.
+ */
+static int expect(const char *what, int bad)
+{
+	printf("%s: %s\n", what, bad ? "FAIL" : "ok");
+	return bad == 0;
+}
+
+static void draw_game_frame(uint16_t colour)
+{
+	uint16_t px[160];
+
+	for (int i = 0; i < 160; i++)
+		px[i] = colour;
+
+	video_begin_frame();
+	for (int line = 0; line < 144; line++)
+		video_draw_line(px, line);
+	video_end_frame();
+}
+
+static void draw_ui_frame(uint16_t colour)
+{
+	ui_clear(colour);
+	ui_present();
+}
+
+/* Pixels of the top screen that differ from `picture` inside the picture
+ * rectangle, and from 0 (black) outside it. */
+static void top_mismatch(int w, int h, uint16_t picture, int *pic_bad,
+			 int *bar_bad)
+{
+	const int x0 = (400 - w) / 2;
+	const int y0 = (240 - h) / 2;
+
+	*pic_bad = *bar_bad = 0;
+
+	for (int y = 0; y < 240; y++)
+	{
+		for (int x = 0; x < 400; x++)
+		{
+			const bool inside = (x >= x0 && x < x0 + w && y >= y0 &&
+					     y < y0 + h);
+			const u16 got = g_host_fb[y * 400 + x];
+
+			if (inside ? (got != picture) : (got != 0))
+			{
+				if (inside) (*pic_bad)++;
+				else (*bar_bad)++;
+			}
+		}
+	}
+}
+
+static int count_bottom_not(uint16_t value)
+{
+	int bad = 0;
+
+	for (int i = 0; i < 320 * 240; i++)
+	{
+		if (g_host_bottom_fb[i] != value)
+			bad++;
+	}
+	return bad;
+}
+
+static int check_screens(void)
+{
+	int ok = 1, pic_bad, bar_bad;
+
+	/* Same arithmetic as recalc_geometry(). */
+	const int fit_w = (160 * 240 + 144 / 2) / 144;
+
+	/* --- the game: top screen only, bars cleared ------------------------- */
+	g_host_poison_framebuffers(0xDEAD);
+	video_set_scale(SCALE_FIT);
+
+	int pic_all = 0, bar_all = 0, bottom_all = 0;
+
+	for (int i = 1; i <= 3; i++)
+	{
+		const uint16_t colour = (uint16_t)(0x1111 * i);
+
+		draw_game_frame(colour);
+		top_mismatch(fit_w, 240, colour, &pic_bad, &bar_bad);
+		pic_all += pic_bad;
+		bar_all += bar_bad;
+		bottom_all += count_bottom_not(0xDEAD);
+	}
+
+	ok &= expect("the picture covers the scaled area", pic_all);
+	ok &= expect("the letterbox bars are cleared, not garbage", bar_all);
+	ok &= expect("game frames leave the bottom screen alone", bottom_all);
+
+	/* --- pixel-perfect mode has bars above and below too ----------------- */
+	g_host_poison_framebuffers(0xDEAD);
+	video_set_scale(SCALE_ORIG);
+
+	pic_all = bar_all = 0;
+
+	for (int i = 1; i <= 2; i++)
+	{
+		const uint16_t colour = (uint16_t)(0x2220 + i);
+
+		draw_game_frame(colour);
+		top_mismatch(160, 144, colour, &pic_bad, &bar_bad);
+		pic_all += pic_bad;
+		bar_all += bar_bad;
+	}
+
+	ok &= expect("pixel-perfect mode clears the bars around it",
+		     pic_all + bar_all);
+
+	/* --- the UI: bottom screen only ------------------------------------- */
+	g_host_poison_framebuffers(0xDEAD);
+	video_set_scale(SCALE_FIT);
+	draw_game_frame(0x2222);
+
+	int top_all = 0, ui_all = 0;
+
+	for (int i = 1; i <= 3; i++)
+	{
+		const uint16_t colour = (uint16_t)(0x1000 * i);
+
+		draw_ui_frame(colour);
+		top_mismatch(fit_w, 240, 0x2222, &pic_bad, &bar_bad);
+		top_all += pic_bad + bar_bad;
+		ui_all += count_bottom_not(colour);
+	}
+
+	ok &= expect("UI frames leave the top screen alone", top_all);
+	ok &= expect("the UI is what the bottom screen shows", ui_all);
+
+	/* ... and the game keeps its hands off the UI, frame by frame. */
+	bottom_all = 0;
+	for (int i = 1; i <= 3; i++)
+	{
+		draw_game_frame((uint16_t)(0x1111 * i));
+		bottom_all += count_bottom_not(0x3000);
+	}
+
+	ok &= expect("game frames leave the UI on the bottom screen",
+		     bottom_all);
+
+	video_set_scale(SCALE_FIT);
+	return ok;
+}
+
 int main(void)
 {
 	char long_name[600];
@@ -233,6 +400,9 @@ int main(void)
 	}
 
 	if (!check_present())
+		return 1;
+
+	if (!check_screens())
 		return 1;
 
 	puts("ui stress: ok");

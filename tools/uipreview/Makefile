@@ -22,7 +22,7 @@ BIN     := uipreview
 
 # Same sources, plus the hostile-input test, under ASan/UBSan.
 UI_SRC  := $(ROOT)/source/ui_gfx.c $(ROOT)/source/ui_screens.c \
-           $(ROOT)/source/ui_font.c ../host/stub.c
+           $(ROOT)/source/ui_font.c $(ROOT)/source/video.c ../host/stub.c
 SAN     := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
 
 all: $(BIN)

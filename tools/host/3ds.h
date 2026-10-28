@@ -106,6 +106,11 @@ typedef enum
 extern u16 g_host_fb[400 * 240];
 /* Bottom screen, un-rotated to 320x240 landscape, after the last present. */
 extern u16 g_host_bottom_fb[320 * 240];
+
+/* Fills every framebuffer libctru would hand out with `value`, like the
+ * uninitialised linearAlloc() memory a real 3DS starts with, so a test can tell
+ * "the code cleared this" apart from "the code never wrote here". */
+void g_host_poison_framebuffers(u16 value);
 extern int g_host_frames;
 extern int g_host_max_frames;
 extern bool g_host_quit;
