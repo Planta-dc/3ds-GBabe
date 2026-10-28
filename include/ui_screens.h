@@ -57,7 +57,7 @@ typedef struct
 
 typedef struct
 {
-	const char *title;  /* "GBabe 0.2.0" */
+	const char *title;  /* usually "GBabe " GBABE_VERSION */
 	const char *status; /* right-hand side, e.g. "paused" */
 	const char *const *tabs;
 	int n_tabs;

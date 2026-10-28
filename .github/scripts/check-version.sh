@@ -61,8 +61,22 @@ if [ -n "$tag" ] && [ "$tag" != "$app" ]; then
 	fail=1
 fi
 
+# And nothing may spell the version out itself. The UI preview kept showing
+# 0.1.0 long after the application said 0.2.0, because tools/uipreview passed the
+# string in by hand instead of using GBABE_VERSION - which meant the picture CI
+# publishes as "what the bottom screen looks like" was of a version that no
+# longer existed. Only GBABE_VERSION may contain a version number.
+literals="$(grep -rnE '[0-9]+\.[0-9]+\.[0-9]+' source include tools 2>/dev/null |
+	grep -v 'GBABE_VERSION' | grep -vi 'gambatte' || true)"
+
+if [ -n "$literals" ]; then
+	printf '%s\n' "$literals"
+	echo "::error::A version number is typed into the source. It goes stale with the next bump - use GBABE_VERSION from include/gb3ds.h."
+	fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
-	echo "versions agree: $app"
+	echo "versions agree: $app, and no source spells a version out itself"
 fi
 
 exit $fail

@@ -27,10 +27,12 @@ SAN     := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-re
 
 all: $(BIN)
 
-$(BIN): $(SRC) $(ROOT)/include/ui_gfx.h $(ROOT)/include/ui_screens.h
+$(BIN): $(SRC) $(ROOT)/include/gb3ds.h $(ROOT)/include/ui_gfx.h \
+	$(ROOT)/include/ui_screens.h
 	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $(SRC)
 
-uistress: $(UI_SRC) stress.c $(ROOT)/include/ui_gfx.h $(ROOT)/include/ui_screens.h
+uistress: $(UI_SRC) stress.c $(ROOT)/include/gb3ds.h $(ROOT)/include/ui_gfx.h \
+	  $(ROOT)/include/ui_screens.h
 	$(CC) -std=gnu11 -g -O1 -Wall -Wextra $(SAN) $(INCLUDE) -o $@ \
 		$(UI_SRC) stress.c
 
