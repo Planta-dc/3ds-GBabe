@@ -9,8 +9,15 @@ dynamic recompilation, no external libraries beyond libctru.
 
 <p align="center"><img src="docs/screenshot-acid2.png" width="400" alt="dmg-acid2 rendered by GBabe"></p>
 
-*(the image above is the `dmg-acid2` test ROM rendered through GBabe's actual
-render path by `tools/host`, not a mock-up)*
+<p align="center">
+<img src="docs/screenshot-browser.png" width="320" alt="GBabe ROM browser on the bottom screen">
+<img src="docs/screenshot-hud.png" width="320" alt="GBabe status readout on the bottom screen">
+</p>
+
+*(every image here is rendered by GBabe's own code, not a mock-up: the top one
+is the `dmg-acid2` test ROM through the real render path in `tools/host`, the
+two under it are the bottom screen through the real UI code in
+`tools/uipreview`)*
 
 ---
 
