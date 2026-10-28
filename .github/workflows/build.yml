@@ -1,0 +1,159 @@
+name: build
+
+# Automatic: every push to main and every pull request builds the .3dsx and runs
+#           the host-side tests.
+# Manual:    Actions -> build -> "Run workflow" lets you pick .3dsx, .cia or both,
+#           and optionally attach the result to a release tag.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Artifact to produce"
+        type: choice
+        options:
+          - both
+          - 3dsx
+          - cia
+        default: both
+      release_tag:
+        description: "Optional: attach the artifacts to this release tag (created if it does not exist)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write # only used when release_tag is given
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Platform-independent checks: build the front-end on the host and render a
+  # test ROM through the same code paths the 3DS uses.
+  # ---------------------------------------------------------------------------
+  host:
+    name: host build + render check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the PC harness
+        run: make -C tools/host
+
+      - name: Type-check the 3DS-only sources
+        run: make -C tools/host check
+
+      - name: Render dmg-acid2 through the real render path
+        run: |
+          tools/host/gbabe-host test/dmg-acid2.gb 300 /tmp/acid2.ppm 0
+          test -s /tmp/acid2.ppm
+
+      - name: Check the CIA spec against the Makefile
+        run: |
+          # Every placeholder in resources/gbabe.rsf must be filled in by a
+          # -D flag in the Makefile, or makerom will fail with a confusing
+          # error much later in the build.
+          fail=0
+          count=0
+          for v in $(grep -o '\$([A-Z_]*' resources/gbabe.rsf | tr -d '$(' | sort -u); do
+            count=$((count + 1))
+            if grep -q -- "-D$v=" Makefile; then
+              echo "ok      \$$v is passed by the Makefile"
+            else
+              echo "::error file=resources/gbabe.rsf::\$$v is never passed with -D$v= in the Makefile"
+              fail=1
+            fi
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "::error file=resources/gbabe.rsf::no placeholders found, is the spec file empty?"
+            exit 1
+          fi
+          exit $fail
+
+  # ---------------------------------------------------------------------------
+  # The actual 3DS build, in the official devkitARM container.
+  # ---------------------------------------------------------------------------
+  build-3ds:
+    name: 3ds ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'both' }}
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    needs: host
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide what to build
+        id: plan
+        run: |
+          target="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'both' }}"
+          want_3dsx=false
+          want_cia=false
+          case "$target" in
+            3dsx) want_3dsx=true ;;
+            cia)  want_cia=true ;;
+            *)    want_3dsx=true; want_cia=true ;;
+          esac
+          echo "3dsx=$want_3dsx" >> "$GITHUB_OUTPUT"
+          echo "cia=$want_cia"  >> "$GITHUB_OUTPUT"
+          echo "building: 3dsx=$want_3dsx cia=$want_cia"
+
+      - name: Show toolchain versions
+        run: |
+          echo "DEVKITARM=$DEVKITARM"
+          arm-none-eabi-gcc --version | head -n1
+          echo "libctru: $(pacman -Q 3ds-libctru 2>/dev/null || echo unknown)"
+
+      - name: Build .3dsx
+        if: steps.plan.outputs.3dsx == 'true'
+        run: make -j"$(nproc)"
+
+      - name: Install makerom and bannertool
+        if: steps.plan.outputs.cia == 'true'
+        run: bash .github/scripts/install-3ds-packaging-tools.sh
+
+      - name: Build .cia
+        if: steps.plan.outputs.cia == 'true'
+        run: make cia -j"$(nproc)"
+
+      - name: List outputs
+        run: ls -la *.3dsx *.smdh *.cia 2>/dev/null || true
+
+      - name: Upload .3dsx
+        if: steps.plan.outputs.3dsx == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gbabe-3dsx
+          if-no-files-found: error
+          path: |
+            gbabe.3dsx
+            gbabe.smdh
+
+      - name: Upload .cia
+        if: steps.plan.outputs.cia == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gbabe-cia
+          if-no-files-found: error
+          path: gbabe.cia
+
+      - name: Attach to release
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          files=()
+          if [ -f gbabe.3dsx ]; then files+=(gbabe.3dsx gbabe.smdh); fi
+          if [ -f gbabe.cia ];  then files+=(gbabe.cia); fi
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "nothing to upload"; exit 1
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "$TAG" \
+              --notes "GBabe build from ${GITHUB_SHA::7}"
+          gh release upload "$TAG" "${files[@]}" --clobber
