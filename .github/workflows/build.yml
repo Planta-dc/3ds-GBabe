@@ -97,8 +97,8 @@ jobs:
             cia)  want_cia=true ;;
             *)    want_3dsx=true; want_cia=true ;;
           esac
-          echo "3dsx=$want_3dsx" >> "$GITHUB_OUTPUT"
-          echo "cia=$want_cia"  >> "$GITHUB_OUTPUT"
+          echo "want_3dsx=$want_3dsx" >> "$GITHUB_OUTPUT"
+          echo "want_cia=$want_cia"   >> "$GITHUB_OUTPUT"
           echo "building: 3dsx=$want_3dsx cia=$want_cia"
 
       - name: Show toolchain versions
@@ -108,22 +108,22 @@ jobs:
           echo "libctru: $(pacman -Q 3ds-libctru 2>/dev/null || echo unknown)"
 
       - name: Build .3dsx
-        if: steps.plan.outputs.3dsx == 'true'
+        if: steps.plan.outputs.want_3dsx == 'true'
         run: make -j"$(nproc)"
 
       - name: Install makerom and bannertool
-        if: steps.plan.outputs.cia == 'true'
+        if: steps.plan.outputs.want_cia == 'true'
         run: bash .github/scripts/install-3ds-packaging-tools.sh
 
       - name: Build .cia
-        if: steps.plan.outputs.cia == 'true'
+        if: steps.plan.outputs.want_cia == 'true'
         run: make cia -j"$(nproc)"
 
       - name: List outputs
         run: ls -la *.3dsx *.smdh *.cia 2>/dev/null || true
 
       - name: Upload .3dsx
-        if: steps.plan.outputs.3dsx == 'true'
+        if: steps.plan.outputs.want_3dsx == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: gbabe-3dsx
@@ -133,7 +133,7 @@ jobs:
             gbabe.smdh
 
       - name: Upload .cia
-        if: steps.plan.outputs.cia == 'true'
+        if: steps.plan.outputs.want_cia == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: gbabe-cia

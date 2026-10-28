@@ -92,6 +92,18 @@ Finished files appear under the run's *Artifacts* (`gbabe-3dsx`, `gbabe-cia`).
 Pushes to `main` and pull requests build both automatically, after the host
 tests pass.
 
+Because GitHub only reports workflow syntax errors *after* a push — and a broken
+file means no job runs at all — the repository ships a checker:
+
+```sh
+python3 tools/lint-workflow.py            # YAML, expressions, step ids, bash -n
+```
+
+It catches the traps that bite here, such as a step output named `3dsx`, which
+is not addressable as `steps.plan.outputs.3dsx` (GitHub's expression grammar
+rejects property names starting with a digit) and has to be called something
+like `want_3dsx`.
+
 The workflow runs in the official `devkitpro/devkitarm` container and fetches
 makerom (v0.19.0) and bannertool (v1.2.3) with
 `.github/scripts/install-3ds-packaging-tools.sh`, which you can also run locally
