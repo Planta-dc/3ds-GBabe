@@ -28,6 +28,27 @@ APP_DESCRIPTION := Game Boy / Game Boy Color
 APP_AUTHOR      := GBabe contributors
 
 #---------------------------------------------------------------------------------
+# packaging (CIA)
+#---------------------------------------------------------------------------------
+VERSION_MAJOR   :=  0
+VERSION_MINOR   :=  1
+VERSION_MICRO   :=  0
+
+APP_PRODUCT_CODE :=  CTR-H-GBABE
+APP_UNIQUE_ID    :=  0xEABE1
+
+ICON_PNG    :=  icon.png
+BANNER_PNG  :=  resources/banner.png
+BANNER_WAV  :=  resources/banner.wav
+RSF         :=  resources/gbabe.rsf
+CIA_TARGET  :=  $(TARGET).cia
+
+# Packaging tools. Override on the command line if they are not on PATH, e.g.
+#   make cia MAKEROM=/path/to/makerom BANNERTOOL=/path/to/bannertool
+MAKEROM     ?=  makerom
+BANNERTOOL  ?=  bannertool
+
+#---------------------------------------------------------------------------------
 # code generation
 #---------------------------------------------------------------------------------
 ARCH    :=  -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -88,7 +109,7 @@ ifeq ($(strip $(NO_SMDH)),)
 export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
 endif
 
-.PHONY: all clean
+.PHONY: all clean cia artwork check-tools
 
 all: $(BUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
@@ -96,9 +117,48 @@ all: $(BUILD)
 $(BUILD):
 	@mkdir -p $@
 
+#---------------------------------------------------------------------------------
+# CIA: ELF + SMDH icon + banner -> makerom
+#
+#   make cia          (needs makerom and bannertool on PATH, see README)
+#---------------------------------------------------------------------------------
+cia: check-tools all
+	@echo banner ...
+	@$(BANNERTOOL) makebanner -i $(BANNER_PNG) -a $(BANNER_WAV) -o $(BUILD)/banner.bnr
+	@echo smdh ...
+	@$(BANNERTOOL) makesmdh -s "$(APP_TITLE)" \
+		-l "$(APP_TITLE) - $(APP_DESCRIPTION)" \
+		-p "$(APP_AUTHOR)" -i $(ICON_PNG) -o $(BUILD)/icon.icn
+	@echo makerom ...
+	@$(MAKEROM) -f cia -o $(CIA_TARGET) \
+		-target t -exefslogo \
+		-elf $(OUTPUT).elf \
+		-rsf $(RSF) \
+		-icon $(BUILD)/icon.icn \
+		-banner $(BUILD)/banner.bnr \
+		-major $(VERSION_MAJOR) -minor $(VERSION_MINOR) -micro $(VERSION_MICRO) \
+		-DAPP_TITLE="$(APP_TITLE)" \
+		-DAPP_PRODUCT_CODE="$(APP_PRODUCT_CODE)" \
+		-DAPP_UNIQUE_ID=$(APP_UNIQUE_ID)
+	@echo "built $(CIA_TARGET)"
+
+check-tools:
+	@command -v $(BANNERTOOL) >/dev/null 2>&1 || { \
+		echo "error: bannertool not found (needed for the CIA)"; \
+		echo "       install it or pass BANNERTOOL=/path/to/bannertool"; \
+		exit 1; }
+	@command -v $(MAKEROM) >/dev/null 2>&1 || { \
+		echo "error: makerom not found (needed for the CIA)"; \
+		echo "       install it or pass MAKEROM=/path/to/makerom"; \
+		exit 1; }
+
+# Regenerate icon.png / resources/banner.{png,wav} from code.
+artwork:
+	@python3 tools/make-artwork.py
+
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf $(CIA_TARGET)
 
 else
 
