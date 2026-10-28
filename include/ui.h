@@ -1,4 +1,12 @@
-/** Menus and file browser drawn on the bottom screen. MIT. */
+/**
+ * Menus and file browser drawn on the bottom screen.
+ *
+ * Everything is drawn into a 320x240 RGB565 canvas by ui_gfx.c and presented
+ * with a single framebuffer write per redraw - see the comment at the top of
+ * ui.c for why that replaced libctru's text console.
+ *
+ * MIT licensed.
+ */
 #pragma once
 
 #include "gb3ds.h"
@@ -6,6 +14,14 @@
 #include <stdbool.h>
 
 void ui_init(void);
+
+/* Blocking message (load errors and the like). Returns once the user
+ * acknowledges it, or immediately if HOME was pressed. */
+void ui_message(const char *title, const char *line1, const char *line2);
+
+/* Blank the bottom screen (used when the status readout is switched off, so a
+ * menu does not linger behind the game). */
+void ui_blank(void);
 
 /* Blocking file browser. Returns true and fills `out` when a ROM was picked,
  * false when the user backed out. */

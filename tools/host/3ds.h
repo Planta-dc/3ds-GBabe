@@ -104,6 +104,8 @@ typedef enum
 
 /* Host-only output buffer so the harness can dump what would be on screen. */
 extern u16 g_host_fb[400 * 240];
+/* Bottom screen, un-rotated to 320x240 landscape, after the last present. */
+extern u16 g_host_bottom_fb[320 * 240];
 extern int g_host_frames;
 extern int g_host_max_frames;
 extern bool g_host_quit;
@@ -126,7 +128,9 @@ void  gfxSetDoubleBuffering(gfxScreen_t screen, bool enable);
 u8   *gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height);
 void  gfxFlushBuffers(void);
 void  gfxSwapBuffers(void);
+void  gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 void  gspWaitForVBlank(void);
+Result GSPGPU_FlushDataCache(const void *adr, u32 size);
 
 PrintConsole *consoleInit(gfxScreen_t screen, PrintConsole *console);
 void  consoleClear(void);

@@ -77,11 +77,13 @@ static void recalc_geometry(int mode)
 
 void video_init(void)
 {
-	/* Default is BGR8 for both screens; switch the top screen to RGB565 so
-	 * 16-bit palette entries can be written directly. */
+	/* Default is BGR8 for both screens; switch both to RGB565 so 16-bit
+	 * palette entries - and the UI canvas - can be written directly. The
+	 * bottom screen is drawn by ui_gfx.c, which swaps its own buffer. */
 	gfxInitDefault();
 	gfxSet3D(false);
 	gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
+	gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
 	gfxSetDoubleBuffering(GFX_TOP, true);
 	gfxSetDoubleBuffering(GFX_BOTTOM, true);
 
@@ -155,7 +157,12 @@ void video_end_frame(void)
 {
 	if (!fb_ready)
 		return;
-	gfxFlushBuffers();
-	gfxSwapBuffers();
+
+	/* Only the top screen. gfxFlushBuffers() and gfxSwapBuffers() both touch
+	 * *both* screens: the former flushes 153 KiB of bottom-screen framebuffer
+	 * that has not changed, and the latter flips the bottom buffer out from
+	 * under ui_gfx.c, which swaps that screen on its own schedule. */
+	GSPGPU_FlushDataCache(fb, LCD_TOP_W * FB_STRIDE * sizeof(u16));
+	gfxScreenSwapBuffers(GFX_TOP, true);
 	fb_ready = false;
 }

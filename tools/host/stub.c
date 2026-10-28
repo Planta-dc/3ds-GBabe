@@ -13,12 +13,15 @@
 #include <time.h>
 
 u16 g_host_fb[400 * 240];
+u16 g_host_bottom_fb[320 * 240];
 int g_host_frames;
 int g_host_max_frames = 300;
 bool g_host_quit;
 
 static u16 fb_backing[2][240 * 400];
+static u16 fb_bottom[2][240 * 320];
 static int fb_index;
+static int fb_bottom_index;
 static int fb_top_format = GSP_BGR8_OES;
 
 u64 svcGetSystemTick(void)
@@ -82,21 +85,51 @@ u8 *gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *hei
 		*width = 240;
 	if (height != NULL)
 		*height = (screen == GFX_TOP) ? 400 : 320;
-	return (u8 *)fb_backing[fb_index];
+	return (screen == GFX_TOP) ? (u8 *)fb_backing[fb_index]
+				   : (u8 *)fb_bottom[fb_bottom_index];
+}
+
+Result GSPGPU_FlushDataCache(const void *adr, u32 size)
+{
+	(void)adr;
+	(void)size;
+	return 0;
+}
+
+void gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo)
+{
+	(void)hasStereo;
+	if (scr == GFX_TOP)
+	{
+		const u16 *src = fb_backing[fb_index];
+		for (int y = 0; y < 240; y++)
+			for (int x = 0; x < 400; x++)
+				g_host_fb[y * 400 + x] =
+					src[x * 240 + (239 - y)];
+		fb_index ^= 1;
+		return;
+	}
+
+	/* Undo the rotation: the panel is 240 wide x 320 tall in memory, so
+	 * landscape (x, y) sits at x * 240 + (239 - y) - same constant as the top
+	 * screen, because both panels are 240 pixels on their short side. */
+	const u16 *src = fb_bottom[fb_bottom_index];
+	for (int y = 0; y < 240; y++)
+		for (int x = 0; x < 320; x++)
+			g_host_bottom_fb[y * 320 + x] = src[x * 240 + (239 - y)];
+
+	fb_bottom_index ^= 1;
 }
 
 void gfxFlushBuffers(void) {}
 
 void gfxSwapBuffers(void)
 {
-	/* Copy what was presented so the harness can dump the last frame.  On the
-	 * 3DS the LCD scanout already produces landscape pixels; here we undo the
-	 * 90 degree storage rotation to get a normal 400x240 image. */
-	const u16 *src = fb_backing[fb_index];
-	for (int y = 0; y < 240; y++)
-		for (int x = 0; x < 400; x++)
-			g_host_fb[y * 400 + x] = src[x * 240 + (239 - y)];
-	fb_index ^= 1;
+	/* libctru's gfxSwapBuffers() swaps *both* screens - which is why video.c
+	 * calls gfxScreenSwapBuffers(GFX_TOP, true) alone, and why this stand-in
+	 * does the same thing rather than only the top. */
+	gfxScreenSwapBuffers(GFX_TOP, true);
+	gfxScreenSwapBuffers(GFX_BOTTOM, true);
 }
 
 void gspWaitForVBlank(void) {}

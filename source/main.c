@@ -13,7 +13,6 @@
  */
 #include <3ds.h>
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -150,16 +149,7 @@ static bool frame_due(void)
 
 static void show_error(const char *msg)
 {
-	consoleClear();
-	printf("\x1b[2;1H%s", msg);
-	printf("\x1b[6;1HPress A to pick another ROM.");
-	while (aptMainLoop())
-	{
-		hidScanInput();
-		if (hidKeysDown() & (KEY_A | KEY_B))
-			return;
-		gspWaitForVBlank();
-	}
+	ui_message("Cannot open ROM", msg, "Press A to pick another ROM.");
 }
 
 int main(int argc, char **argv)
