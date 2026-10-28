@@ -7,13 +7,12 @@
  *
  *     addr = (x * 240 + (239 - y)) * bytes_per_pixel
  *
- * We render the 160x144 Game Boy frame straight into that layout, line by
- * line, from the core's lcd_draw_line callback - no intermediate buffer and no
- * GPU involved, which keeps memory traffic (and therefore power) low.
+ * We render the 160x144 Game Boy frame straight into that layout, one
+ * destination column at a time - no intermediate buffer and no GPU involved,
+ * which keeps memory traffic (and therefore power) low.
  *
- * RGB565 is used so that the core's own CGB palette output
- * (WALNUT_GB_RGB565_BIGENDIAN == 0, i.e. native little-endian RGB565) can be
- * copied through untouched.
+ * RGB565 is what the core draws (VIDEO_RGB565), so its output is copied
+ * through untouched.
  *
  * MIT licensed.
  */
@@ -38,6 +37,13 @@ static int dst_x0, dst_y0, dst_w, dst_h;
 static int16_t map_x[LCD_TOP_W]; /* dst column -> source column */
 static int16_t map_y[LCD_TOP_H]; /* dst row    -> source row    */
 static int current_scale = -1;
+static u64 present_wait;     /* ticks spent waiting for the panel last frame */
+static u64 frame_start;      /* when video_begin_frame() was called          */
+static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
+
+/* One Game Boy frame, in ARM11 ticks. Used to decide whether there is time to
+ * wait for the panel: see video_end_frame(). */
+#define FRAME_TICKS ((u64)GBABE_FRAME_TICKS)
 
 static void recalc_geometry(int mode)
 {
@@ -131,7 +137,7 @@ static inline u16 *fb_pixel(int x, int y)
 	return (u16 *)&fb[((x * FB_STRIDE) + (FB_STRIDE - 1 - y)) * sizeof(u16)];
 }
 
-/* Nothing outside the picture rectangle is ever written by video_draw_line(),
+/* Nothing outside the picture rectangle is ever written by video_draw_frame(),
  * and libctru hands out framebuffers straight from linearAlloc() without
  * clearing them (gfxInit() does not memset). So the bars beside and above the
  * picture would show uninitialised memory - coloured static - unless they are
@@ -171,6 +177,8 @@ static void clear_letterbox(void)
 
 void video_begin_frame(void)
 {
+	frame_start = svcGetSystemTick();
+	frame_timed = true;
 	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
 	fb_ready = (fb != NULL);
 	clear_letterbox();
@@ -181,43 +189,25 @@ void video_begin_frame(void)
  * (nothing is playing then). */
 void video_clear(void)
 {
-	u16 *f = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-	if (f == NULL)
-		return;
-
-	const size_t bytes = LCD_TOP_W * FB_STRIDE * sizeof(u16);
-	memset(f, 0, bytes);
-	GSPGPU_FlushDataCache(f, bytes);
-	gfxScreenSwapBuffers(GFX_TOP, true);
-}
-
-void video_draw_line(const uint16_t *line565, int line)
-{
-	if (!fb_ready)
-		return;
-
-	/* Which destination rows does this source line cover? Nearest-neighbour,
-	 * so with the default 5/3 scale some lines produce one row and some two. */
-	int y0 = (line * dst_h + 143) / 144;
-	int y1 = ((line + 1) * dst_h + 143) / 144;
-	if (y1 <= y0)
-		y1 = y0 + 1;
-	if (y1 > dst_h)
-		y1 = dst_h;
-
-	for (int dy = y0; dy < y1; dy++)
+	/* The swap is followed by a wait for the same reason as in
+	 * video_end_frame(): the buffer becomes the back buffer immediately but
+	 * is not safe to write until the panel has taken the other one. */
+	for (int pass = 0; pass < 2; pass++)
 	{
-		const int y = dst_y0 + dy;
-		u16 *base = fb_pixel(dst_x0, y);
-		/* Step 240 pixels per destination column, i.e. one panel row. */
-		for (int dx = 0; dx < dst_w; dx++)
-			base[dx * FB_STRIDE] = line565[map_x[dx]];
+		u16 *f = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+		if (f == NULL)
+			return;
+
+		const size_t bytes = LCD_TOP_W * FB_STRIDE * sizeof(u16);
+		memset(f, 0, bytes);
+		GSPGPU_FlushDataCache(f, bytes);
+		gfxScreenSwapBuffers(GFX_TOP, true);
+		gspWaitForVBlank();
 	}
 }
 
-/* One call per frame instead of one per scanline: see video.h. The panel
- * address of a pixel grows as y shrinks, so a column is written from its
- * bottom row upwards, which makes the writes sequential. */
+/* The panel address of a pixel grows as y shrinks, so a column is written from
+ * its bottom row upwards, which makes the writes sequential. See video.h. */
 void video_draw_frame(const uint16_t *frame565, int pitch)
 {
 	if (!fb_ready || frame565 == NULL)
@@ -243,6 +233,8 @@ void video_draw_frame(const uint16_t *frame565, int pitch)
 
 void video_end_frame(void)
 {
+	present_wait = 0;
+
 	if (!fb_ready)
 		return;
 
@@ -252,5 +244,40 @@ void video_end_frame(void)
 	 * under ui_gfx.c, which swaps that screen on its own schedule. */
 	GSPGPU_FlushDataCache(fb, LCD_TOP_W * FB_STRIDE * sizeof(u16));
 	gfxScreenSwapBuffers(GFX_TOP, true);
+
+	/* Now wait for the panel to take it. Until this returns, the buffer the
+	 * next frame would draw into is still being scanned out; drawing into it
+	 * before the swap lands is exactly the tear that used to slide down the
+	 * screen (see video.h).
+	 *
+	 * Only if there is time. The wait ends at the next vblank, so as long as
+	 * the frame's own work fits in one frame period the cadence becomes
+	 * exactly the panel's 60 Hz; but a frame that has already overrun would
+	 * be pushed to the *following* vblank and the game would run at 30 fps.
+	 * In that case the console is behind anyway: present immediately and let
+	 * it tear, which is much less bad than halving the frame rate. */
+	const u64 now = svcGetSystemTick();
+	const bool slack = frame_timed && now - frame_start < FRAME_TICKS;
+
+	if (slack)
+	{
+		gspWaitForVBlank();
+
+		/* A swap posted just before a vblank can miss it by a hair, in
+		 * which case the panel keeps the old buffer for another
+		 * 16.7 ms and the next draw would tear. gspIsPresentPending()
+		 * says whether that happened; give it one more vblank rather
+		 * than guess. */
+		if (gspIsPresentPending(GFX_TOP))
+			gspWaitForVBlank();
+	}
+
+	present_wait = svcGetSystemTick() - now;
 	fb_ready = false;
+	frame_timed = false;
+}
+
+uint64_t video_present_wait(void)
+{
+	return present_wait;
 }

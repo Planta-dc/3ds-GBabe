@@ -17,25 +17,40 @@ void video_set_scale(int mode);
 /* Grab the back framebuffer for this frame. */
 void video_begin_frame(void);
 
-/* Draw one Game Boy scanline (160 RGB565 pixels) into the back framebuffer,
- * applying the current scale mode. line is 0..143, top to bottom. */
-void video_draw_line(const uint16_t *line565, int line);
-
-/* Draw a whole 160x144 RGB565 frame at once, `pitch` pixels per line.
+/* Draw a whole 160x144 RGB565 frame, `pitch` pixels per line.
  *
- * The top LCD is a rotated panel, so the picture is stored column by column:
- * with one scanline at a time every pixel written is a separate cache line
- * (240 halfwords apart). With the whole frame in hand the writes go down a
- * column instead, which is one contiguous run of dst_h halfwords, and the
- * source is read column by column - also sequential, because the frame is
- * small enough to stay in cache.
- *
- * Callers that only get one line at a time (the Walnut-CGB hook) still use
- * video_draw_line(). */
+ * The top LCD is a rotated panel, so the picture is stored column by column.
+ * The frame is scaled down a destination column at a time, which makes every
+ * write a contiguous run of dst_h halfwords instead of one halfword every 480
+ * bytes - the difference between touching each cache line once and touching it
+ * 240 times per frame. The source is read column by column too, and stays in
+ * cache while it is being read. */
 void video_draw_frame(const uint16_t *frame565, int pitch);
 
-/* Flush and present the back buffer. */
+/* Flush the back buffer and hand it to the panel, then wait for the panel to
+ * take it.
+ *
+ * The wait is what keeps the picture from tearing. libctru's buffers are a
+ * two-deep swap chain: gfxGetFramebuffer() returns the buffer that is *not*
+ * displayed, and gfxScreenSwapBuffers() flips the caller's idea of which one
+ * that is immediately - while the panel only switches at the next vblank. Draw
+ * into the new "back" buffer straight away and, for the 10-15 ms until that
+ * vblank arrives, you are writing into the buffer that is still being scanned
+ * out. A tear line appears wherever the scanout happens to be, and because the
+ * Game Boy's 59.7275 Hz does not divide 60 Hz it *drifts* down the screen.
+ *
+ * Waiting here costs nothing: the frame loop is idle at this point anyway.
+ * video_present_wait() reports how long the wait took, so the HUD can show it
+ * apart from the blit and from the emulator's own pacing.
+ *
+ * If the frame's own work already overran a frame period, the wait is skipped
+ * and the frame is presented at once. Waiting would take until the *following*
+ * vblank and halve the frame rate at exactly the moment the console is
+ * struggling - one torn frame is the lesser evil. */
 void video_end_frame(void);
+
+/* ARM11 ticks spent waiting for the panel in the last video_end_frame(). */
+uint64_t video_present_wait(void);
 
 /* Fill the top screen with black (used by menus). */
 void video_clear(void);

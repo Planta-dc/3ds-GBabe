@@ -19,17 +19,14 @@ is that the right pixels are the right shade of the right layer - which is what
 
 From the repository root:
 
-    make -C tools/host acid2                 # Gambatte
-    make -C tools/host acid2 CORE=walnut     # Walnut-CGB
+    make -C tools/host acid2
 
 `acid2` renders 300 frames at `SCALE_ORIG`, which is the only scale that puts
 the frame 1:1 on the 400x240 top screen (x 120..279, y 48..191), so the render
 can be compared with the 160x144 reference pixel for pixel; then it runs the
-comparison. It relinks `tools/host/gbabe-host` when the binary was built for
-the other core, so the two invocations can be made in either order.
+comparison. The harness also fails the run if any frame started drawing into
+the buffer the panel was still showing - that is a torn frame, which a single
+PPM cannot show.
 
-CI runs both.
+CI runs it on every push.
 
-`make -C tools/host cross` goes one step further: it renders `dmg-acid2` with
-both cores at all three scales and compares the two PPMs byte for byte, so the
-cores have to agree with each other as well as with the reference.

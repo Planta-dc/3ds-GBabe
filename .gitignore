@@ -16,7 +16,7 @@ third_party/gambatte/libgambatte-host.a
 
 # Host harness
 tools/host/gbabe-host
-tools/host/gbabe-host.core
+tools/host/gbabe-audiotest
 tools/host/gbabe-bench
 tools/host/gbabe-logtest
 tools/host/logtest.log
@@ -39,5 +39,5 @@ build.log
 *.swp
 .vscode/
 
-# Host build objects (one directory per core)
+# Host build objects
 tools/host/obj/

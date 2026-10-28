@@ -5,14 +5,11 @@ A Game Boy / Game Boy Color emulator for the **Nintendo 3DS**, built around
 RetroArch `gambatte` core uses — with a hand-written libctru front-end.
 
 The first version of this port used
-[Walnut-CGB](https://github.com/Mr-PauI/Walnut-CGB); it is still built, as a
-second installable, so both cores can be compared on the same console
-(`make CORE=walnut`). On a PC Gambatte needs 1.6x-3.2x less time per emulated
-frame. Both cores render `dmg-acid2` pixel-identically to its reference image,
-which CI checks on every build (`make -C tools/host acid2`, `CORE=walnut` for
-the other one); that check found and fixed a Walnut bug that collapsed two DMG
-shades into one — the measurements are in
-[docs/PORT-NOTES.md](docs/PORT-NOTES.md#0-the-default-core-is-gambatte-050).
+[Walnut-CGB](https://github.com/Mr-PauI/Walnut-CGB). It was replaced by Gambatte,
+which needs 1.6x-3.2x less time per emulated frame on a PC, and has since been
+removed: on a 268 MHz ARM11 the core is what decides whether a game runs at full
+speed. The measurements, and the bugs that came out of comparing the two, are in
+[docs/PORT-NOTES.md](docs/PORT-NOTES.md#0-the-core-is-gambatte-050).
 
 Target: **Old 3DS / 2DS first.** No DSP firmware dump, no GPU shaders, no
 dynamic recompilation, no external libraries beyond libctru.
@@ -35,10 +32,10 @@ two under it are the bottom screen through the real UI code in
 
 | Area | State |
 |---|---|
-| DMG (original Game Boy) emulation | core: Gambatte 0.5.0 (default) or Walnut-CGB |
-| CGB (Game Boy Color) emulation | core: Gambatte 0.5.0 (default) or Walnut-CGB |
-| Video (RGB565, line-by-line blit, 3 scale modes) | done |
-| Audio (core APU → CSND, buffered) | done |
+| DMG (original Game Boy) emulation | core: Gambatte 0.5.0 |
+| CGB (Game Boy Color) emulation | core: Gambatte 0.5.0 |
+| Video (RGB565, whole-frame blit, 3 scale modes, present on vblank) | done |
+| Audio (core APU → CSND, stereo, gapless block scheduling) | done |
 | ROM browser, in-game menu, config file | done |
 | Bottom-screen UI: drawn (fonts, panels, animation), touch + buttons | done |
 | `.sav` cartridge RAM (auto-save every 30 s) | done |
@@ -49,8 +46,13 @@ two under it are the bottom screen through the real UI code in
 `.github/workflows/build.yml` builds `.3dsx` and `.cia` on GitHub's runners, on
 every push and on demand. The platform-independent parts are compiled and run
 on the host by `tools/host` (which renders the screenshot above) and
-`tools/uipreview` (which renders the bottom screen). What none of that checks is
-behaviour on real hardware — see [docs/PORT-NOTES.md](docs/PORT-NOTES.md).
+`tools/uipreview` (which renders the bottom screen). Two of the checks are about
+timing rather than pixels, because that is what went wrong on the console: a
+frame that starts drawing into the buffer the panel is still showing (a tear line
+that slides down the screen) and a sound block submitted after the previous one
+ran out (a stutter at the block rate). Both are measured on the host and both
+fail the build. What none of that checks is behaviour on real hardware — see
+[docs/PORT-NOTES.md](docs/PORT-NOTES.md).
 
 ---
 
@@ -64,27 +66,19 @@ export DEVKITPRO=/opt/devkitpro
 export DEVKITARM=$DEVKITPRO/devkitARM
 export PATH=$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH
 
-make -j4            # CORE=gambatte, the default: gbabe.cia / gbabe.3dsx
-make cia
+make -j4            # -> gbabe.3dsx (and gbabe.smdh)
+make cia            # -> gbabe.cia
 ```
 
-### Choosing the emulation core
-
-```sh
-make -j4                     # Gambatte 0.5.0   -> gbabe.cia / gbabe.3dsx
-make CORE=walnut -j4 && make CORE=walnut cia
-                             # Walnut-CGB       -> gbabe-walnut.cia / .3dsx
-```
-
-The two builds have different title ids, so both can be installed at once and
-the same ROM played through each; `core=` in the debug log (see below) then
-says what each one actually costs on your console. Everything except the core
-is shared, including the `.sav` files.
+There is one build: Gambatte 0.5.0. The Walnut-CGB build (`gbabe-walnut.cia`,
+its own title id) no longer exists — it was 1.6x-3.4x slower per frame, and a
+second backend meant every front-end change had to be verified twice.
 
 Gambatte is GPL-2.0, so a binary built with it is distributed under GPL-2.0;
 the project's own code stays MIT. See
 [third_party/gambatte/README.md](third_party/gambatte/README.md) for the exact
-upstream commit and the three local patches.
+upstream commit and the three local patches, and [LICENSE](LICENSE) for how the
+two fit together.
 
 ### The devcontainer (the toolchain CI uses)
 
@@ -214,21 +208,27 @@ sdmc:/3ds/gbabe/debug.log
 ```
 
 ```
-# GBabe 0.1.0 debug log
+# GBabe 0.2.0 debug log
 # os time: 133987887000000000
-[    0.412] GBabe 0.1.0, Old 3DS/2DS
+[    0.412] GBabe 0.2.0, Old 3DS/2DS
 [    0.414] tick rate 268123480 Hz, scale=0 palette=0 frameskip=0
-[    0.501] audio: on, requested on
+[    0.501] audio: 32768 Hz, stereo, 31 ms blocks, channels 30/29/28/27
 [    3.882] rom: "POKEMON CRYSTAL" CGB mbc5 64 rom banks 4 ram banks
 [    3.884] rom path: sdmc:/roms/Pokemon Crystal.gbc
-[    4.901] perf fps=43.1 frame=23.2 worst=31.8 core=19.6 blit=1.7 wait=0.4 other=1.5 audio=18ms
-[    4.904] slow frame 31.8 ms: core 27.1 blit 1.9 audio 24 ms
+[    4.901] perf fps=43.1 frame=23.2 worst=31.8 core=19.6 blit=1.7 sync=12.0 wait=0.4 other=1.5 audio=60ms
+[    4.904] slow frame 31.8 ms: core 27.1 blit 1.9 audio 60 ms
+[    8.913] audio: 128 blocks, late 3 (worst 0.19 ms), underruns 0, resyncs 0, dropped 0, queue 58 ms, margin 0.71 ms
 [   30.112] setting frameskip=1
-[   30.640] perf fps=59.4 frame=16.8 worst=19.1 core=19.9 blit=1.2 wait=0.0 other=0.7 audio=9ms
+[   30.640] perf fps=59.4 frame=16.8 worst=19.1 core=19.9 blit=1.2 sync=12.1 wait=0.0 other=0.7 audio=59ms
 ```
 
 * one `perf` line a second: the same numbers the status readout shows, plus
-  `other` (the part of the frame nothing else accounts for);
+  `sync` (waiting for the panel to take the finished frame) and `other` (the
+  part of the frame nothing else accounts for);
+* `audio:` every few seconds when something happened: blocks submitted, how
+  many were late and by how much, underruns, resyncs, dropped samples, the
+  queue depth and the submit margin. A stutter shows up here as `late` or
+  `underruns`, not as a vague "sound is bad";
 * `slow frame` whenever a presented frame takes over 20 ms, with the split and
   the audio queue depth — a stutter is usually one of those two;
 * every settings change, every ROM loaded (title, CGB/DMG, MBC, bank counts,
@@ -292,7 +292,7 @@ Known speed levers, in order of effect:
 | X (turbo) | runs two emulated frames per presented one, at the cost of dropped frames |
 | frame skip in the menu | halves the blit cost, keeps emulation speed |
 | sound off in the menu | removes the APU mixing and the CSND hand-off |
-| `WALNUT_GB_16_BIT_OPS` in `third_party/walnut/walnut_cgb.h` | a few percent, at the cost of accuracy in some games |
+| `make OPT=-O2` when a toolchain update miscompiles something | -2%, nothing more |
 
 ---
 
@@ -360,11 +360,11 @@ rom=sdmc:/roms/game.gbc
 
 ```
 source/main.c     services, input mapping, 59.7275 Hz frame pacing
-source/emu_gambatte.cpp  Gambatte backend (default): ROM, .sav/.rtc, audio
-                  decimation, DMG palette push, boot ROM
-source/emu.c      Walnut-CGB backend (CORE=walnut), same include/emu.h
-source/video.c    RGB565 scanline blit into the rotated 3DS framebuffer
-source/audio.c    minigb_apu -> software FIFO -> CSND blocks
+source/emu_gambatte.cpp  Gambatte backend: ROM, .sav/.rtc, audio decimation,
+                  DMG palette push, boot ROM
+source/video.c    RGB565 whole-frame blit into the rotated 3DS panel, and the
+                  vblank wait that stops it tearing
+source/audio.c    stereo CSND blocks on a deadline, fed from a software FIFO
 source/palette.c  DMG palettes, including Game Boy Color "auto" colouring
 source/ui.c       ROM browser, in-game menu, status readout (state + input)
 source/log.c      the diagnostic log on the SD card
@@ -374,8 +374,8 @@ source/ui_font.c  generated 4-bit glyph atlases (tools/make-font.py)
 source/config.c   key=value settings on the SD card
 resources/        CIA spec (gbabe.rsf) and banner, generated by tools/make-artwork.py
 docker/           build image used by CI and the devcontainer, + ci-build.sh
-third_party/      Gambatte 0.5.0 (GPL-2.0), Walnut-CGB (MIT) and
-                  minigb_apu (MIT), vendored; see each README
+third_party/      Gambatte 0.5.0 (GPL-2.0) and the DejaVu font licence,
+                  vendored; see third_party/gambatte/README.md
 tools/host/       PC harness: builds and runs the front-end without a 3DS
 tools/uipreview/  renders every UI screen to an image, on the PC
 ```
@@ -390,14 +390,19 @@ make -C tools/host            # builds ./gbabe-host
 make -C tools/host check      # type-checks main.c too
 make -C tools/host logtest    # checks the debug log's format
 make -C tools/host bench ROM=game.gb   # per-frame cost of core and blit
-make -C tools/host acid2               # dmg-acid2 render check (add CORE=walnut)
-make -C tools/host cross               # both cores render the same picture
+make -C tools/host acid2               # dmg-acid2 render check, pixel by pixel
+make -C tools/host audiotest           # is the sound stream continuous?
 ./tools/host/gbabe-host game.gb 300 out.ppm 0
 ```
 
 It substitutes `tools/host/3ds.h` for libctru (same prototypes, no behaviour),
-runs the real `emu.c`/`video.c`/`palette.c` and dumps the top screen as a PPM —
-handy for checking a rendering or palette change without a console.
+runs the real `emu_gambatte.cpp`/`video.c`/`palette.c`/`audio.c` and dumps the top
+screen as a PPM — handy for checking a rendering or palette change without a
+console. `acid2` compares that dump with the reference frame of the dmg-acid2
+test ROM by *shade rank*, so no palette choice can mask a wrong pixel, and it
+fails if any frame started drawing into the buffer the panel was still showing
+(a tear). `audiotest` drives the real audio path against a stand-in CSND that
+plays blocks in real time, and fails if the stream has holes.
 
 ### UI previews
 
@@ -424,16 +429,14 @@ python3 tools/make-font.py /usr/share/fonts/truetype/dejavu source/ui_font.c
 
 * **[Gambatte](https://github.com/libretro/gambatte-libretro)** by Sindre Aamås
   and the libretro maintainers, **GPL-2.0** (commit `7809bb6`, i.e. Gambatte
-  0.5.0) — the default emulation core. Vendored in `third_party/gambatte/`,
+  0.5.0) — the emulation core. Vendored in `third_party/gambatte/`,
   with three small patches documented there. Because GBabe links it, the
   emulator binary as a whole is GPL-2.0.
-* **[Walnut-CGB](https://github.com/Mr-PauI/Walnut-CGB)** by Mr-PauI, MIT —
-  the emulator core, a reimplementation of and successor to
-  [Peanut-GB](https://github.com/deltabeard/Peanut-GB) by Mahyar Koshkouei.
-  Vendored unmodified in `third_party/walnut/`.
-* **[minigb_apu](https://github.com/deltabeard/Peanut-GB)** by Alex Baines and
-  Mahyar Koshkouei, MIT — the audio processing unit emulation.
-  Vendored unmodified in `third_party/minigb_apu/`.
+* **[Walnut-CGB](https://github.com/Mr-PauI/Walnut-CGB)** by Mr-PauI, MIT, and
+  the [Peanut-GB](https://github.com/deltabeard/Peanut-GB) line it comes from —
+  the core the first versions of this port used. It is no longer part of the
+  build or of this repository; the history is in
+  [docs/PORT-NOTES.md](docs/PORT-NOTES.md).
 * **DejaVu Sans** (Bitstream Vera / DejaVu licence, see
   `third_party/fonts/DejaVu-LICENSE.txt`) — the UI text. Only bitmaps baked by
   `tools/make-font.py` are distributed, in `source/ui_font.c`.

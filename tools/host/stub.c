@@ -17,18 +17,21 @@
  */
 #include <3ds.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
 u16 g_host_fb[400 * 240];
 u16 g_host_bottom_fb[320 * 240];
 int g_host_frames;
+int g_host_tears;
 int g_host_max_frames = 300;
 bool g_host_quit;
 
 static u16 fb_backing[2][240 * 400]; /* top, 240x400 in panel layout */
 static u16 fb_bottom[2][240 * 320];  /* bottom, ditto */
 static int fb_cur[2];                /* presented buffer, per screen */
+static int present_pending[2];       /* a swap the panel has not taken yet */
 static int fb_double[2] = { 1, 1 };  /* gfxInitDefault() enables it */
 static int fb_top_format = GSP_BGR8_OES;
 
@@ -111,6 +114,12 @@ void gfxSetDoubleBuffering(gfxScreen_t screen, bool enable)
 u8 *gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height)
 {
 	(void)side;
+
+	/* A swap that the panel has not taken yet means the buffer this call is
+	 * about to hand out is the one on screen right now. Drawing into it is
+	 * exactly the tear that video_end_frame() waits to avoid. */
+	if (screen == GFX_TOP && present_pending[0])
+		g_host_tears++;
 	if (width != NULL)
 		*width = 240;
 	if (height != NULL)
@@ -135,6 +144,7 @@ void gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo)
 	/* Toggle first: the buffer that becomes current is the one presented,
 	 * which is what the caller just drew into. */
 	fb_cur[(int)scr] ^= fb_double[(int)scr];
+	present_pending[(int)scr] = 1;
 
 	/* Undo the panel rotation so the host sees a landscape image: the panel
 	 * is 240 wide in memory, so landscape (x, y) sits at
@@ -167,7 +177,18 @@ void gfxSwapBuffers(void)
 	gfxScreenSwapBuffers(GFX_BOTTOM, true);
 }
 
-void gspWaitForVBlank(void) {}
+/* The panel takes a swap at the next vblank. Modelled because video.c waits for
+ * it: a swap that is still pending means the buffer the caller is about to draw
+ * into is still the one on screen. */
+bool gspIsPresentPending(unsigned screen)
+{
+	return screen < 2 && present_pending[screen] != 0;
+}
+
+void gspWaitForVBlank(void)
+{
+	present_pending[0] = present_pending[1] = 0;
+}
 
 PrintConsole *consoleInit(gfxScreen_t screen, PrintConsole *console)
 {
@@ -182,19 +203,195 @@ u32 hidKeysHeld(void) { return 0; }
 u32 hidKeysDownRepeat(void) { return 0; }
 void hidTouchRead(touchPosition *pos) { pos->px = pos->py = 0; }
 
-Result csndInit(void) { return -1; } /* no audio on the host */
-void csndExit(void) {}
-Result CSND_UpdateInfo(bool waitDone) { (void)waitDone; return -1; }
-Result csndIsPlaying(u32 channel, u8 *status) { (void)channel; *status = 0; return -1; }
+/* ------------------------------------------------------------------------- */
+/* Simulated CSND                                                           */
+/* ------------------------------------------------------------------------- */
+
+/* Off by default: a render check has no use for real-time audio. With
+ * GBABE_HOST_AUDIO=1 the service pretends to play the blocks it is given, in
+ * real time, which is enough to measure whether the block scheduler keeps the
+ * stream continuous (see audiotest.c). */
+u32 csndChannels;
+host_csnd_block g_host_csnd_blocks[HOST_CSND_MAX_BLOCKS];
+unsigned g_host_csnd_count;
+
+static int csnd_on;           /* the fake service is running       */
+static u64 block_end[CSND_NUM_CHANNELS]; /* when each channel falls silent */
+static u32 block_rate[CSND_NUM_CHANNELS];
+
+void g_host_csnd_reset(void)
+{
+	g_host_csnd_count = 0;
+	for (int i = 0; i < CSND_NUM_CHANNELS; i++)
+		block_end[i] = 0;
+}
+
+Result csndInit(void)
+{
+	const char *on = getenv("GBABE_HOST_AUDIO");
+
+	if (on == NULL || (on[0] != '1' && on[0] != '2'))
+		return -1; /* no audio on the host, as before */
+
+	csnd_on = 1;
+	/* "1" hands out four channels (stereo, the normal case); "2" only two, so
+	 * the mono fallback in audio.c is exercised too. */
+	csndChannels = (on[0] == '2') ? (BIT(30) | BIT(29))
+				      : (BIT(30) | BIT(29) | BIT(28) | BIT(27));
+	g_host_csnd_reset();
+	return 0;
+}
+
+void csndExit(void) { csnd_on = 0; }
+
+Result CSND_UpdateInfo(bool waitDone) { (void)waitDone; return 0; }
+
+Result csndIsPlaying(u32 channel, u8 *status)
+{
+	*status = (channel < CSND_NUM_CHANNELS &&
+		   svcGetSystemTick() < block_end[channel]) ? 1 : 0;
+	return 0;
+}
+
 Result CSND_FlushDataCache(const void *adr, u32 size) { (void)adr; (void)size; return 0; }
 Result csndExecCmds(bool waitDone) { (void)waitDone; return 0; }
-void CSND_SetPlayStateR(u32 channel, u32 value) { (void)channel; (void)value; }
+
+void CSND_SetPlayStateR(u32 channel, u32 value)
+{
+	if (channel < CSND_NUM_CHANNELS && value == 0)
+		block_end[channel] = svcGetSystemTick();
+}
+
 Result csndPlaySound(int chn, u32 flags, u32 sampleRate, float vol, float pan,
 		     void *data0, void *data1, u32 size)
 {
-	(void)chn; (void)flags; (void)sampleRate; (void)vol; (void)pan;
-	(void)data0; (void)data1; (void)size;
-	return -1;
+	(void)flags; (void)vol; (void)pan; (void)data0; (void)data1;
+
+	if (!csnd_on || chn < 0 || chn >= CSND_NUM_CHANNELS || sampleRate == 0)
+		return -1;
+
+	const u64 now = svcGetSystemTick();
+	const u32 frames = size / sizeof(s16);
+	block_rate[chn] = sampleRate;
+	block_end[chn] = now + (u64)((double)frames * SYSCLOCK_ARM11 / sampleRate);
+
+	if (g_host_csnd_count < HOST_CSND_MAX_BLOCKS)
+	{
+		g_host_csnd_blocks[g_host_csnd_count].start = now;
+		g_host_csnd_blocks[g_host_csnd_count].ticks = block_end[chn] - now;
+		g_host_csnd_blocks[g_host_csnd_count].channel = chn;
+		g_host_csnd_blocks[g_host_csnd_count].frames = frames;
+		g_host_csnd_count++;
+	}
+	return 0;
+}
+
+/* Silence between blocks, and how far apart the two ears of a pair started.
+ * Both are what "the sound stutters" looks like from here. */
+int g_host_csnd_report(void)
+{
+	if (g_host_csnd_count == 0)
+	{
+		printf("csnd: no blocks were ever submitted\n");
+		return 1;
+	}
+
+	/* Union of every block's playing interval: any hole in it is audio the
+	 * hardware did not play because nothing had been submitted. */
+	u64 covered_until = g_host_csnd_blocks[0].start;
+	u64 worst_gap = 0;
+	u64 total_gap = 0;
+	unsigned gaps = 0;
+
+	for (unsigned i = 0; i < g_host_csnd_count; i++)
+	{
+		const u64 s = g_host_csnd_blocks[i].start;
+		const u64 e = s + g_host_csnd_blocks[i].ticks;
+
+		if (s > covered_until)
+		{
+			const u64 gap = s - covered_until;
+			total_gap += gap;
+			if (gap > worst_gap)
+				worst_gap = gap;
+			gaps++;
+		}
+		if (e > covered_until)
+			covered_until = e;
+	}
+
+	/* Ears: consecutive submissions within a millisecond of each other are
+	 * the two channels of one block, and should start together. In the mono
+	 * fallback there are no pairs, which is fine - but then only one channel
+	 * may be in use. */
+	u64 worst_skew = 0;
+	unsigned pairs = 0;
+
+	unsigned channels_used = 0;
+	for (unsigned i = 0; i < g_host_csnd_count; i++)
+	{
+		unsigned mask = 0;
+		for (unsigned j = 0; j < i; j++)
+			if (g_host_csnd_blocks[j].channel ==
+			    g_host_csnd_blocks[i].channel)
+				mask = 1;
+		if (!mask)
+			channels_used++;
+	}
+
+	for (unsigned i = 1; i < g_host_csnd_count; i++)
+	{
+		const s64 d = (s64)g_host_csnd_blocks[i].start -
+			      (s64)g_host_csnd_blocks[i - 1].start;
+
+		if (d >= 0 && d < (s64)(SYSCLOCK_ARM11 / 1000))
+		{
+			if ((u64)d > worst_skew)
+				worst_skew = (u64)d;
+			pairs++;
+		}
+	}
+
+	const double ms = 1000.0 / SYSCLOCK_ARM11;
+	const double span = (double)(covered_until - g_host_csnd_blocks[0].start);
+
+	printf("csnd: %u blocks submitted on %u channels, %u ear pairs, "
+	       "%.0f ms of audio\n", g_host_csnd_count, channels_used, pairs,
+	       span * ms);
+	printf("csnd: %u holes, %.2f ms total, worst %.2f ms; worst ear skew "
+	       "%.2f ms\n", gaps, (double)total_gap * ms, (double)worst_gap * ms,
+	       (double)worst_skew * ms);
+
+	/* A hole is audible when it is long enough to be heard as a break in
+	 * the waveform. 0.5 ms is 16 samples at 32768 Hz, and the total is
+	 * capped at 1% of the run: the scheduler is expected to hover right at
+	 * the block boundary, so sub-millisecond holes are a sign that it is
+	 * working, not that it is broken. */
+	const u64 hole_limit = (u64)(SYSCLOCK_ARM11 * 0.0005);
+
+	int bad = 0;
+	if (worst_gap > hole_limit || total_gap * 100 > span)
+	{
+		printf("csnd: FAIL - the stream was interrupted (limit %.2f ms "
+		       "per hole, 1%% of the run in total); blocks are not being "
+		       "submitted before the previous one ends\n",
+		       (double)hole_limit * ms);
+		bad = 1;
+	}
+	if (worst_skew > (u64)(SYSCLOCK_ARM11 / 500))
+	{
+		printf("csnd: FAIL - the two ears of a block start more than 2 ms "
+		       "apart\n");
+		bad = 1;
+	}
+	if (channels_used >= 4 && pairs * 2 < g_host_csnd_count - 2)
+	{
+		printf("csnd: FAIL - %u of %u blocks were not submitted as a "
+		       "stereo pair\n", g_host_csnd_count - pairs * 2,
+		       g_host_csnd_count);
+		bad = 1;
+	}
+	return bad;
 }
 
 void *linearAlloc(size_t size) { return malloc(size); }

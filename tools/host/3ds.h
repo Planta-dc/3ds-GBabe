@@ -92,6 +92,31 @@ typedef enum
 #define CSND_LOOPMODE_ONESHOT 2
 #define CSND_LOOPMODE_NORELOAD 3
 
+#define CSND_NUM_CHANNELS 32
+
+/* Simulated CSND service (see stub.c). Only active when the environment
+ * variable GBABE_HOST_AUDIO is set to 1: the render checks do not want the
+ * audio thread's real-time behaviour. */
+extern u32 csndChannels;
+
+typedef struct
+{
+	u64 start;      /* svcGetSystemTick() when it was submitted  */
+	u64 ticks;      /* how long it plays                        */
+	int channel;
+	u32 frames;     /* BLOCK_BYTES / sizeof(s16)                */
+} host_csnd_block;
+
+#define HOST_CSND_MAX_BLOCKS 4096
+extern host_csnd_block g_host_csnd_blocks[HOST_CSND_MAX_BLOCKS];
+extern unsigned g_host_csnd_count;
+
+/* Prints what the fake service saw and returns 0 when it saw a continuous
+ * stream: no silence between blocks, and both ears of a block started
+ * together. */
+int g_host_csnd_report(void);
+void g_host_csnd_reset(void);
+
 #define SOUND_ENABLE BIT(12)
 #define SOUND_FORMAT(v) ((v) << 12)
 #define SOUND_LOOPMODE(v) ((v) << 10)
@@ -104,6 +129,9 @@ typedef enum
 
 /* Host-only output buffer so the harness can dump what would be on screen. */
 extern u16 g_host_fb[400 * 240];
+/* Frames that started drawing into the top screen while the panel was still
+ * showing that buffer: what a tear is. Must stay 0. */
+extern int g_host_tears;
 /* Bottom screen, un-rotated to 320x240 landscape, after the last present. */
 extern u16 g_host_bottom_fb[320 * 240];
 
@@ -135,6 +163,7 @@ void  gfxFlushBuffers(void);
 void  gfxSwapBuffers(void);
 void  gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 void  gspWaitForVBlank(void);
+bool  gspIsPresentPending(unsigned screen);
 Result GSPGPU_FlushDataCache(const void *adr, u32 size);
 
 PrintConsole *consoleInit(gfxScreen_t screen, PrintConsole *console);

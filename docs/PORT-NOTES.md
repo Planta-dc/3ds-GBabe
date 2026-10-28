@@ -3,23 +3,33 @@
 The original question was "can Walnut-CGB be ported to the Old 3DS?". The
 answer was yes, and that is what this port started as (§1 onwards). It then
 turned out to be too slow to play, so the core was replaced by Gambatte 0.5.0
-while the rest of the port stayed. Both cores are still built and can be put
-side by side on one console.
+while the rest of the port stayed. Walnut was kept for a while as a second
+installable, to compare the two on the same console, and then removed once the
+comparison had been made: **GBabe is Gambatte-only now** (§7).
 
-This document records why, what was measured, and what is still missing.
+This document records why, what was measured, what went wrong on the console,
+and what is still missing.
 
 ---
 
-## 0. The default core is Gambatte 0.5.0
+## 0. The core is Gambatte 0.5.0
 
-`make` builds `CORE=gambatte` (the vendored core in `third_party/gambatte/`,
-GPL-2.0, backend `source/emu_gambatte.cpp`). `make CORE=walnut` builds the
-original Walnut-CGB version (`source/emu.c`) as a separate installable —
-`gbabe-walnut.cia`, its own title id, so both can sit on the same console and
-be compared with the same ROM. Everything below `include/emu.h` is shared:
-video scaling, audio FIFO and CSND pump, input, `.sav` files, UI, debug log.
+`make` builds the vendored core in `third_party/gambatte/` (GPL-2.0, backend
+`source/emu_gambatte.cpp`). There is no second backend anymore; `CORE=` is gone
+from the build, and `gbabe-walnut.cia` no longer exists.
 
-### What it was worth, measured
+Why the change was made, in one line: on the same PC, the same ROM and the same
+flags, Walnut needed 1.6x-3.4x more time per emulated frame, and on a 268 MHz
+ARM11 the core is the thing that decides whether a game runs at full speed. What
+Walnut was still useful for by then — being a second, independent implementation
+to compare against — is covered by the reference-image test in §0
+("Correctness, not only speed"), which is a better oracle than a second
+emulator because it does not share either one's bugs.
+
+Everything below the core is unchanged and was always core-agnostic: video
+scaling, the audio FIFO and CSND scheduler, input, `.sav` files, UI, debug log.
+
+### What the switch was worth, measured
 
 `make -C tools/host bench ROM=<rom> FRAMES=300`, same PC, same flags, same ROM,
 **ms per emulated frame** (lower is better). "core" is `emu_run_frame()` with
@@ -44,18 +54,17 @@ decimation is skipped entirely while the sound is off. If a console log shows
 **None of these are 3DS numbers.** An ARM11 at 268 MHz with no L2 cache has a
 very different memory system from an x86-64 with 32 MiB of cache, so the table
 says which way the cost moved, not how many frames a console will do. The
-measurement that matters is `core=` in `sdmc:/3ds/gbabe/debug.log` on the
-console, once with `gbabe.cia` and once with `gbabe-walnut.cia`.
+measurement that matters is the `core=` figure in `sdmc:/3ds/gbabe/debug.log` on
+the console.
 
 ### Correctness, not only speed
 
-The DMG rendering test ROM `dmg-acid2` is rendered by both cores through the
-same front-end, and compared against the reference image its author ships.
+The DMG rendering test ROM `dmg-acid2` is rendered through the real front-end
+and compared against the reference image its author ships.
 
-That comparison is now a build target rather than something someone ran once:
+That comparison is a build target rather than something someone ran once:
 
-    make -C tools/host acid2                # Gambatte
-    make -C tools/host acid2 CORE=walnut    # Walnut-CGB
+    make -C tools/host acid2
 
 `tools/check-render.py` compares the two frames **by shade rank** — the
 distinct colours of each image are sorted by luminance and replaced by their
@@ -64,11 +73,6 @@ pixel with the wrong layer or the wrong shade fails it. The window is fixed
 because the ROM has to be rendered at `SCALE_ORIG`, the one scale that puts the
 frame 1:1 on the panel.
 
-`make -C tools/host cross` covers the other half: it renders the same ROM with
-both cores at all three scales and compares the two PPMs byte for byte, so the
-cores have to agree with each other as well as with the reference. That is also
-what pins down the two blit paths, since the Gambatte backend now blits a whole
-frame at once and the Walnut one a scanline at a time.
 
 Pixels differing from the reference, of 23 040, and the number of distinct
 colours in the render (a DMG frame has four):
@@ -78,6 +82,9 @@ colours in the render (a DMG frame has four):
 | Gambatte | **0** | 4 | pixel-identical |
 | Walnut-CGB, before the fix | 19 291 | 3 | two shades collapsed into one |
 | Walnut-CGB, after the fix | **0** | 4 | pixel-identical |
+
+(The Walnut rows are history: that backend was removed once Gambatte had been
+measured and verified. CI now runs the check once, for the one core there is.)
 
 The Walnut bug the check caught: its scanline byte carries the shade in bits
 0-1 and the layer (OBJ0 / OBJ1 / BG) in bits 4-5, but the DMG path built the
@@ -94,7 +101,7 @@ identically in both builds, 0 of 96 000 pixels different.
 
 | Concern | How |
 |---|---|
-| Video | `runFor()` draws a whole 160x144 RGB565 frame into a static buffer (`-DVIDEO_RGB565` on both sides, or the pointer types disagree); each line then goes to `video_draw_line()`, so scaling stays in `video.c`. Frame skip passes a NULL buffer and skips the line loop. |
+| Video | `runFor()` draws a whole 160x144 RGB565 frame into a static buffer (`-DVIDEO_RGB565` on both sides, or the pointer types disagree); the frame then goes to `video_draw_frame()`, so scaling stays in `video.c`. Frame skip passes a NULL buffer and skips the blit. |
 | Audio | `runFor()` returns up to 4128 stereo samples per call; the two decimation stages bring them to 32768 Hz and `audio_push_frames()` puts them in the same FIFO the Walnut build uses. |
 | Input | `gambatte::InputGetter`; its bit values match `enum gb_button` bit for bit, so the joypad mask is passed through. |
 | Saves | `savedata_ptr()`/`savedata_size()` (cart RAM) written to the same `<rom>.sav` the Walnut build uses, so the two builds share saves; `<rom>.rtc` holds the 48-byte MBC3/HuC3 clock. Writes are skipped when a cheap hash says the content did not change. |
@@ -122,7 +129,7 @@ local patches.
 
 ---
 
-## 1. Why Walnut-CGB suited the 3DS (it was the first core)
+## 1. Why Walnut-CGB suited the 3DS (historical: the first core, since removed)
 
 Things checked directly against Walnut-CGB 1.2.4 (`walnut_cgb.h`, 9 920 lines,
 MIT):
@@ -184,22 +191,22 @@ throughput, which is the open question on real hardware (see §4).
 * **RGB565 + rotated direct blit.** One pass, no extra buffer, no GPU. Bandwidth
   at the default scale is ~128 KiB per frame; the CPU cost is a 160-entry LUT
   lookup and a store per output pixel.
-* **Line-exact scaling.** `video_draw_line()` maps source line `n` to destination
-  rows `[n*H/144, (n+1)*H/144)`, so scaling stays coherent per scanline and
-  there is no tearing inside a line.
-* **One blit per frame when the core allows it.** The panel is rotated, so
-  writing a scanline touches one halfword per 480-byte column: 160 separate
+* **One blit per frame, down a column.** The panel is rotated, so writing a
+  scanline touches one halfword per 480-byte destination column: 160 separate
   cache lines, and — worse — 160 partial writes into the same cache line by the
-  next scanline. `video_draw_frame()` takes the whole 160x144 frame instead and
-  walks *down* a destination column, which is one contiguous run of `dst_h`
-  halfwords per column and 267 runs per frame at `SCALE_FIT`. The core hands
-  over a complete frame, so Gambatte uses it (`source/emu_gambatte.cpp`);
-  Walnut-CGB only has a per-line callback and stays on `video_draw_line()`.
-  The two paths produce byte-identical pictures at all three scales (compared
-  on the host, not argued), and on x86-64 they measure the same — the reason to
-  prefer the whole-frame path is the 3DS memory system, which has no L2 and no
-  way to hide a 240-stride store pattern, so the difference has to be read from
-  `blit` in `debug.log` on a console.
+  next scanline. `video_draw_frame()` therefore takes the whole 160x144 frame
+  and walks *down* a destination column, which is one contiguous run of `dst_h`
+  halfwords per column and 267 runs per frame at `SCALE_FIT`. The nearest
+  neighbour mapping is unchanged (`map_x[]`/`map_y[]`), so the picture is the
+  same one the per-line path produced — the two were compared byte for byte at
+  all three scales before the per-line path was deleted.
+* **Present on the vblank, and wait for it.** `video_end_frame()` flushes the
+  back buffer, asks for the swap, and then waits for the panel to take it.
+  Without the wait the next frame starts drawing into the buffer that is still
+  being scanned out, and the tear line *moves*: 59.7275 Hz against a 60 Hz panel
+  means the phase drifts, so the tear slides down the screen instead of sitting
+  still. Measured on the host, before the fix every one of 60 consecutive frames
+  drew into the displayed buffer; after it, none. See §7.
 * **One screen each, and only one.** The game writes the top framebuffer and
   the UI writes the bottom one; each screen is flushed and swapped on its own.
   It has to be that way: `gfxFlushBuffers()` and `gfxSwapBuffers()` act on
@@ -211,7 +218,7 @@ throughput, which is the open question on real hardware (see §4).
   screen, and nothing else. `tools/host`'s stub models double buffering the way
   libctru does, so `make -C tools/uipreview asan` fails if either side starts
   swapping both.
-* **The letterbox is cleared every frame.** `video_draw_line()` writes only the
+* **The letterbox is cleared every frame.** `video_draw_frame()` writes only the
   scaled picture rectangle, and libctru hands out framebuffers from
   `linearAlloc()` without clearing them, so with the default "fit height" scale
   the ~66 px beside the picture would show uninitialised memory. A column of the
@@ -222,10 +229,14 @@ throughput, which is the open question on real hardware (see §4).
   `lcd_draw_line` pointer to `NULL` (the core explicitly supports this), so a
   skipped frame costs no blit and never leaves two hardware buffers showing
   different frames.
-* **CSND block pump.** `audio_frame()` pushes 548 stereo samples per emulated
-  frame into a 6-frame FIFO; whenever the channel is idle and the FIFO holds at
-  least half a block, a 1024-sample one-shot block is queued. Underruns produce
-  silence rather than stalls.
+* **CSND block scheduler.** 548 (or 549) stereo samples are pushed per emulated
+  frame into a 4096-frame FIFO. 1024-frame blocks then go out on a *deadline*,
+  not "whenever a frame ends": the frame loop is idle ~11 ms out of every
+  16.7 ms and `audio_next_deadline()` tells it when to wake up, so a block is
+  submitted just before the previous one runs out. Stereo needs two channels
+  (a CSND channel is mono, with separate left/right volumes for one sample), and
+  two slots alternate so the next block is already playing. Underruns resync
+  instead of playing stale audio, and are counted in the log. See §7.
 * **Config as text.** `sdmc:/3ds/gbabe/config.cfg`, `key=value`, so a bad setting
   is fixable without recompiling.
 
@@ -239,8 +250,8 @@ throughput, which is the open question on real hardware (see §4).
    Mitigations already in place: `-O3 -flto`, `-march=armv6k`, a power-of-two
    mask instead of a software divide in the cartridge-RAM callbacks, and frame
    skip in the menu. Whatever is next depends on the HUD split (below): more
-   core speed means `WALNUT_GB_16_BIT_OPS`/`SAFE_DUALFETCH_*` trades or a
-   dynarec, less blit means a different scale default.
+   core speed means a dynarec or a lower `-O` trade, less blit means a different
+   scale default.
 2. **The UI was the real bottleneck, not the emulator.** The first report
    from hardware was that the file browser was too slow to reach a ROM at all.
    Nothing in the browser was doing heavy work in the obvious sense; the cost
@@ -434,25 +445,121 @@ nothing at all once switched off. `make -C tools/host logtest` checks the
 format, because the file is the interface: a report is read from it by hand.
 
 That is also why the numbers it prints are defined precisely. `core` is the
-emulator core (CPU + PPU + APU), `blit` is scaling plus cache flush plus
-present, `wait` is pacing, and `other` is the rest of the loop - which is
-where a blocking service call would show up. A frame that is slow with a large
-`other` is the port's fault; a large `core` is the ARM11 and needs a dynarec,
-not tuning.
+emulator core (CPU + PPU + APU), `blit` is the scaled copy, `sync` is waiting
+for the panel to take the finished frame, `wait` is pacing, and `other` is the
+rest of the loop - which is where a blocking service call would show up. A frame
+that is slow with a large `other` is the port's fault; a large `core` is the
+ARM11 and needs a dynarec, not tuning.
 
-## 7. If you want to do the same port from scratch
+---
 
-The minimal recipe, in order:
+## 7. The two bugs the console found, and how they are tested now
 
-1. Copy `walnut_cgb.h` in; define the five callbacks; call `gb_init()`.
-2. Call `gb_get_save_size_s()` and allocate the cart RAM buffer.
-3. Implement `lcd_draw_line` writing RGB565 into the rotated framebuffer.
-4. Call `gb_init_lcd()`; then `while (true) gb_run_frame_dualfetch()` inside
-   your main loop.
-5. Map `hidKeysHeld()` into `gb.direct.joypad` (active-low).
-6. Add `audio_read`/`audio_write` to `minigb_apu` and pump samples to CSND.
-7. Pace with `svcGetSystemTick()` at 59.7275 Hz instead of vblank.
-8. Draw the UI yourself (§5). A text console is fine for a splash screen and
-   too slow for anything a user navigates on an Old 3DS.
-9. Log to a file (§6). You will not have the console, and neither will whoever
+Both were reported from hardware as "the graphics slide" and "the sound is
+wrong". Neither was an arithmetic bug in the emulation: both were about *when*
+something happened, which is why neither showed up in any of the checks that
+existed at the time - they all compared still frames.
+
+### The picture tore, and the tear slid down the screen
+
+libctru's double buffering is a two-deep swap chain. `gfxGetFramebuffer()`
+returns the buffer that is *not* displayed, and `gfxScreenSwapBuffers()` flips
+the caller's idea of which one that is **immediately**, while the panel only
+switches at the next vblank.
+
+So the loop was: draw into B, ask for a swap, and — right away — draw the next
+frame into A. For the whole of that frame, A was still the buffer the panel was
+scanning out, so the scanout and the writes raced down the same memory; the tear
+appeared wherever the scanout happened to be. And because the Game Boy runs at
+59.7275 Hz against a 60 Hz panel, the position of that race drifts by 0.45 % of
+a frame every frame - the tear line slides.
+
+The fix is one wait: after asking for the swap, wait for the vblank that takes
+it, and re-check `gspIsPresentPending()` in case the request missed that vblank
+by a hair. The wait costs nothing, because it happens in the idle part of the
+frame anyway. It is kept out of the `blit` figure in the log (`sync`), or it
+would look as if the copy had got 12 ms slower.
+
+The wait is skipped when the frame has already overrun its own 16.74 ms period
+(`video_end_frame()` compares against `video_begin_frame()`). Waiting then would
+land on the *next* vblank and hold the frame for 33 ms, so the game would drop
+to 30 fps exactly when the console is struggling - a tear is the lesser evil.
+
+Waiting for the panel does not force the game to 60 Hz. The frame loop paces
+itself off the ARM11 tick counter at 59.7275 Hz and the wait only fills the idle
+gap, so the emulated clock stays exact. What cannot be avoided is the beat
+between 59.7275 and 60: about once every 3.7 s a frame is presented just after
+a vblank has gone by and the panel shows it for two panel periods. That is one
+frame held 33 ms instead of 16.7 ms, and no amount of scheduling removes it
+short of running the Game Boy 0.45 % fast or interpolating frames.
+
+The host harness now counts torn frames - a frame that fetches the top
+framebuffer while a swap is still pending - and fails if there are any:
+
+| | torn frames out of 60 |
+|---|---|
+| before | 59 |
+| after | **0** |
+
+### The sound was pitch-shifted and stuttering
+
+Two separate mistakes, both in `source/audio.c`:
+
+1. **A CSND channel is mono.** It has one volume word holding a left and a right
+   volume for the *same* sample. Feeding it interleaved L,R data does not play
+   stereo; it plays the interleaved samples as a mono stream - so every sample
+   is played at twice the rate, the whole thing is an octave high, and each
+   block ends in half the time it should. Stereo needs two channels, one per
+   ear, started together.
+2. **A block was submitted once per emulated frame.** A channel plays one buffer
+   and stops; a block is 31.25 ms and a frame is 16.7 ms, so the submit landed
+   up to a whole frame *after* the previous block had ended. That is a silence
+   hole every 31 ms - a 32 Hz stutter on top of the pitch problem.
+
+The fix for the second one is the interesting one: the submit time is a
+deadline, not a side effect of a frame ending. `audio_next_deadline()` returns
+when the next block is due, the frame loop sleeps to whichever comes first (the
+next frame or that deadline), and the block is handed over `margin` early, where
+`margin` is the measured `csndPlaySound()` round trip plus the worst recent
+wake-up. Two slots alternate, so the next block is playing before the current
+one runs out. Being early means a brief overlap of the same audio, which is
+inaudible; being late means a hole, which is not - so the error budget is spent
+on the early side. The FIFO is kept at two blocks (62 ms) rather than bone dry,
+so an occasional late wake-up does not become an underrun.
+
+None of that can be heard in CI, so `make -C tools/host audiotest` measures it:
+the stand-in CSND in `tools/host/stub.c` plays each block in real time and
+records when it started, and the test looks for holes in the union of those
+intervals.
+
+| | holes | total silence | worst hole |
+|---|---|---|---|
+| per-frame submit (the old way) | 54 | 121 ms | 2.30 ms |
+| deadline-driven submit | 28 | 0.54 ms | 0.07 ms |
+
+The remaining holes are sub-millisecond - 20-odd samples at 32768 Hz - and are
+what a scheduler that parks right at the block boundary looks like. The test
+allows 0.5 ms per hole and 1 % of the run in total, and runs twice: with four
+CSND channels (stereo) and with two (the mono fallback, for when the service
+will not give up four).
+
+---
+
+## 8. If you want to do the same port from scratch
+
+The recipe this project ended up with, in order:
+
+1. Take a core that is fast enough before you take one that is convenient.
+   Measure it on the host against a real ROM; on a 268 MHz ARM11 with no L2 the
+   interpreter is the whole budget.
+2. Draw straight into the rotated framebuffer in RGB565, down a destination
+   column (§3), and present on the vblank with a wait (§7).
+3. Pace the emulator with `svcGetSystemTick()` at 59.7275 Hz, not with vblank -
+   the panel is 60 Hz and the drift is real.
+4. Feed CSND from a FIFO on a deadline, stereo, two channels per ear (§7).
+5. Draw the UI yourself (§5). A text console is fine for a splash screen and too
+   slow for anything a user navigates on an Old 3DS.
+6. Log to a file (§6). You will not have the console, and neither will whoever
    reports the first bug.
+7. Make the still-picture checks and the timing checks part of the build, not
+   something you ran once (`make -C tools/host acid2`, `audiotest`).
