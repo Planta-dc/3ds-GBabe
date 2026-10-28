@@ -28,7 +28,7 @@ ifeq ($(CORE),gambatte)
 CORE_SRC  := $(ROOT)/source/emu_gambatte.cpp
 # video_pixel_t must be the same type in the backend and in the core, so
 # VIDEO_RGB565 is set for both: 16-bit pixels, which is what video.c takes.
-CORE_DEFS := -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 \
+CORE_DEFS := -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 -DHAVE_STDINT_H \
              -I$(ROOT)/third_party/gambatte/libgambatte/include
 CORE_LIB  := $(ROOT)/third_party/gambatte/libgambatte.a
 LD        := $(CXX)

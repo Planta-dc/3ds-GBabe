@@ -23,7 +23,12 @@ LIB      := libgambatte.a
 # -fno-exceptions/-fno-rtti are what the core's own Makefile.libretro uses: the
 # code has no exception or RTTI use, and on a 268 MHz ARM11 the tables and
 # unwind info are dead weight.
-CORE_FLAGS := -DVIDEO_RGB565 -D__LIBRETRO__ -DNDEBUG \
+# HAVE_STDINT_H is what upstream's Makefile.libretro passes: gbint.h needs it to
+# pull in <stdint.h>, and without it the core falls back to its own typedefs and
+# then relies on <string> happening to include <stdint.h> for uint16_t. That
+# accident of libstdc++ version is why the core compiled with GCC 12 and not
+# with 13.
+CORE_FLAGS := -DVIDEO_RGB565 -DHAVE_STDINT_H -D__LIBRETRO__ -DNDEBUG \
               -fno-exceptions -fno-rtti -fno-strict-aliasing \
               -ffunction-sections -fdata-sections -fomit-frame-pointer
 

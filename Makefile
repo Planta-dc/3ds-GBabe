@@ -32,7 +32,7 @@ CORE        ?=  gambatte
 ifeq ($(CORE),gambatte)
 # TOPDIR, not CURDIR: this Makefile is re-invoked from build/, where CURDIR is
 # the build directory.
-CORE_DEFS   :=  -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 \
+CORE_DEFS   :=  -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 -DHAVE_STDINT_H \
                 -I$(TOPDIR)/third_party/gambatte/libgambatte/include
 CORE_LIB    :=  $(TOPDIR)/third_party/gambatte/libgambatte.a
 CORE_STRAY  :=  emu.c
