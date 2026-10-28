@@ -200,6 +200,13 @@ throughput, which is the open question on real hardware (see §4).
   neighbour mapping is unchanged (`map_x[]`/`map_y[]`), so the picture is the
   same one the per-line path produced — the two were compared byte for byte at
   all three scales before the per-line path was deleted.
+* **The letterbox is cleared once per buffer, not once per frame.** The bars
+  beside the picture cannot change while the scale does not, and clearing them
+  was ~63 KiB of `memset` per frame at `SCALE_FIT` - inside the figure the log
+  calls `core`, i.e. charged to the emulator. `video.c` remembers which buffers
+  it has already blacked at the current geometry; anything else that writes to
+  the top screen calls `video_letterbox_unknown()`, and the stress test fails if
+  that notification is dropped.
 * **Present on the vblank, and wait for it.** `video_end_frame()` flushes the
   back buffer, asks for the swap, and then waits for the panel to take it.
   Without the wait the next frame starts drawing into the buffer that is still
@@ -493,8 +500,12 @@ a vblank has gone by and the panel shows it for two panel periods. That is one
 frame held 33 ms instead of 16.7 ms, and no amount of scheduling removes it
 short of running the Game Boy 0.45 % fast or interpolating frames.
 
-The host harness now counts torn frames - a frame that fetches the top
-framebuffer while a swap is still pending - and fails if there are any:
+The host harness counts torn frames - a frame that fetches the top framebuffer
+while a swap is still pending - and `make -C tools/host presenttest` covers both
+halves of the decision, including the deliberate exception: a frame that has
+already overrun its own 16.74 ms period skips the wait and presents at once
+(one torn frame beats 30 fps). The same test confirms the wait comes back on the
+next on-time frame.
 
 | | torn frames out of 60 |
 |---|---|
@@ -619,3 +630,51 @@ outside any frame (the emulator was not running slowly, the console was not
 running at all). Those are the lid, the HOME menu or a system applet; the loop
 resyncs after them rather than trying to catch up, which is what the `resync`
 counter is there to confirm.
+
+---
+
+## 10. The frame loop was never keeping time
+
+The pacing code in `main.c` looked harmless and had a bug nobody could see from
+the outside: an unsigned comparison used for a signed question.
+
+```c
+next_frame_tick += FRAME_TICKS;
+if (now - next_frame_tick > 4 * FRAME_TICKS)   /* "four frames behind" */
+        next_frame_tick = now + FRAME_TICKS;   /* start a new schedule  */
+```
+
+When a frame starts a little *before* the following slot - the normal case,
+and the one the sleep is calibrated for - `now - next_frame_tick` is negative,
+so in `uint64_t` it wraps to about 2^64 and the test fires. The loop then
+re-anchored its schedule to `now + FRAME_TICKS`, i.e. "one frame after this
+frame started", for **every single frame**.
+
+That turns an absolute schedule into a relative one, and a relative schedule
+cannot recover: a frame that overruns by 3 ms moves every frame after it 3 ms
+later, for ever. Simulated with 10 ms frames and every tenth frame at 20 ms
+(heavy but still inside the 16.74 ms budget between them):
+
+| | frames/s | schedule re-anchors |
+|---|---|---|
+| unsigned comparison | 58.59 | 600 of 600 |
+| signed (fixed) | **59.71** | 0 |
+
+58.6 fps is what the console reported - 98 % speed, and the reason the log's
+`audio:` line showed underruns at the same time (the APU produces one frame of
+samples per emulated frame, so an emulator running 1.4 % slow starves CSND
+1.4 % of the time). It was not a sound bug, and it was not the core being slow.
+
+The fix is a signed comparison, and the arithmetic now lives in
+`include/pace.h` where the host can test the cases that matter:
+`make -C tools/host pacetest` covers a frame that is early (no resync - the
+regression), one that is late (counted, schedule unmoved), jitter, a 200 ms
+stall (one resync), the three-and-four-frames-behind boundary, and a million
+frames without drift. The same file asserts the autosave interval, which had
+its own overflow bug (§9).
+
+Two lesson-shaped notes. First: the counter added in §9 to *find* this would
+have reported 100 % of frames as resyncs, which is how it was found - a metric
+that reads implausible is a bug in the metric or in what it measures, and this
+time it was both. Second: this is exactly the kind of arithmetic that should
+never live inside a loop that can only be exercised on hardware you do not have.

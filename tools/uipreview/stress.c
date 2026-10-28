@@ -256,6 +256,17 @@ static void draw_game_frame(uint16_t colour)
 	video_end_frame();
 }
 
+/* Raw framebuffer contents, as the console has them before anything is drawn:
+ * libctru hands out linearAlloc() memory and gfxInit() does not clear it. The
+ * host stand-in can poison both buffers, which stands in for that - and, since
+ * video.c caches which buffers it has already blacked, for any other code that
+ * writes to the top screen. Telling video.c is part of the deal. */
+static void poison_framebuffers(void)
+{
+	g_host_poison_framebuffers(0xDEAD);
+	video_letterbox_unknown();
+}
+
 static void draw_ui_frame(uint16_t colour)
 {
 	ui_clear(colour);
@@ -309,7 +320,7 @@ static int check_screens(void)
 	const int fit_w = (160 * 240 + 144 / 2) / 144;
 
 	/* --- the game: top screen only, bars cleared ------------------------- */
-	g_host_poison_framebuffers(0xDEAD);
+	poison_framebuffers();
 	video_set_scale(SCALE_FIT);
 
 	int pic_all = 0, bar_all = 0, bottom_all = 0;
@@ -330,7 +341,7 @@ static int check_screens(void)
 	ok &= expect("game frames leave the bottom screen alone", bottom_all);
 
 	/* --- pixel-perfect mode has bars above and below too ----------------- */
-	g_host_poison_framebuffers(0xDEAD);
+	poison_framebuffers();
 	video_set_scale(SCALE_ORIG);
 
 	pic_all = bar_all = 0;
@@ -348,8 +359,43 @@ static int check_screens(void)
 	ok &= expect("pixel-perfect mode clears the bars around it",
 		     pic_all + bar_all);
 
+	/* --- the letterbox is cleared once per buffer, not once per frame.
+	 *
+	 * The bars cannot change while the scale does not, so video.c remembers
+	 * which buffers it has already blacked - ~63 KiB of memset per frame
+	 * that the log was attributing to the emulation core. The price of that
+	 * is a rule: anything else that writes to the top screen has to say so.
+	 * Poisoning stands in for exactly that (a framebuffer straight from
+	 * linearAlloc(), or another path drawing on the top screen), and
+	 * video_letterbox_unknown() is the way to say it.
+	 *
+	 * Remove the call and this check fails, which is the point. */
+	/* Warm the cache first: at the same scale, a frame that has already
+	 * been drawn means the buffer is remembered as blacked, so the check
+	 * below is about the notification and not about the scale changing. */
+	video_set_scale(SCALE_FIT);
+	draw_game_frame(0x3330);
+	draw_game_frame(0x3330);
+
+	poison_framebuffers();
+
+	pic_all = bar_all = 0;
+
+	for (int i = 1; i <= 3; i++)
+	{
+		const uint16_t colour = (uint16_t)(0x3330 + i);
+
+		draw_game_frame(colour);
+		top_mismatch(fit_w, 240, colour, &pic_bad, &bar_bad);
+		pic_all += pic_bad;
+		bar_all += bar_bad;
+	}
+
+	ok &= expect("a framebuffer someone else wrote to is cleared again",
+		     pic_all + bar_all);
+
 	/* --- the UI: bottom screen only ------------------------------------- */
-	g_host_poison_framebuffers(0xDEAD);
+	poison_framebuffers();
 	video_set_scale(SCALE_FIT);
 	draw_game_frame(0x2222);
 

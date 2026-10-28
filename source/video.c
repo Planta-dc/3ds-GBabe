@@ -38,6 +38,13 @@ static int16_t map_x[LCD_TOP_W]; /* dst column -> source column */
 static int16_t map_y[LCD_TOP_H]; /* dst row    -> source row    */
 static int current_scale = -1;
 static u64 present_wait;     /* ticks spent waiting for the panel last frame */
+/* Which framebuffers already have a black letterbox, and for which geometry.
+ * The bars never change while the scale does not, so clearing them on every
+ * frame is ~63 KiB of memset per frame for nothing (it is inside the figure the
+ * log calls `core`, which is why it was worth measuring at all). */
+static u8 *cleared_fb[2];
+static int cleared_scale = -1;
+
 static u64 frame_start;      /* when video_begin_frame() was called          */
 static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
 
@@ -127,7 +134,39 @@ void video_set_scale(int mode)
 	if (mode < 0 || mode >= SCALE_COUNT)
 		mode = SCALE_FIT;
 	if (mode != current_scale)
+	{
 		recalc_geometry(mode);
+		video_letterbox_unknown();
+	}
+}
+
+void video_letterbox_unknown(void)
+{
+	cleared_fb[0] = cleared_fb[1] = NULL;
+	cleared_scale = -1;
+}
+
+/* Has this buffer's letterbox already been blacked at the current geometry? */
+static bool letterbox_black(u8 *f)
+{
+	if (cleared_scale != current_scale)
+		return false;
+
+	return cleared_fb[0] == f || cleared_fb[1] == f;
+}
+
+static void letterbox_remember(u8 *f)
+{
+	if (cleared_scale != current_scale)
+	{
+		cleared_fb[0] = cleared_fb[1] = NULL;
+		cleared_scale = current_scale;
+	}
+
+	if (cleared_fb[0] == NULL || cleared_fb[0] == f)
+		cleared_fb[0] = f;
+	else
+		cleared_fb[1] = f;
 }
 
 static inline u16 *fb_pixel(int x, int y)
@@ -185,7 +224,12 @@ void video_begin_frame(void)
 	frame_timed = true;
 	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
 	fb_ready = (fb != NULL);
-	clear_letterbox();
+
+	if (fb_ready && !letterbox_black(fb))
+	{
+		clear_letterbox();
+		letterbox_remember(fb);
+	}
 }
 
 /* Black the top screen and show it. Used at startup, so the browser is not
@@ -205,6 +249,10 @@ void video_clear(void)
 		const size_t bytes = LCD_TOP_W * FB_STRIDE * sizeof(u16);
 		memset(f, 0, bytes);
 		GSPGPU_FlushDataCache(f, bytes);
+
+		/* Black all over, so its letterbox is black too. */
+		letterbox_remember((u8 *)f);
+
 		gfxScreenSwapBuffers(GFX_TOP, true);
 		gspWaitForVBlank();
 	}

@@ -8,6 +8,8 @@
 #   make bench ROM=game.gb     per-frame cost of the core and the blit
 #   make logtest               check the debug log's format
 #   make audiotest             check that the sound path keeps CSND fed
+#   make pacertest             check the frame pacing arithmetic
+#   make presenttest           check the present path's wait-or-tear trade
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -100,6 +102,14 @@ audiotest: $(OBJDIR)/audio.o $(OBJDIR)/stub.o $(OBJDIR)/log.o \
 	@echo "audiotest: again with only two CSND channels (the mono fallback)"
 	GBABE_HOST_AUDIO=2 ./gbabe-audiotest
 
+# video.c on its own, plus the libctru stand-in: two frames that fit in a panel
+# period must wait for the vblank, and one that does not must present at once.
+presenttest: $(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c \
+	     $(ROOT)/include/video.h
+	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-presenttest \
+		$(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c
+	./gbabe-presenttest
+
 run: $(BIN)
 	./$(BIN) $(ROM) $(or $(FRAMES),300) $(or $(OUT),screen.ppm)
 
@@ -121,11 +131,19 @@ logtest: $(OBJDIR)/log.o $(OBJDIR)/stub.o $(OBJDIR)/logtest.o
 		$(OBJDIR)/logtest.o -lm
 	./gbabe-logtest
 
+# Frame pacing is arithmetic on tick counts, so the cases that matter (a frame
+# that is early, one that is late, a stall long enough to need a new schedule)
+# are tested exactly, without a console and without waiting. Built in one step
+# from the source, like the uipreview renderer.
+pacetest: pacing_test.c $(ROOT)/include/pace.h $(ROOT)/include/gb3ds.h
+	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-pacetest pacing_test.c
+	./gbabe-pacetest
 $(OBJDIR)/bench.o: bench.c $(ROOT)/include/emu.h
 $(OBJDIR)/audiotest.o: audiotest.c $(ROOT)/include/audio.h
 $(OBJDIR)/harness.o: harness.c $(ROOT)/include/emu.h
 
 clean:
-	rm -rf $(OBJDIR) $(BIN) gbabe-bench gbabe-logtest gbabe-audiotest *.ppm
+	rm -rf $(OBJDIR) $(BIN) gbabe-bench gbabe-logtest gbabe-audiotest \
+		gbabe-pacetest gbabe-presenttest *.ppm
 
-.PHONY: all check acid2 audiotest run bench logtest clean
+.PHONY: all check acid2 audiotest run bench logtest pacertest clean

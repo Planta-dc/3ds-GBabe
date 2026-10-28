@@ -400,6 +400,8 @@ make -C tools/host logtest    # checks the debug log's format
 make -C tools/host bench ROM=game.gb   # per-frame cost of core and blit
 make -C tools/host acid2               # dmg-acid2 render check, pixel by pixel
 make -C tools/host audiotest           # is the sound stream continuous?
+make -C tools/host pacetest            # does the frame loop keep time?
+make -C tools/host presenttest         # wait for the panel, or present now?
 ./tools/host/gbabe-host game.gb 300 out.ppm 0
 ```
 
@@ -410,7 +412,12 @@ console. `acid2` compares that dump with the reference frame of the dmg-acid2
 test ROM by *shade rank*, so no palette choice can mask a wrong pixel, and it
 fails if any frame started drawing into the buffer the panel was still showing
 (a tear). `audiotest` drives the real audio path against a stand-in CSND that
-plays blocks in real time, and fails if the stream has holes.
+plays blocks in real time, and fails if the stream has holes. `pacetest` runs the
+frame-pacing arithmetic out of `include/pace.h` against exactly the cases that
+cannot be provoked on demand in a live loop: an early frame, a late one, a
+200 ms stall, and a million frames of drift. `presenttest` covers the other half
+of the tearing story: a frame that fits in a panel period waits for the vblank,
+one that has already overrun presents at once instead of halving the frame rate.
 
 ### UI previews
 

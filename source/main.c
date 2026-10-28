@@ -22,6 +22,7 @@
 #include "emu.h"
 #include "gb3ds.h"
 #include "log.h"
+#include "pace.h"
 #include "palette.h"
 #include "ui.h"
 #include "video.h"
@@ -33,20 +34,11 @@
 
 gbabe_perf g_perf;
 
-/* Frame pacing, counted per HUD window. Both are zero on a console that keeps
- * up; on one that does not they say *how* it falls behind, which the fps figure
- * cannot: late = the frame started after its slot, resync = more than four
- * frames of backlog were thrown away (a visible jump). */
-static unsigned pace_late;
-static unsigned pace_resync;
+/* Autosave cartridge RAM every 30 seconds of emulated time (see gb3ds.h for
+ * why the product is not computed inline). */
+#define AUTOSAVE_TICKS GBABE_AUTOSAVE_TICKS
 
-/* Autosave cartridge RAM every 30 seconds of emulated time. The cast is not
- * decoration: SYSCLOCK_ARM11 * 30 is 8.04e9 and does not fit in the 32-bit
- * unsigned int the constant has in libctru, so the product used to wrap to
- * 3.75e9 - an autosave every 14 seconds, twice the SD writes. */
-#define AUTOSAVE_TICKS ((u64)SYSCLOCK_ARM11 * 30u)
-
-static u64 next_frame_tick;
+static pace_state pace;
 static u64 autosave_tick;
 static u64 last_frame_end;
 
@@ -137,15 +129,14 @@ static void update_joypad(void)
 /* Frame pacing                                                              */
 /* ------------------------------------------------------------------------- */
 
+/* The arithmetic lives in include/pace.h, where the host can test it (a frame
+ * that is early, late, or far enough behind to need a new schedule), because
+ * the bug that used to be in here was invisible from the outside: an unsigned
+ * comparison made every single frame look like a resync. This function is only
+ * the sleeping. */
 static bool frame_due(void)
 {
 	u64 now = svcGetSystemTick();
-
-	if (next_frame_tick == 0)
-	{
-		next_frame_tick = now;
-		return true;
-	}
 
 	/* If we are early, sleep off most of the wait. The kernel's sleep
 	 * granularity is coarser than a frame, so keep the last eighth of a
@@ -154,35 +145,18 @@ static bool frame_due(void)
 	 * (This used to pass ticks straight to svcSleepThread(), which wants
 	 * nanoseconds - 3.7x too short, so the loop spent the rest of the frame
 	 * polling and never really slept.) */
-	if (now < next_frame_tick)
+	const u64 wait = pace_wait(&pace, now);
+	if (wait > 0)
 	{
 		const u64 margin = FRAME_TICKS / 8;
-		if (next_frame_tick - now > margin)
+		if (wait > margin)
 		{
-			svcSleepThread(TICKS_TO_NS(next_frame_tick - now - margin));
+			svcSleepThread(TICKS_TO_NS(wait - margin));
 			now = svcGetSystemTick();
 		}
-		if (now < next_frame_tick)
-			return false;
 	}
 
-	next_frame_tick += FRAME_TICKS;
-
-	/* Started after its own slot: the frame before it overran. Harmless on
-	 * its own - the next slot is still in the future - but a rate of them
-	 * means the machine is at its limit. */
-	if (now > next_frame_tick)
-		pace_late++;
-
-	/* Fell more than four frames behind (menu, stalled SD card): resync
-	 * instead of trying to catch up forever. */
-	if (now - next_frame_tick > 4 * FRAME_TICKS)
-	{
-		next_frame_tick = now + FRAME_TICKS;
-		pace_resync++;
-	}
-
-	return true;
+	return pace_due(&pace, now, FRAME_TICKS);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -232,7 +206,7 @@ int main(int argc, char **argv)
 
 			gbabe_copy(g_cfg.rom_path, sizeof g_cfg.rom_path, path);
 			config_save();
-			next_frame_tick = 0;
+			pace_restart(&pace);
 			last_frame_end = 0;
 
 			const emu_info *ri = emu_get_info();
@@ -265,13 +239,13 @@ int main(int argc, char **argv)
 			{
 				if (!ui_in_game_menu())
 					goto done;
-				next_frame_tick = 0;
+				pace_restart(&pace);
 			}
 			if ((down & KEY_L) && (down & KEY_R))
 			{
 				if (!ui_in_game_menu())
 					goto done;
-				next_frame_tick = 0;
+				pace_restart(&pace);
 			}
 
 			update_joypad();
@@ -284,7 +258,7 @@ int main(int argc, char **argv)
 			if (!frame_due())
 			{
 				u64 now = svcGetSystemTick();
-				u64 wake = next_frame_tick;
+				u64 wake = pace.next ? pace.next : now;
 
 				const u64 audio_at = audio_next_deadline();
 				if (audio_at != 0 && audio_at < wake)
@@ -350,11 +324,13 @@ int main(int argc, char **argv)
 				const u64 waited = (prev_end != 0 &&
 						    frame_start > prev_end) ?
 						   frame_start - prev_end : 0;
+				unsigned late, resyncs;
+				pace_take_counters(&pace, &late, &resyncs);
+
 				ui_note_frame(after_core - frame_start, blit,
 					      sync, waited,
 					      after_blit - (prev_end ? prev_end : frame_start),
-					      pace_late, pace_resync);
-				pace_late = pace_resync = 0;
+					      late, resyncs);
 				last_frame_end = after_blit;
 
 				audio_log_stats();
