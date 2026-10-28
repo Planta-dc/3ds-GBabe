@@ -6,6 +6,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Included from C++ as well (the Gambatte backend is C++). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 160x144 RGB565 framebuffer, filled by the core's lcd_draw_line callback. */
 extern uint16_t gb_fb[144][160];
 
@@ -42,6 +47,11 @@ void emu_reset(void);
 void emu_run_frame(void);
 void emu_set_rendering(bool on);
 
+/* The DMG palette selection changed. Backends that push colour values into the
+ * core (Gambatte) re-apply them here; the Walnut backend looks the table up on
+ * every line, so it does nothing. Safe to call when nothing is loaded. */
+void emu_palette_changed(void);
+
 /* Write cartridge RAM (if any) back to the .sav file. Safe to call often. */
 void emu_flush_save(void);
 
@@ -50,3 +60,7 @@ void emu_flush_save(void);
  * this after each frame and shows the message to the user, because the core's
  * callback happens deep inside a frame and must not block there. */
 const char *emu_last_error(void);
+
+#ifdef __cplusplus
+}
+#endif

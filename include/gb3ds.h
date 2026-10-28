@@ -1,8 +1,17 @@
 /**
  * gbabe - a Game Boy / Game Boy Color emulator for the Nintendo 3DS.
  *
- * Shared declarations for the platform layer. This header must be included
- * *before* walnut_cgb.h (emu.c does that) because the core needs
+ * Shared declarations for the platform layer.
+ *
+ * Two emulation cores can be built (see CORE in the Makefile):
+ *
+ *   gambatte  (default) Gambatte 0.5.0, third_party/gambatte, backend
+ *                       source/emu_gambatte.cpp
+ *   walnut              Walnut-CGB, third_party/walnut, backend source/emu.c
+ *
+ * The core is hidden behind include/emu.h, so nothing else in the front-end
+ * knows which one is in the binary. The Walnut build needs this header
+ * included *before* walnut_cgb.h (emu.c does that) because that core needs
  * `struct gb_s` and the audio hooks declared up front.
  *
  * MIT licensed. See LICENSE.
@@ -72,7 +81,10 @@ typedef struct
 } gbabe_config;
 
 extern gbabe_config g_cfg;
+
+#if defined(GBABE_CORE_WALNUT)
 extern struct gb_s   gb;                    /* ~50 KiB, not on the stack */
+#endif
 
 /* Bounded string copy that always terminates; returns dst. */
 static inline char *gbabe_copy(char *dst, size_t dst_len, const char *src)
@@ -108,7 +120,9 @@ enum gb_button
 	GB_BTN_DOWN   = 0x80,
 };
 
+#if defined(GBABE_CORE_WALNUT)
 /* Forward declarations the Walnut-CGB core expects from the front-end. */
 struct gb_s;
 uint8_t audio_read(uint16_t addr);
 void    audio_write(uint16_t addr, uint8_t val);
+#endif

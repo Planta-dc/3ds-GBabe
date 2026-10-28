@@ -1,5 +1,5 @@
 /**
- * Sound: the emulated APU (minigb_apu) feeds the 3DS CSND service.
+ * Sound: the emulated APU feeds the 3DS CSND service.
  *
  * Why CSND and not NDSP? NDSP on an Old 3DS needs the DSP firmware dumped to
  * sdmc:/3ds/dspfirm.cdc. CSND needs no such file, which matters a lot on the
@@ -14,6 +14,17 @@
  * the 3DS's 60 Hz vblank; when it runs empty we output silence rather than
  * blocking the emulator.
  *
+ * Which APU? Whichever core is built in:
+ *
+ *   GBABE_CORE_WALNUT   minigb_apu is driven by the Walnut-CGB hook functions
+ *                       at the bottom of this file (audio_read/audio_write and
+ *                       one audio_frame() per emulated frame);
+ *   GBABE_CORE_GAMBATTE Gambatte's own APU renders 35112 stereo samples per
+ *                       frame at 2097152 Hz and the backend decimates them to
+ *                       OUT_RATE before calling audio_push_frames().
+ *
+ * Everything above that - the FIFO and the CSND block pump - is shared.
+ *
  * MIT licensed.
  */
 #include "audio.h"
@@ -27,14 +38,17 @@
 
 #include "log.h"
 
+#if defined(GBABE_CORE_WALNUT)
 /* minigb_apu needs to know the sample format at compile time. */
 #ifndef MINIGB_APU_AUDIO_FORMAT_S16SYS
 #define MINIGB_APU_AUDIO_FORMAT_S16SYS
 #endif
 #include "minigb_apu.h"
+#endif
 
-/* CSND wants the sample rate as an integer and resamples on its own. */
-#define OUT_RATE        AUDIO_SAMPLE_RATE /* 32768 Hz */
+/* CSND wants the sample rate as an integer and resamples on its own. Both
+ * cores deliver 32768 Hz, which is what the CSND channel below is opened at. */
+#define OUT_RATE        GBABE_AUDIO_RATE
 /* Power of two so the ring buffer wraps with a mask and can be copied in (at
  * most) two runs instead of a sample at a time. ~125 ms of slack. */
 #define FIFO_SAMPLES    4096u
@@ -42,7 +56,9 @@
 #define BLOCK_BYTES     (BLOCK_SAMPLES * 2 * sizeof(s16))
 #define CHANNEL         8                /* a CSND channel we own */
 
+#if defined(GBABE_CORE_WALNUT)
 static struct minigb_apu_ctx apu;
+#endif
 
 static s16 *fifo;          /* ring buffer, FIFO_SAMPLES stereo frames */
 static unsigned fifo_head, fifo_tail;
@@ -197,7 +213,9 @@ bool audio_init(void)
 	block_pending = false;
 	block_started = 0;
 	fifo_reset();
+#if defined(GBABE_CORE_WALNUT)
 	minigb_apu_audio_init(&apu);
+#endif
 
 	/* Sound is a nice-to-have: if CSND will not start, keep emulating. */
 	Result rc = csndInit();
@@ -254,6 +272,23 @@ unsigned audio_queue_ms(void)
 	return (fifo_used() * 1000u) / OUT_RATE;
 }
 
+/* Hand the APU's output to the hardware. `frames` stereo frames at OUT_RATE,
+ * interleaved int16. A core that already produces OUT_RATE calls this once per
+ * emulated frame; the FIFO absorbs the difference between 59.73 and 60 Hz. */
+void audio_push_frames(const int16_t *stereo, unsigned frames)
+{
+	if (!enabled || fifo == NULL || stereo == NULL || frames == 0)
+		return;
+
+	fifo_push((const s16 *)stereo, frames);
+	pump();
+}
+
+#if defined(GBABE_CORE_WALNUT)
+/* ------------------------------------------------------------------------- */
+/* Hooks required by the Walnut-CGB core                                     */
+/* ------------------------------------------------------------------------- */
+
 void audio_frame(void)
 {
 	if (!enabled || fifo == NULL)
@@ -267,10 +302,6 @@ void audio_frame(void)
 	pump();
 }
 
-/* ------------------------------------------------------------------------- */
-/* Hooks required by the Walnut-CGB core                                     */
-/* ------------------------------------------------------------------------- */
-
 uint8_t audio_read(uint16_t addr)
 {
 	return minigb_apu_audio_read(&apu, addr);
@@ -280,3 +311,4 @@ void audio_write(uint16_t addr, uint8_t val)
 {
 	minigb_apu_audio_write(&apu, addr, val);
 }
+#endif

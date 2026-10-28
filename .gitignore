@@ -8,6 +8,10 @@ build/
 *.o
 *.d
 
+# The vendored Gambatte core's build output
+third_party/gambatte/build/
+third_party/gambatte/libgambatte.a
+
 # Host harness
 tools/host/gbabe-host
 tools/host/gbabe-bench
@@ -29,3 +33,6 @@ build.log
 .DS_Store
 *.swp
 .vscode/
+
+# Host build objects (one directory per core)
+tools/host/obj/

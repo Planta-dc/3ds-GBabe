@@ -408,6 +408,12 @@ void emu_reset(void)
 	gb_init_lcd(&gb, lcd_draw_line_cb);
 }
 
+void emu_palette_changed(void)
+{
+	/* The line callback reads palette_dmg565() every line, so a new choice is
+	 * picked up on the next frame with nothing to do here. */
+}
+
 void emu_set_rendering(bool on)
 {
 	gb.display.lcd_draw_line = on ? lcd_draw_line_cb : NULL;

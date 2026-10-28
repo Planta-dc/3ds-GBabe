@@ -51,6 +51,13 @@ jobs:
       - name: Type-check main.c
         run: make -C tools/host check
 
+      # Both cores are part of the deliverable, so both have to keep building.
+      - name: Build the Walnut-CGB backend too
+        run: |
+          make -C tools/host CORE=walnut -j"$(nproc)"
+          make -C tools/host CORE=walnut check
+          make -C tools/host -j"$(nproc)"
+
       - name: Render dmg-acid2 through the real render path
         run: |
           mkdir -p build
@@ -209,7 +216,7 @@ jobs:
           {
             echo "build image: ${BUILD_IMAGE:-<none>}"
             echo "--- artifacts"
-            ls -l gbabe.elf gbabe.3dsx gbabe.smdh gbabe.cia 2>&1
+            ls -l gbabe.elf gbabe.3dsx gbabe.smdh gbabe.cia artifacts/ 2>&1
             echo "--- build log"
             if [ -s build.log ]; then
               tail -n 80 build.log
@@ -240,7 +247,7 @@ jobs:
           fi
 
       - name: List outputs
-        run: ls -la gbabe.3dsx gbabe.smdh gbabe.cia 2>/dev/null || true
+        run: ls -la artifacts/ 2>/dev/null || true
 
       - name: Upload .3dsx
         if: github.event_name != 'workflow_dispatch' || inputs.target != 'cia'
@@ -249,8 +256,10 @@ jobs:
           name: gbabe-3dsx
           if-no-files-found: error
           path: |
-            gbabe.3dsx
-            gbabe.smdh
+            artifacts/gbabe.3dsx
+            artifacts/gbabe.smdh
+            artifacts/gbabe-walnut.3dsx
+            artifacts/gbabe-walnut.smdh
 
       - name: Upload .cia
         if: github.event_name != 'workflow_dispatch' || inputs.target != '3dsx'
@@ -258,7 +267,9 @@ jobs:
         with:
           name: gbabe-cia
           if-no-files-found: error
-          path: gbabe.cia
+          path: |
+            artifacts/gbabe.cia
+            artifacts/gbabe-walnut.cia
 
   # ---------------------------------------------------------------------------
   # Releases: the pushed tag is v<version>, the version in include/gb3ds.h and
@@ -315,7 +326,8 @@ jobs:
               --notes "GBabe for the Nintendo 3DS (Old 3DS, Old 2DS and up)."
           fi
           files=()
-          for f in gbabe.cia gbabe.3dsx gbabe.smdh gbabe-QR.png; do
+          for f in gbabe.cia gbabe-walnut.cia gbabe.3dsx gbabe-walnut.3dsx \
+                   gbabe.smdh gbabe-walnut.smdh gbabe-QR.png; do
             if [ -f "$f" ]; then files+=("$f"); fi
           done
           if [ "${#files[@]}" -eq 0 ]; then

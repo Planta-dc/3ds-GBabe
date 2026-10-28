@@ -512,6 +512,7 @@ static bool run_action(int act, int delta, bool *close)
 		delta = (delta == 0) ? 1 : delta;
 		palette_set((palette_get() + delta + palette_count()) %
 			    palette_count());
+		emu_palette_changed();
 		g_cfg.palette = palette_get();
 		log_line("setting palette=%d (%s)", g_cfg.palette,
 			 palette_name(palette_get()));

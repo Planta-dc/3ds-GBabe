@@ -23,6 +23,11 @@
 
 #include <stdbool.h>
 
+/* Included from C++ as well (the Gambatte backend is C++). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Start (or restart) logging. `enabled` false just records the setting; the
  * file is not opened until it is switched on. Returns whether the file is
  * being written. */
@@ -38,3 +43,7 @@ void log_line(const char *fmt, ...);
 /* Write what is buffered and close the file (call before exiting). */
 void log_flush(void);
 void log_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif

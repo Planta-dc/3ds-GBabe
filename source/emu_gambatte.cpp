@@ -1,0 +1,601 @@
+/**
+ * Gambatte 0.5.0 backend for the 3DS front-end (the default core).
+ *
+ * Why Gambatte: on the PC it emulates the same ROM in 1.6x-3.4x less time per
+ * frame than Walnut-CGB (the numbers and the method are in
+ * docs/PORT-NOTES.md). An Old 3DS has 268 MHz and no L2 cache, so the core is
+ * the first thing to fix when frames do not fit; the front-end around it is
+ * the same either way, which is why both cores implement include/emu.h and
+ * nothing else in the program knows which one it was built with.
+ *
+ * The core is used through its own C++ API (gambatte.h) rather than through
+ * the RetroArch libretro wrapper: that wrapper brings a file/VFS layer, a
+ * core-options parser and a band-limited resampler that this front-end does
+ * not need, since the video and audio paths here already exist.
+ *
+ * What this file owns, and the front-end does not:
+ *
+ *   video   Gambatte renders RGB565 straight into `vbuf` (60 KiB), one full
+ *           frame at a time; each line is then handed to video_draw_line()
+ *           like the other core does, so scaling stays in video.c.
+ *   audio   Gambatte's APU produces 35112 stereo samples per frame at
+ *           2097152 Hz. Two 8:1 box-average stages bring that to 32768 Hz
+ *           (a second-order CIC decimator: nothing above 16 kHz folds back
+ *           loudly, and it costs one add per sample per channel).
+ *   saves   .sav next to the ROM (same file the Walnut build writes, so the
+ *           two builds share save data) and <rom>.rtc for MBC3/HuC3 clocks.
+ *
+ * GPL-2.0: this file is part of a work that links Gambatte, so the whole
+ * binary is distributed under GPL-2.0. See third_party/gambatte/README.md.
+ */
+#include "gb3ds.h"
+
+#include <3ds.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "audio.h"
+#include "emu.h"
+#include "log.h"
+#include "palette.h"
+#include "video.h"
+
+#include "gambatte.h"
+
+/* ------------------------------------------------------------------------- */
+/* State                                                                     */
+/* ------------------------------------------------------------------------- */
+
+namespace {
+
+/* Gambatte's InputGetter is polled from inside the emulation. Its bit values
+ * are the same as enum gb_button, so the joypad mask passes straight through. */
+class Pad : public gambatte::InputGetter
+{
+public:
+	Pad() : mask(0) {}
+	unsigned operator()() { return mask; }
+	unsigned mask;
+};
+
+Pad pad;
+gambatte::GB *core;
+
+uint8_t *rom;
+size_t   rom_size;
+
+/* Both boot ROMs are optional and not distributed; see the Walnut backend for
+ * the same file names. Gambatte asks for whichever one matches the cartridge. */
+uint8_t  bootrom_dmg[0x100];
+uint8_t  bootrom_cgb[0x900];
+size_t   bootrom_dmg_size;
+size_t   bootrom_cgb_size;
+
+char save_path[512];  /* <rom>.sav, cart RAM                            */
+char rtc_path[512];   /* <rom>.rtc, MBC3/HuC3 clock                     */
+
+uint32_t savedata_hash; /* last written content, to skip unchanged writes */
+bool     sram_dirty;
+
+bool loaded;
+bool rendering = true;
+emu_info info;
+
+/* Where the core draws. 160*144*2 = 46 KiB, deliberately static: it is touched
+ * on every line of every frame. */
+gambatte::video_pixel_t vbuf[144 * 160];
+
+/* Grey-box for the error message the HUD can show. */
+char error_text[64];
+bool error_pending;
+
+/* ------------------------------------------------------------------------- */
+/* Audio: 2097152 Hz -> 32768 Hz                                             */
+/* ------------------------------------------------------------------------- */
+
+/* Gambatte's native audio rate is 35112 samples per frame, and 35112 / 59.7275
+ * = 2097152 Hz exactly. That is 64x the rate the CSND channel is opened at, so
+ * the decimation is two stages of 8 by box averaging. Box averaging is a
+ * cheap first-order low pass; two stages make the alias rejection good enough
+ * that square waves do not turn into hiss, and it needs no history buffer:
+ * just an accumulator per channel and a counter. */
+struct Downsampler
+{
+	int32_t sum_l, sum_r;
+	uint8_t count;
+
+	void reset() { sum_l = sum_r = 0; count = 0; }
+
+	/* Feed `n` interleaved stereo samples; writes at most n/8 to `out`. */
+	unsigned run(const int16_t *in, unsigned n, int16_t *out)
+	{
+		unsigned written = 0;
+
+		for (unsigned i = 0; i < n; i++)
+		{
+			sum_l += in[i * 2];
+			sum_r += in[i * 2 + 1];
+
+			if (++count == 8)
+			{
+				count = 0;
+				out[written * 2]     = (int16_t)(sum_l >> 3);
+				out[written * 2 + 1] = (int16_t)(sum_r >> 3);
+				written++;
+				sum_l = sum_r = 0;
+			}
+		}
+
+		return written;
+	}
+};
+
+Downsampler stage1, stage2;
+
+/* 35112 stereo samples per frame, in 2064-sample calls (the core's own
+ * front-end uses the same step size). */
+const unsigned RUN_SAMPLES  = 2064;
+const unsigned SOUND_BUF    = RUN_SAMPLES + 2064; /* core may overshoot      */
+gambatte::uint_least32_t sound_buf[SOUND_BUF];
+
+/* One runFor() call produces at most 4128 samples; stage 1 divides by 8 and
+ * stage 2 by another 8, so 520 and 72 frames are those bounds with slack. */
+int16_t audio_mid[520 * 2];
+int16_t audio_out[72 * 2];
+
+/* ------------------------------------------------------------------------- */
+/* Save files                                                                */
+/* ------------------------------------------------------------------------- */
+
+uint32_t hash_bytes(const uint8_t *data, size_t n)
+{
+	/* FNV-1a: good enough to answer "did the game write anything?", and far
+	 * cheaper than an SD write every few seconds. */
+	uint32_t h = 2166136261u;
+	for (size_t i = 0; i < n; i++)
+	{
+		h ^= data[i];
+		h *= 16777619u;
+	}
+	return h;
+}
+
+void make_sidecar(char *dst, size_t dst_len, const char *rom_path,
+		  const char *ext)
+{
+	gbabe_copy(dst, dst_len, rom_path);
+
+	char *dot = strrchr(dst, '.');
+	if (dot != NULL && dot != dst)
+		*dot = '\0';
+
+	size_t used = strlen(dst);
+	if (used + strlen(ext) + 1 <= dst_len)
+		strcat(dst, ext);
+}
+
+void load_savedata(void)
+{
+	void *ram = core->savedata_ptr();
+	unsigned size = core->savedata_size();
+	if (ram == NULL || size == 0)
+		return;
+
+	FILE *f = fopen(save_path, "rb");
+	if (f == NULL)
+		return;
+
+	size_t got = fread(ram, 1, size, f);
+	(void)got; /* a short file keeps the rest zeroed, like a new battery */
+	fclose(f);
+}
+
+void load_rtc(void)
+{
+	void *rtc = core->rtcdata_ptr();
+	unsigned size = core->rtcdata_size();
+	if (rtc == NULL || size == 0)
+		return;
+
+	FILE *f = fopen(rtc_path, "rb");
+	if (f == NULL)
+		return;
+
+	size_t got = fread(rtc, 1, size, f);
+	(void)got;
+	fclose(f);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Palette                                                                   */
+/* ------------------------------------------------------------------------- */
+
+void apply_palette(void)
+{
+	if (core == NULL || loaded == false)
+		return;
+
+	/* palette_dmg565() is 12 shades: OBJ0 0-3, OBJ1 0-3, BG 0-3. Gambatte
+	 * wants them per palette index (BG = 0, sprites 1 and 2).
+	 *
+	 * The value goes in unchanged: with VIDEO_RGB565 the core stores what it
+	 * is given straight into its DMG colour table, which is the same 565
+	 * layout palette_dmg565() produces. (The parameter is called rgb32 in the
+	 * API, which is only true of the 32-bit pixel build.) */
+	const uint16_t *p = palette_dmg565();
+
+	for (int c = 0; c < 4; c++)
+	{
+		core->setDmgPaletteColor(gambatte::BG_PALETTE,  (unsigned)c,
+					 p[8 + c]);
+		core->setDmgPaletteColor(gambatte::SP1_PALETTE, (unsigned)c,
+					 p[0 + c]);
+		core->setDmgPaletteColor(gambatte::SP2_PALETTE, (unsigned)c,
+					 p[4 + c]);
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Boot ROM                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/* Called by the core while loading a ROM. `isgbc` picks the size: the DMG boot
+ * ROM is 256 bytes, the CGB one 2304 (0x900). Return false to use the core's
+ * internal power-on state (no boot ROM). */
+bool bootloader_getter(void *userdata, bool isgbc, uint8_t *data,
+		       uint32_t buf_size)
+{
+	(void)userdata;
+
+	const size_t want = isgbc ? 0x900 : 0x100;
+	const uint8_t *src = isgbc ? bootrom_cgb : bootrom_dmg;
+	const size_t have = isgbc ? bootrom_cgb_size : bootrom_dmg_size;
+
+	if (have < want || buf_size < want)
+		return false;
+
+	memcpy(data, src, want);
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Header parsing, for the HUD                                               */
+/* ------------------------------------------------------------------------- */
+
+/* Same sum the Walnut build uses (gb_colour_hash()), so the "Auto" palette
+ * picks the same colour for the same cartridge in either build. */
+uint8_t colour_hash(void)
+{
+	uint8_t x = 0;
+	for (unsigned i = 0x134; i <= 0x143 && i < rom_size; i++)
+		x += rom[i];
+	return x;
+}
+
+void fill_info(void)
+{
+	memset(&info, 0, sizeof info);
+	if (rom == NULL || rom_size < 0x150)
+		return;
+
+	/* Title at 0x134, up to 16 characters, NUL padded. CGB cartridges use
+	 * the byte at 0x143 for the CGB flag, so the title is 15 characters
+	 * long there; stopping at the first unprintable byte covers both. */
+	unsigned n = 0;
+	for (unsigned i = 0; i < sizeof info.title - 1; i++)
+	{
+		uint8_t c = rom[0x134 + i];
+		if (c == '\0' || c < 0x20 || c == 0x7F)
+			break;
+		info.title[n++] = (char)c;
+	}
+	info.title[n] = '\0';
+
+	info.cgb = (rom[0x143] & 0x80) != 0;
+	if (core != NULL)
+		info.cgb = core->isCgb();
+
+	/* 16 KiB banks. 0x52 and up are unofficial; clamp instead of trusting
+	 * the byte with a shift that could overflow. */
+	unsigned rom_code = rom[0x148];
+	info.rom_banks = (rom_code <= 8) ? (2u << rom_code) : 512u;
+
+	static const uint8_t ram_banks[] = { 0, 1, 1, 4, 16, 8 };
+	unsigned ram_code = rom[0x149];
+	info.ram_banks = (ram_code < sizeof ram_banks) ? ram_banks[ram_code] : 0;
+
+	/* The HUD prints this as a number; it is the MBC generation. */
+	uint8_t type = rom[0x147];
+	switch (type)
+	{
+	case 0x00: info.mbc = 0; break;                       /* plain */
+	case 0x08:
+	case 0x09: info.mbc = 0; break;                       /* +SRAM */
+	case 0x01: case 0x02: case 0x03: info.mbc = 1; break;
+	case 0x05: case 0x06: info.mbc = 2; break;
+	case 0x0F: case 0x10: case 0x11: case 0x12:
+	case 0x13: info.mbc = 3; break;
+	case 0x19: case 0x1A: case 0x1B: case 0x1C:
+	case 0x1D: case 0x1E: info.mbc = 5; break;
+	case 0x20: info.mbc = 6; break;
+	case 0x22: info.mbc = 7; break;
+	case 0x0B: case 0x0C: case 0x0D: info.mbc = 8; break;  /* MMM01 */
+	case 0xFC: info.mbc = 0xFC; break;                     /* Camerica */
+	case 0xFD: info.mbc = 0xFD; break;                     /* Bandai */
+	case 0xFE: info.mbc = 0xFE; break;                     /* HuC3 */
+	case 0xFF: info.mbc = 0xFF; break;                     /* HuC1 */
+	default:   info.mbc = type; break;
+	}
+
+	info.auto_hash = colour_hash();
+}
+
+/* Reads one file into `buf`; returns the number of bytes, or 0. */
+size_t read_bootrom(const char *path, uint8_t *buf, size_t buf_size,
+		    size_t min_size)
+{
+	FILE *f = fopen(path, "rb");
+	if (f == NULL)
+		return 0;
+
+	size_t n = fread(buf, 1, buf_size, f);
+	fclose(f);
+
+	if (n < min_size)
+	{
+		log_line("bootrom: %s is %u bytes, ignored (need %u)", path,
+			 (unsigned)n, (unsigned)min_size);
+		return 0;
+	}
+
+	log_line("bootrom: loaded %u bytes from %s", (unsigned)n, path);
+	return n;
+}
+
+void try_load_bootrom(void)
+{
+	bootrom_dmg_size = read_bootrom(GBABE_ROOT "/bootrom/dmg_boot.bin",
+					bootrom_dmg, sizeof bootrom_dmg, 0x100);
+	bootrom_cgb_size = read_bootrom(GBABE_ROOT "/bootrom/cgb_boot.bin",
+					bootrom_cgb, sizeof bootrom_cgb, 0x100);
+}
+
+} /* namespace */
+
+/* ------------------------------------------------------------------------- */
+/* include/emu.h                                                             */
+/* ------------------------------------------------------------------------- */
+
+extern "C" const char *emu_last_error(void)
+{
+	if (!error_pending)
+		return NULL;
+
+	error_pending = false;
+	return error_text;
+}
+
+extern "C" void emu_unload(void)
+{
+	if (loaded)
+		emu_flush_save();
+
+	if (core != NULL)
+	{
+		delete core;
+		core = NULL;
+	}
+
+	free(rom);
+	rom = NULL;
+	rom_size = 0;
+	loaded = false;
+	rendering = true;
+	sram_dirty = false;
+	error_pending = false;
+	memset(&info, 0, sizeof info);
+}
+
+extern "C" const char *emu_load(const char *path)
+{
+	emu_unload();
+
+	FILE *f = fopen(path, "rb");
+	if (f == NULL)
+		return "Cannot open ROM.";
+
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	if (size < 0x150)
+	{
+		fclose(f);
+		return "File is too small to be a ROM.";
+	}
+
+	rom_size = (size_t)size;
+	rom = (uint8_t *)malloc(rom_size);
+	if (rom == NULL)
+	{
+		fclose(f);
+		return "Not enough memory for the ROM.";
+	}
+
+	if (fread(rom, 1, rom_size, f) != rom_size)
+	{
+		fclose(f);
+		free(rom);
+		rom = NULL;
+		rom_size = 0;
+		return "Short read while loading the ROM.";
+	}
+	fclose(f);
+
+	make_sidecar(save_path, sizeof save_path, path, ".sav");
+	make_sidecar(rtc_path, sizeof rtc_path, path, ".rtc");
+	try_load_bootrom();
+
+	/* The core object is an empty shell; the state it points at is a few
+	 * hundred kilobytes and is allocated by load(). */
+	core = new gambatte::GB();
+	core->setInputGetter(&pad);
+	if (bootrom_dmg_size > 0 || bootrom_cgb_size > 0)
+		core->setBootloaderGetter(bootloader_getter);
+
+	/* Colour correction is off: the Walnut build shows the cartridge's own
+	 * colours, and an emulator whose colours change when the core changes
+	 * would make the two impossible to compare side by side. */
+	core->setColorCorrection(false);
+
+	if (core->load(rom, (unsigned)rom_size, 0) != 0)
+	{
+		log_line("core: gambatte refused the ROM (%u bytes)",
+			 (unsigned)rom_size);
+		delete core;
+		core = NULL;
+		free(rom);
+		rom = NULL;
+		rom_size = 0;
+		return "The core cannot run this cartridge.";
+	}
+
+	load_savedata();
+	load_rtc();
+	sram_dirty = false;
+
+	fill_info();
+	palette_set_auto_hash(info.auto_hash);
+	loaded = true;
+	apply_palette();
+
+	/* Logged once per load: the model, the MBC and the save size are the
+	 * first things to look at when a game misbehaves. */
+	log_line("core: gambatte 0.5.0, %s, %u rom banks, %u ram banks",
+		 info.cgb ? "CGB" : "DMG", info.rom_banks, info.ram_banks);
+	log_line("rom: \"%s\"", info.title);
+	log_line("rom path: %s", path);
+	return NULL;
+}
+
+extern "C" bool emu_loaded(void)
+{
+	return loaded;
+}
+
+extern "C" const emu_info *emu_get_info(void)
+{
+	return &info;
+}
+
+extern "C" void emu_set_joypad(uint8_t pressed)
+{
+	pad.mask = pressed;
+}
+
+extern "C" void emu_reset(void)
+{
+	if (!loaded)
+		return;
+
+	emu_flush_save();
+	error_pending = false;
+	core->reset();
+
+	/* reset() re-runs the power-on sequence, which drops the DMG palette
+	 * colours the front-end had pushed in. */
+	apply_palette();
+}
+
+extern "C" void emu_set_rendering(bool on)
+{
+	rendering = on;
+}
+
+extern "C" void emu_palette_changed(void)
+{
+	apply_palette();
+}
+
+extern "C" void emu_flush_save(void)
+{
+	if (!loaded || core == NULL)
+		return;
+
+	void *ram = core->savedata_ptr();
+	unsigned size = core->savedata_size();
+
+	if (ram != NULL && size > 0)
+	{
+		uint32_t hash = hash_bytes((const uint8_t *)ram, size);
+		if (hash != savedata_hash || sram_dirty)
+		{
+			FILE *f = fopen(save_path, "wb");
+			if (f != NULL)
+			{
+				if (fwrite(ram, 1, size, f) == size)
+				{
+					savedata_hash = hash;
+					sram_dirty = false;
+				}
+				fclose(f);
+			}
+		}
+	}
+
+	void *rtc = core->rtcdata_ptr();
+	unsigned rtc_size = core->rtcdata_size();
+
+	if (rtc != NULL && rtc_size > 0)
+	{
+		FILE *f = fopen(rtc_path, "wb");
+		if (f != NULL)
+		{
+			fwrite(rtc, 1, rtc_size, f);
+			fclose(f);
+		}
+	}
+}
+
+extern "C" void emu_run_frame(void)
+{
+	if (!loaded || core == NULL)
+		return;
+
+	/* runFor() returns the sample number at which a video frame was drawn,
+	 * or -1 when it ran out of samples first. Ask for one frame's worth in
+	 * steps and keep whatever audio came out on the way. */
+	for (;;)
+	{
+		unsigned samples = RUN_SAMPLES;
+
+		long ret = core->runFor(rendering ? vbuf : NULL, 160,
+					sound_buf, SOUND_BUF, samples);
+
+		if (samples > SOUND_BUF)
+			samples = SOUND_BUF; /* documented to overshoot by 2064 */
+
+		/* Decimating 35112 samples per frame is not free (~2% of a 268 MHz
+		 * frame), so it only runs when the sound is actually wanted. */
+		if (samples > 0 && audio_enabled())
+		{
+			unsigned mid = stage1.run((const int16_t *)sound_buf,
+						  samples, audio_mid);
+			unsigned out = stage2.run(audio_mid, mid, audio_out);
+			if (out > 0)
+				audio_push_frames(audio_out, out);
+		}
+
+		if (ret >= 0)
+			break;
+	}
+
+	if (!rendering)
+		return;
+
+	for (int line = 0; line < 144; line++)
+		video_draw_line(&vbuf[line * 160], line);
+}

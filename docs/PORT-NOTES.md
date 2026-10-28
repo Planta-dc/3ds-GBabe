@@ -1,13 +1,99 @@
-# Porting Walnut-CGB to the Nintendo 3DS — notes
+# Porting a Game Boy core to the Nintendo 3DS — notes
 
-Answer to the original question ("can Walnut-CGB be ported to the Old 3DS?"):
-**yes, and it is a friendly port**, because the core was designed to be dropped
-into small front-ends. This document records why, what was measured, and what is
-still missing.
+The original question was "can Walnut-CGB be ported to the Old 3DS?". The
+answer was yes, and that is what this port started as (§1 onwards). It then
+turned out to be too slow to play, so the core was replaced by Gambatte 0.5.0
+while the rest of the port stayed. Both cores are still built and can be put
+side by side on one console.
+
+This document records why, what was measured, and what is still missing.
 
 ---
 
-## 1. Why this core suits the 3DS
+## 0. The default core is Gambatte 0.5.0
+
+`make` builds `CORE=gambatte` (the vendored core in `third_party/gambatte/`,
+GPL-2.0, backend `source/emu_gambatte.cpp`). `make CORE=walnut` builds the
+original Walnut-CGB version (`source/emu.c`) as a separate installable —
+`gbabe-walnut.cia`, its own title id, so both can sit on the same console and
+be compared with the same ROM. Everything below `include/emu.h` is shared:
+video scaling, audio FIFO and CSND pump, input, `.sav` files, UI, debug log.
+
+### What it was worth, measured
+
+`make -C tools/host bench ROM=<rom> FRAMES=300`, same PC, same flags, same ROM,
+**ms per emulated frame** (lower is better). "core" is `emu_run_frame()` with
+the sound off; "+ APU" is the same with the sound on:
+
+| ROM | Walnut core | Gambatte core | Walnut + APU | Gambatte + APU |
+|---|---|---|---|---|
+| `dmg-acid2` (DMG, light) | 0.059 | **0.037** | 0.063 | 0.064 |
+| `bench.gb` (synthetic DMG) | 0.108 | **0.056** | 0.108 | 0.085 |
+| blargg `cpu_instrs` (CGB) | 0.188 | **0.058** | 0.210 | 0.090 |
+| blargg `mem_timing` (CGB) | 0.133 | **0.052** | 0.119 | 0.082 |
+
+The emulation itself is 1.6x-3.2x cheaper. With the sound on the win is
+1.0x-2.3x, because Gambatte's APU hands the front-end 35112 stereo samples per
+frame at 2097152 Hz and something has to decimate that to the 32768 Hz the CSND
+channel runs at. `source/emu_gambatte.cpp` does it with two 8:1 box-average
+stages (one add per sample, no history buffer), which costs ~0.03 ms per frame
+on this PC — on a light ROM that is more than the emulation itself. The
+decimation is skipped entirely while the sound is off. If a console log shows
+`audio=` close to the frame time, that function is the first thing to look at.
+
+**None of these are 3DS numbers.** An ARM11 at 268 MHz with no L2 cache has a
+very different memory system from an x86-64 with 32 MiB of cache, so the table
+says which way the cost moved, not how many frames a console will do. The
+measurement that matters is `core=` in `sdmc:/3ds/gbabe/debug.log` on the
+console, once with `gbabe.cia` and once with `gbabe-walnut.cia`.
+
+### Correctness, not only speed
+
+The DMG rendering test ROM `dmg-acid2` is rendered by both cores through the
+same front-end, and compared against the reference image its author ships:
+
+| Build | Pixels differing from the reference (of 23 040) |
+|---|---|
+| Gambatte | **0** — pixel-identical |
+| Walnut-CGB | 530, all in one band around the sprite/OBP tests |
+
+So the change fixes a rendering bug as well as a speed problem. The CGB path
+is unchanged: the same CGB ROM (blargg `cpu_instrs`) renders identically in
+both builds, 0 of 96 000 pixels different.
+
+### What the backend has to do
+
+| Concern | How |
+|---|---|
+| Video | `runFor()` draws a whole 160x144 RGB565 frame into a static buffer (`-DVIDEO_RGB565` on both sides, or the pointer types disagree); each line then goes to `video_draw_line()`, so scaling stays in `video.c`. Frame skip passes a NULL buffer and skips the line loop. |
+| Audio | `runFor()` returns up to 4128 stereo samples per call; the two decimation stages bring them to 32768 Hz and `audio_push_frames()` puts them in the same FIFO the Walnut build uses. |
+| Input | `gambatte::InputGetter`; its bit values match `enum gb_button` bit for bit, so the joypad mask is passed through. |
+| Saves | `savedata_ptr()`/`savedata_size()` (cart RAM) written to the same `<rom>.sav` the Walnut build uses, so the two builds share saves; `<rom>.rtc` holds the 48-byte MBC3/HuC3 clock. Writes are skipped when a cheap hash says the content did not change. |
+| Palette | The "Auto"/manual DMG palettes are pushed per palette index with `setDmgPaletteColor()`, which takes a value in the core's own pixel format (565 here, despite the parameter being called `rgb32`). CGB games ignore it, as on hardware. |
+| Boot ROM | `setBootloaderGetter()` reads the same optional `sdmc:/3ds/gbabe/bootrom/{dmg,cgb}_boot.bin` files. |
+| Errors | The core has no error callback; `emu_last_error()` returns NULL and the log carries the core's own load messages. |
+
+### Licence consequence
+
+Gambatte is GPL-2.0. The GBabe binary that contains it is therefore distributed
+under GPL-2.0 (the project's own sources stay MIT, which is compatible with
+that). `third_party/gambatte/COPYING` has the licence text and
+`third_party/gambatte/README.md` records the exact upstream commit and the three
+local patches.
+
+### What is still unverified
+
+* Frame times on the console: everything above is x86-64.
+* The ARM11 build of the C++ core: devkitARM compiles it (CI does that on every
+  push), but nobody has measured it here — there is no 3DS in this environment.
+* `.sav`/`.rtc` round trips on hardware, for the same reason: the code paths
+  run on the host, but no test ROM with battery-backed RAM was available.
+* The audio decimator's quality by ear: it is a second-order CIC at 64:1, which
+  is the cheap end of "acceptable", not a band-limited resampler.
+
+---
+
+## 1. Why Walnut-CGB suited the 3DS (it was the first core)
 
 Things checked directly against Walnut-CGB 1.2.4 (`walnut_cgb.h`, 9 920 lines,
 MIT):

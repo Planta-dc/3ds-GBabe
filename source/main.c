@@ -232,6 +232,7 @@ int main(int argc, char **argv)
 			if (down & KEY_Y)
 			{
 				palette_set((palette_get() + 1) % palette_count());
+				emu_palette_changed();
 				g_cfg.palette = palette_get();
 				config_save();
 			}
