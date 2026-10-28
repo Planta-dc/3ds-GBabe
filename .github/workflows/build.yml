@@ -1,13 +1,16 @@
 name: build
 
-# Automatic: every push to main and every pull request builds the .3dsx and runs
-#           the host-side tests.
-# Manual:    Actions -> build -> "Run workflow" lets you pick .3dsx, .cia or both,
+# Automatic: every push to main and every pull request builds the .3dsx, the
+#           .cia, the PC harness and the UI previews.
+# Tags:      pushing v0.1.0 builds and attaches the files to that release,
+#           with QR codes FBI can scan to install straight from the release.
+# Manual:    Actions -> build -> "Run workflow" lets you pick 3dsx, cia or both,
 #           and optionally attach the result to a release tag.
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -26,30 +29,36 @@ on:
         default: ""
 
 permissions:
-  contents: write # only used when release_tag is given
-  pull-requests: write # diagnostic comment when the .cia packaging fails
+  contents: write      # only used when a tag is pushed
+  packages: read       # pull the build image from GHCR
+  pull-requests: write # post the build log when the 3DS build fails
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Platform-independent checks: build the front-end on the host and render a
-  # test ROM through the same code paths the 3DS uses.
+  # Platform-independent checks: build the front-end on the host, render a test
+  # ROM through the same code paths the 3DS uses, and render every UI screen.
+  # No devkitPro needed, so these report even when the 3DS build fails.
   # ---------------------------------------------------------------------------
   host:
-    name: host build + render check
+    name: host build + checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Build the PC harness
-        run: make -C tools/host
+        run: make -C tools/host -j"$(nproc)"
 
-      - name: Type-check the 3DS-only sources
+      - name: Type-check main.c
         run: make -C tools/host check
 
       - name: Render dmg-acid2 through the real render path
         run: |
-          tools/host/gbabe-host test/dmg-acid2.gb 300 /tmp/acid2.ppm 0
-          test -s /tmp/acid2.ppm
+          mkdir -p build
+          tools/host/gbabe-host test/dmg-acid2.gb 300 build/acid2.ppm 0
+          test -s build/acid2.ppm
+
+      - name: Version numbers agree
+        run: sh .github/scripts/check-version.sh
 
       - name: Check the CIA spec against the Makefile
         run: |
@@ -73,133 +82,152 @@ jobs:
           fi
           exit $fail
 
+      # Renders browser/menu/HUD/message screens with the same ui_gfx.c and
+      # ui_screens.c the 3DS runs, so a layout that breaks is visible in the
+      # run's artifacts instead of only on hardware.
+      - name: Render the bottom-screen layouts
+        run: |
+          make -C tools/uipreview -j"$(nproc)"
+          mkdir -p build/ui-preview
+          tools/uipreview/uipreview build/ui-preview
+
+      - name: Convert the previews to PNG
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends python3-pil
+          python3 - build/ui-preview <<'PY'
+          import glob, sys
+          from PIL import Image
+          for f in sorted(glob.glob(f"{sys.argv[1]}/*.ppm")):
+              Image.open(f).save(f[:-4] + ".png")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-preview
+          if-no-files-found: error
+          path: build/ui-preview/*.png
+
   # ---------------------------------------------------------------------------
-  # The actual 3DS build, in the official devkitARM container.
+  # The 3DS build. Runs inside the same image the devcontainer uses, so what CI
+  # compiles is what a developer gets locally:
+  #
+  #   bash docker/build-image.sh --pull
+  #   docker run --rm -v "$PWD:/workspace" -w /workspace <image> bash docker/ci-build.sh
+  #
+  # Three levels of fallback, so a missing or broken image never costs a build:
+  # pull the published one, build it from docker/gbabe-devcontainer.Dockerfile,
+  # and failing that use the stock devkitPro image (which docker/ci-build.sh
+  # knows how to set the packaging tools up in).
   # ---------------------------------------------------------------------------
   build-3ds:
     name: 3ds ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'both' }}
     runs-on: ubuntu-latest
-    container: devkitpro/devkitarm:latest
     needs: host
-    env:
-      DEVKITPRO: /opt/devkitpro
-      DEVKITARM: /opt/devkitpro/devkitARM
-      GH_VERSION: 2.62.0
-    # Every step in this job sticks to POSIX sh on purpose: the devkitPro
-    # image's /bin/sh is dash, so a step written for bash (`set -o pipefail`,
-    # arrays, `[[ ]]`) dies with "Illegal option" and exit 2 before any of its
-    # commands run, which is indistinguishable from the build itself failing.
+    # GitHub runs `run:` steps with `sh -e` when bash cannot be found in the
+    # container, and inside devkitpro/devkitarm that is dash: `set -o pipefail`
+    # dies with "Illegal option" *before* the first command runs, which looks
+    # exactly like the build failing. bash is there, so ask for it by name.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
-      - name: Environment
+      # Only needed when the image is private; harmless (and skipped by the
+      # pull) when it is public.
+      - name: Log in to GHCR
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare build image
         run: |
-          echo "shell: $(readlink -f /bin/sh)"
-          command -v bash sh dash || true
-          echo "PATH=$PATH"
-          bash --version 2>/dev/null | head -n1 || echo "bash: not installed"
+          set -eu
+          image="$(bash docker/build-image.sh)"
+          echo "build image: $image"
 
-      - name: Decide what to build
-        id: plan
-        run: |
-          target="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'both' }}"
-          want_3dsx=false
-          want_cia=false
-          case "$target" in
-            3dsx) want_3dsx=true ;;
-            cia)  want_cia=true ;;
-            *)    want_3dsx=true; want_cia=true ;;
-          esac
-          echo "want_3dsx=$want_3dsx" >> "$GITHUB_OUTPUT"
-          echo "want_cia=$want_cia"   >> "$GITHUB_OUTPUT"
-          echo "building: 3dsx=$want_3dsx cia=$want_cia"
-
-      - name: Show toolchain versions
-        run: |
-          echo "DEVKITARM=$DEVKITARM"
-          arm-none-eabi-gcc --version | head -n1
-          echo "libctru: $(pacman -Q 3ds-libctru 2>/dev/null || echo unknown)"
-
-      - name: Build .3dsx
-        if: steps.plan.outputs.want_3dsx == 'true'
-        run: make -j"$(nproc)"
-
-      - name: Build makerom and bannertool
-        if: steps.plan.outputs.want_cia == 'true'
-        run: sh .github/scripts/install-3ds-packaging-tools.sh
-
-      - name: Build .cia
-        if: steps.plan.outputs.want_cia == 'true'
-        run: |
-          if make cia > cia-build.log 2>&1; then
-            cat cia-build.log
+          if docker pull "$image" >/dev/null 2>&1; then
+            echo "using the published image"
+          elif docker build -f docker/gbabe-devcontainer.Dockerfile -t "$image" . \
+                 > /tmp/image-build.log 2>&1; then
+            echo "built the image locally"
           else
-            status=$?
-            cat cia-build.log
-            exit "$status"
+            echo "::warning::$image is neither published nor buildable; falling back to the stock devkitPro image"
+            tail -n 20 /tmp/image-build.log || true
+            image="devkitpro/devkitarm:latest"
+            docker pull "$image"
           fi
 
-      # A failed step's log is often the only description of the problem, and
-      # neither `gh run view --log` nor the raw log download is always
-      # reachable. So on failure: replay the packaging commands one at a time
-      # with tracing, mirror the tail into annotations, and (for pull requests)
-      # post it as a comment, which is readable through the API.
-      - name: Report .cia failure
-        if: failure() && steps.plan.outputs.want_cia == 'true'
+          echo "BUILD_IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          GBABE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'both' }}
+        run: |
+          # pipefail so tee cannot hide the build's exit status.
+          set -o pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e GBABE_TARGET \
+            "$BUILD_IMAGE" \
+            bash docker/ci-build.sh 2>&1 | tee build.log
+          sudo chown -R "$USER" .
+
+      # A failed step's log cannot be downloaded from every environment (and
+      # the build itself happens inside a container, where gh is not installed).
+      # So on failure: take the log tail, mirror the interesting lines into
+      # annotations - the only part of a failed job that the API hands out
+      # without a log download - and post the whole tail as a pull-request
+      # comment, which is readable straight from the PR.
+      - name: Report build failure
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           set +e
           {
-            echo "pwd: $(pwd)"
-            ls -l gbabe.elf gbabe.3dsx build 2>&1 | head -n 10
-            echo "--- tools"
-            command -v bannertool makerom
-            bannertool --version
-            makerom -help | head -n 1
-            echo "--- build log from 'make cia'"
-            if [ -f cia-build.log ]; then
-              tail -n 60 cia-build.log
+            echo "build image: ${BUILD_IMAGE:-<none>}"
+            echo "--- artifacts"
+            ls -l gbabe.elf gbabe.3dsx gbabe.smdh gbabe.cia 2>&1
+            echo "--- build log"
+            if [ -s build.log ]; then
+              tail -n 80 build.log
             else
-              echo "(no cia-build.log, the step died before make ran)"
+              echo "(build.log is missing or empty: the container died before it ran)"
             fi
-            echo "--- shell"
-            echo "step shell: $0"
-            ( set -o pipefail ) && echo "pipefail: supported" || echo "pipefail: NOT supported"
-            echo "--- replay make cia"
-            make cia 2>&1
-            echo "make cia rc=$?"
-          } > packaging-report.log 2>&1
-          {
-            echo "### .cia packaging failed"
-            echo ''
-            echo '```'
-            tail -n 60 packaging-report.log
-            echo '```'
-          } > comment.md
-          tail -n 60 packaging-report.log
-          # Only a handful of annotations are kept per step, so spend them on the
-          # exit statuses and the last error line.
-          grep -E 'rc=[1-9]|RROR|rror' packaging-report.log | head -n 3 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-          # Full report as a pull-request comment: readable through the API, and
-          # `gh` is not installed inside the devkitPro container.
-          if [ -n "$PR" ]; then
-            python3 -c 'import json; print(json.dumps({"body": open("comment.md").read()}))' > comment.json
-            curl -sS -o /dev/null -w 'comment http=%{http_code}\n' \
-              -X POST -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
-              -d @comment.json
+          } > /tmp/report.log 2>&1
+
+          cat /tmp/report.log
+
+          # Only a handful of annotations survive per job, so spend them on the
+          # lines that say what broke.
+          grep -E 'rror|RROR|rc=[1-9]|not found|No such' /tmp/report.log |
+            head -n 3 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+
+          if [ -n "${PR:-}" ]; then
+            tail -c 8000 /tmp/report.log > /tmp/tail.log
+            {
+              echo '### 3DS build failed'
+              echo
+              echo '```'
+              cat /tmp/tail.log
+              echo '```'
+            } > /tmp/comment.md
+            gh pr comment "$PR" --body-file /tmp/comment.md || true
           fi
 
       - name: List outputs
-        run: ls -la *.3dsx *.smdh *.cia 2>/dev/null || true
+        run: ls -la gbabe.3dsx gbabe.smdh gbabe.cia 2>/dev/null || true
 
       - name: Upload .3dsx
-        if: steps.plan.outputs.want_3dsx == 'true'
+        if: github.event_name != 'workflow_dispatch' || inputs.target != 'cia'
         uses: actions/upload-artifact@v4
         with:
           name: gbabe-3dsx
@@ -209,38 +237,87 @@ jobs:
             gbabe.smdh
 
       - name: Upload .cia
-        if: steps.plan.outputs.want_cia == 'true'
+        if: github.event_name != 'workflow_dispatch' || inputs.target != '3dsx'
         uses: actions/upload-artifact@v4
         with:
           name: gbabe-cia
           if-no-files-found: error
           path: gbabe.cia
 
-      - name: Attach to release
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
+  # ---------------------------------------------------------------------------
+  # Releases: the pushed tag is v<version>, the version in include/gb3ds.h and
+  # the one makerom stamps into the .cia must all agree, or the app would
+  # install under a number it does not report itself as.
+  # ---------------------------------------------------------------------------
+  release:
+    name: attach to release
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    needs: build-3ds
+    env:
+      # On a tag push the tag; for a manual run, whatever was asked for.
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      DL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Only meaningful for a tag push; a manual run may target any tag.
+      - name: Tag matches the sources
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: sh .github/scripts/check-version.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gbabe-cia
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gbabe-3dsx
+
+      # FBI's "Remote Install -> Scan QR Code" wants the plain URL of the .cia.
+      - name: Build the QR code for FBI
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          set -eu
-          # gh is not part of the devkitPro image; fetch it if it is missing.
-          if ! command -v gh >/dev/null 2>&1; then
-            echo "fetching gh"
-            curl -sSL -o /tmp/gh.tar.gz \
-              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
-            tar xzf /tmp/gh.tar.gz -C /tmp
-            PATH="/tmp/gh_${GH_VERSION}_linux_amd64/bin:$PATH"
-            export PATH
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qrencode
+          qrencode -o gbabe-QR.png -s 8 -m 3 -l M "$DL/gbabe.cia"
+
+      - name: Create or update the release
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "GBabe ${TAG#v}" \
+              --notes "GBabe for the Nintendo 3DS (Old 3DS, Old 2DS and up)."
           fi
-          gh --version | head -n1
-          files=""
-          if [ -f gbabe.3dsx ]; then files="$files gbabe.3dsx gbabe.smdh"; fi
-          if [ -f gbabe.cia ];  then files="$files gbabe.cia"; fi
-          if [ -z "$files" ]; then
+          files=()
+          for f in gbabe.cia gbabe.3dsx gbabe.smdh gbabe-QR.png; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
             echo "nothing to upload"; exit 1
           fi
-          short=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "$TAG" --notes "GBabe build from $short"
-          # shellcheck disable=SC2086 # deliberately word-split into file names
-          gh release upload "$TAG" $files --clobber
+          gh release upload "$TAG" "${files[@]}" --clobber
+
+      - name: Put the QR code in the release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release view "$TAG" --json body -q .body > body.md
+          sed -n '/<!-- gbabe-qr:start -->/q;p' body.md > notes.md
+          printf '%s\n' "$(cat notes.md)" > notes.md
+          {
+            echo
+            echo '<!-- gbabe-qr:start -->'
+            echo '## Install on your 3DS'
+            echo
+            echo 'Easiest: open **FBI** -> **Remote Install** -> **Scan QR Code**, then scan this. It downloads and installs the .cia in one go.'
+            echo
+            echo "![QR code to install GBabe $TAG with FBI]($DL/gbabe-QR.png)"
+            echo
+            echo 'Or copy `gbabe.cia` to the SD card and install it with FBI, or use `gbabe.3dsx` from the Homebrew Launcher.'
+            echo '<!-- gbabe-qr:end -->'
+          } >> notes.md
+          gh release edit "$TAG" --notes-file notes.md
+

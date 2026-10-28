@@ -13,6 +13,14 @@ tools/host/gbabe-host
 tools/host/*.ppm
 tools/host/*.png
 
+# UI preview renderer
+tools/uipreview/uipreview
+tools/uipreview/out/
+
+# Anything the build or the workflows leave behind
+build.log
+*.ppm
+
 # Editors / OS
 .DS_Store
 *.swp
