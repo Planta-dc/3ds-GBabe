@@ -84,6 +84,12 @@ jobs:
     env:
       DEVKITPRO: /opt/devkitpro
       DEVKITARM: /opt/devkitpro/devkitARM
+      GH_VERSION: 2.62.0
+    # The devkitPro image's /bin/sh is dash, so `set -o pipefail` (and arrays,
+    # `[[ ]]`, ...) fail with "Illegal option" and exit 2 before anything runs.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -119,8 +125,13 @@ jobs:
       - name: Build .cia
         if: steps.plan.outputs.want_cia == 'true'
         run: |
-          set -o pipefail
-          { make cia; echo "make rc=$?"; } 2>&1 | tee cia-build.log
+          if make cia > cia-build.log 2>&1; then
+            cat cia-build.log
+          else
+            status=$?
+            cat cia-build.log
+            exit "$status"
+          fi
 
       # A failed step's log is often the only description of the problem, and
       # neither `gh run view --log` nor the raw log download is always
@@ -153,18 +164,6 @@ jobs:
             echo "--- replay make cia"
             make cia 2>&1
             echo "make cia rc=$?"
-            echo "--- replay"
-            bannertool makebanner -i resources/banner.png -a resources/banner.wav -o build/banner.bnr
-            echo "makebanner rc=$?"
-            bannertool makesmdh -s "GBabe" -l "GBabe" -p "GBabe contributors" -i icon.png -o build/icon.icn
-            echo "makesmdh rc=$?"
-            set -x
-            makerom -f cia -o gbabe.cia -target t -exefslogo \
-              -elf gbabe.elf -rsf resources/gbabe.rsf \
-              -icon build/icon.icn -banner build/banner.bnr \
-              -major 0 -minor 1 -micro 0 \
-              -DAPP_TITLE="GBabe" -DAPP_PRODUCT_CODE="CTR-H-GBABE" -DAPP_UNIQUE_ID=0xEABE1
-            echo "makerom rc=$?"
           } > packaging-report.log 2>&1
           {
             echo "### .cia packaging failed"
@@ -218,6 +217,16 @@ jobs:
           TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
+          # gh is not part of the devkitPro image; fetch it if it is missing.
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "fetching gh"
+            curl -sSL -o /tmp/gh.tar.gz \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            tar xzf /tmp/gh.tar.gz -C /tmp
+            PATH="/tmp/gh_${GH_VERSION}_linux_amd64/bin:$PATH"
+            export PATH
+          fi
+          gh --version | head -n1
           files=()
           if [ -f gbabe.3dsx ]; then files+=(gbabe.3dsx gbabe.smdh); fi
           if [ -f gbabe.cia ];  then files+=(gbabe.cia); fi

@@ -124,11 +124,19 @@ throughput, which is the open question on real hardware (see §4).
      as a `Result` error from `csndInit()`/`fsInit()` on first boot;
    * whether the `.cia` installs and boots on hardware.
 
-   One CI lesson worth recording: the container is Debian bookworm (glibc 2.36)
-   while both tools' published Linux archives are built on Ubuntu 24.04
-   (glibc 2.39), so the prebuilt binaries do not execute there at all. That is
-   why the install script compiles them instead, and why it runs each tool once
-   and fails loudly instead of masking the error.
+   Two CI lessons worth recording, because both cost a debugging round and
+   neither is visible from the workflow file:
+
+   * the container is Debian bookworm (glibc 2.36) while both tools' published
+     Linux archives are built on Ubuntu 24.04 (glibc 2.39), so the prebuilt
+     binaries do not execute there at all. The install script therefore
+     compiles them, and runs each one once so a broken tool fails loudly
+     instead of being masked;
+   * inside that container the default `run:` shell is **dash**, so `set -o
+     pipefail` (and `files=(...)`, `[[ ]]`, …) fails with "Illegal option" and
+     exit 2 *before* the step's commands run — which looks exactly like the
+     build command itself failing. The job now declares `shell: bash`
+     explicitly, and the `.cia` step does not depend on `pipefail` either way.
 4. **Not implemented:** save states, link cable, cheat codes, SGB border/colour
    tables (`third_party/walnut/extras/sgb.h` is available for a future
    per-game palette table), MBC7/rumble, rewinding.

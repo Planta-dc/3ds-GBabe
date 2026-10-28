@@ -110,6 +110,13 @@ is not addressable as `steps.plan.outputs.3dsx` (GitHub's expression grammar
 rejects property names starting with a digit) and has to be called something
 like `want_3dsx`.
 
+Two more that only show up on the runner, both now handled explicitly: the
+`devkitpro/devkitarm` container's default `run:` shell is **dash**, so a job
+that needs `pipefail`, arrays or `[[ ]]` must declare `shell: bash`; and the
+container's glibc is older than the one the published `makerom`/`bannertool`
+binaries are linked against, so those are compiled from source instead of
+downloaded.
+
 The workflow runs in the official `devkitpro/devkitarm` container and builds
 makerom (v0.19.0) and bannertool (v1.2.3) from source with
 `.github/scripts/install-3ds-packaging-tools.sh`, which you can also run locally
