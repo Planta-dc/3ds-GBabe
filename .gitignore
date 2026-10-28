@@ -1,0 +1,19 @@
+# Build output
+build/
+*.3dsx
+*.elf
+*.smdh
+*.cia
+*.map
+*.o
+*.d
+
+# Host harness
+tools/host/gbabe-host
+tools/host/*.ppm
+tools/host/*.png
+
+# Editors / OS
+.DS_Store
+*.swp
+.vscode/

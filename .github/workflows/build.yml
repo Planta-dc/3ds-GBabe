@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host:
+    name: host build + render check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the PC harness
+        run: make -C tools/host
+      - name: Type-check the 3DS-only sources
+        run: make -C tools/host check
+      - name: Render the dmg-acid2 test ROM through the real render path
+        run: |
+          tools/host/gbabe-host test/dmg-acid2.gb 300 /tmp/acid2.ppm 0
+          test -s /tmp/acid2.ppm
+
+  devkitarm:
+    name: 3ds-actions build
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make
+        run: make -j$(nproc)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gbabe-3dsx
+          path: |
+            gbabe.3dsx
+            gbabe.smdh
