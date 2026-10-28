@@ -64,6 +64,12 @@ pixel with the wrong layer or the wrong shade fails it. The window is fixed
 because the ROM has to be rendered at `SCALE_ORIG`, the one scale that puts the
 frame 1:1 on the panel.
 
+`make -C tools/host cross` covers the other half: it renders the same ROM with
+both cores at all three scales and compares the two PPMs byte for byte, so the
+cores have to agree with each other as well as with the reference. That is also
+what pins down the two blit paths, since the Gambatte backend now blits a whole
+frame at once and the Walnut one a scanline at a time.
+
 Pixels differing from the reference, of 23 040, and the number of distinct
 colours in the render (a DMG frame has four):
 
