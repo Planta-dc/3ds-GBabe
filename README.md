@@ -8,8 +8,10 @@ The first version of this port used
 [Walnut-CGB](https://github.com/Mr-PauI/Walnut-CGB); it is still built, as a
 second installable, so both cores can be compared on the same console
 (`make CORE=walnut`). On a PC Gambatte needs 1.6x-3.2x less time per emulated
-frame, and it renders `dmg-acid2` pixel-identically to the reference where
-Walnut-CGB misses 530 pixels — the measurements are in
+frame. Both cores render `dmg-acid2` pixel-identically to its reference image,
+which CI checks on every build (`make -C tools/host acid2`, `CORE=walnut` for
+the other one); that check found and fixed a Walnut bug that collapsed two DMG
+shades into one — the measurements are in
 [docs/PORT-NOTES.md](docs/PORT-NOTES.md#0-the-default-core-is-gambatte-050).
 
 Target: **Old 3DS / 2DS first.** No DSP firmware dump, no GPU shaders, no
@@ -388,6 +390,8 @@ make -C tools/host            # builds ./gbabe-host
 make -C tools/host check      # type-checks main.c too
 make -C tools/host logtest    # checks the debug log's format
 make -C tools/host bench ROM=game.gb   # per-frame cost of core and blit
+make -C tools/host acid2               # dmg-acid2 render check (add CORE=walnut)
+make -C tools/host cross               # both cores render the same picture
 ./tools/host/gbabe-host game.gb 300 out.ppm 0
 ```
 

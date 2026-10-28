@@ -188,11 +188,18 @@ static void lcd_draw_line_cb(struct gb_s *g, const uint8_t *pixels,
 	}
 	else
 	{
-		/* DMG: low two bits are the shade, bits 4-5 are the layer, which
-		 * gives the classic 3 x 4 (BG / OBJ0 / OBJ1) colouring. */
+		/* DMG: the core documents the pixel byte as shade in bits 0-1
+		 * (LCD_COLOUR) and layer in bits 4-5 (LCD_PALETTE_ALL): 0 = OBJ0,
+		 * 1 = OBJ1, 2 = BG. palette_dmg565() holds exactly those three
+		 * rows of four shades, so the index is layer * 4 + shade.
+		 *
+		 * The old expression was ((p & 18) >> 1) | (p & 3), which reads
+		 * bit 1 - half of the shade - as a layer bit and drops bit 5, so
+		 * shades 2 and 3 collapsed into one colour and the BG row was
+		 * never selected. tools/check-render.py catches that. */
 		const uint16_t *pal = palette_dmg565();
 		for (unsigned x = 0; x < LCD_WIDTH; x++)
-			out[x] = pal[((pixels[x] & 18) >> 1) | (pixels[x] & 3)];
+			out[x] = pal[((pixels[x] & 0x30) >> 2) | (pixels[x] & 3)];
 	}
 
 	video_draw_line(out, line);

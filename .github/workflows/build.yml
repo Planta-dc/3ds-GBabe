@@ -66,11 +66,32 @@ jobs:
           tools/host/gbabe-host test/dmg-acid2.gb 300 build/acid2.ppm 0
           test -s build/acid2.ppm
 
+      # The one check that says the picture is right rather than merely present:
+      # every pixel of dmg-acid2 is compared with the upstream reference frame by
+      # shade rank, so a different DMG palette cannot mask a wrong layer or a
+      # wrong shade. Both cores are part of the deliverable, so both are checked
+      # (acid2 relinks gbabe-host itself when it holds the other backend).
+      - name: dmg-acid2 render check, Gambatte
+        run: make -C tools/host acid2
+
+      - name: dmg-acid2 render check, Walnut-CGB
+        run: make -C tools/host CORE=walnut acid2
+
+      # Matching the reference is one thing; agreeing with each other is the
+      # other, and it is what pins down the two blit paths (the Gambatte backend
+      # blits a whole frame, the Walnut one a scanline at a time). Compared byte
+      # for byte at all three scales.
+      - name: Both cores render the same picture
+        run: make -C tools/host cross
+
       # Not a performance gate (a shared runner is far too noisy for that) - it
       # prints the per-frame split next to every build, so a regression that
       # doubles the blit or the core shows up in the log as a number.
       - name: Per-frame cost (host benchmark, informational)
-        run: make -C tools/host bench ROM=test/dmg-acid2.gb FRAMES=200
+        run: |
+          rm -f tools/host/gbabe-host   # still holds the Walnut backend
+          make -C tools/host -j"$(nproc)"
+          make -C tools/host bench ROM=test/dmg-acid2.gb FRAMES=200
 
       - name: Debug log format
         run: make -C tools/host logtest

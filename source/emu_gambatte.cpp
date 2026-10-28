@@ -596,6 +596,8 @@ extern "C" void emu_run_frame(void)
 	if (!rendering)
 		return;
 
-	for (int line = 0; line < 144; line++)
-		video_draw_line(&vbuf[line * 160], line);
+	/* One call for the whole frame: the picture lives in a rotated panel, so
+	 * this path writes it down a column at a time and every write is
+	 * sequential in memory (see video.h). */
+	video_draw_frame(vbuf, 160);
 }
