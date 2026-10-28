@@ -151,6 +151,16 @@ jobs:
             gh pr comment "$PR" --body-file /tmp/comment.md || true
           fi
 
+      # The whole log, not just the tail that fits in a comment.
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          if-no-files-found: ignore
+          retention-days: 3
+          path: build.log
+
       - uses: actions/upload-artifact@v4
         with:
           name: ui-preview
@@ -271,6 +281,16 @@ jobs:
             } > /tmp/comment.md
             gh pr comment "$PR" --body-file /tmp/comment.md || true
           fi
+
+      # The whole log, not just the tail that fits in a comment.
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          if-no-files-found: ignore
+          retention-days: 3
+          path: build.log
 
       - name: List outputs
         run: ls -la artifacts/ 2>/dev/null || true
