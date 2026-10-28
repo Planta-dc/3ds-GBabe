@@ -50,16 +50,39 @@ console, once with `gbabe.cia` and once with `gbabe-walnut.cia`.
 ### Correctness, not only speed
 
 The DMG rendering test ROM `dmg-acid2` is rendered by both cores through the
-same front-end, and compared against the reference image its author ships:
+same front-end, and compared against the reference image its author ships.
 
-| Build | Pixels differing from the reference (of 23 040) |
-|---|---|
-| Gambatte | **0** — pixel-identical |
-| Walnut-CGB | 530, all in one band around the sprite/OBP tests |
+That comparison is now a build target rather than something someone ran once:
 
-So the change fixes a rendering bug as well as a speed problem. The CGB path
-is unchanged: the same CGB ROM (blargg `cpu_instrs`) renders identically in
-both builds, 0 of 96 000 pixels different.
+    make -C tools/host acid2                # Gambatte
+    make -C tools/host acid2 CORE=walnut    # Walnut-CGB
+
+`tools/check-render.py` compares the two frames **by shade rank** — the
+distinct colours of each image are sorted by luminance and replaced by their
+index — so selecting a different DMG palette cannot change the result. Only a
+pixel with the wrong layer or the wrong shade fails it. The window is fixed
+because the ROM has to be rendered at `SCALE_ORIG`, the one scale that puts the
+frame 1:1 on the panel.
+
+Pixels differing from the reference, of 23 040, and the number of distinct
+colours in the render (a DMG frame has four):
+
+| Build | Differing pixels | Colours | |
+|---|---|---|---|
+| Gambatte | **0** | 4 | pixel-identical |
+| Walnut-CGB, before the fix | 19 291 | 3 | two shades collapsed into one |
+| Walnut-CGB, after the fix | **0** | 4 | pixel-identical |
+
+The Walnut bug the check caught: its scanline byte carries the shade in bits
+0-1 and the layer (OBJ0 / OBJ1 / BG) in bits 4-5, but the DMG path built the
+palette index as `((p & 18) >> 1) | (p & 3)`. That reads bit 1 — half of the
+shade — as a layer bit and drops bit 5, so shades 2 and 3 landed on the same
+colour and the BG row of the palette was never selected at all: a 4-shade
+picture came out with 3. The index is now `((p & 0x30) >> 2) | (p & 3)`,
+layer * 4 + shade, and the two cores agree pixel for pixel.
+
+The CGB path is unchanged: the same CGB ROM (blargg `cpu_instrs`) renders
+identically in both builds, 0 of 96 000 pixels different.
 
 ### What the backend has to do
 
@@ -158,6 +181,19 @@ throughput, which is the open question on real hardware (see §4).
 * **Line-exact scaling.** `video_draw_line()` maps source line `n` to destination
   rows `[n*H/144, (n+1)*H/144)`, so scaling stays coherent per scanline and
   there is no tearing inside a line.
+* **One blit per frame when the core allows it.** The panel is rotated, so
+  writing a scanline touches one halfword per 480-byte column: 160 separate
+  cache lines, and — worse — 160 partial writes into the same cache line by the
+  next scanline. `video_draw_frame()` takes the whole 160x144 frame instead and
+  walks *down* a destination column, which is one contiguous run of `dst_h`
+  halfwords per column and 267 runs per frame at `SCALE_FIT`. The core hands
+  over a complete frame, so Gambatte uses it (`source/emu_gambatte.cpp`);
+  Walnut-CGB only has a per-line callback and stays on `video_draw_line()`.
+  The two paths produce byte-identical pictures at all three scales (compared
+  on the host, not argued), and on x86-64 they measure the same — the reason to
+  prefer the whole-frame path is the 3DS memory system, which has no L2 and no
+  way to hide a 240-stride store pattern, so the difference has to be read from
+  `blit` in `debug.log` on a console.
 * **One screen each, and only one.** The game writes the top framebuffer and
   the UI writes the bottom one; each screen is flushed and swapped on its own.
   It has to be that way: `gfxFlushBuffers()` and `gfxSwapBuffers()` act on

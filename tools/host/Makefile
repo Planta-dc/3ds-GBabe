@@ -2,6 +2,7 @@
 #
 #   make            build ./gbabe-host
 #   make check      compile main.c as well (type check)
+#   make acid2      render dmg-acid2 and compare it with the reference frame
 #   make run ROM=game.gb FRAMES=300 OUT=shot.ppm
 #   make bench ROM=game.gb     per-frame cost of the core and the blit
 #   make logtest               check the debug log's format
@@ -87,6 +88,12 @@ all: $(BIN)
 $(BIN): $(FRONT_OBJ) $(CORE_OBJ) $(OBJDIR)/stub.o $(OBJDIR)/harness.o $(CORE_LIB)
 	$(LD) $(CFLAGS) -o $@ $(FRONT_OBJ) $(CORE_OBJ) $(OBJDIR)/stub.o \
 		$(OBJDIR)/harness.o $(CORE_LIB) -lm
+	@echo $(CORE) > $(BIN).core
+
+# gbabe-host is one file for both cores. Every object of the other core is
+# older than the binary, so make would happily keep a backend the caller did
+# not ask for; $(BIN).core records which one was linked and acid2 relinks on a
+# mismatch instead of measuring the wrong core.
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(OBJDIR)
@@ -107,6 +114,28 @@ check:
 	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -Dmain=gbabe_main -c \
 		-o /tmp/gbabe-main.o $(ROOT)/source/main.c
 	@echo "main.c and the UI: type check ok"
+
+# Palette-independent render regression: the emulated picture is compared with
+# test/dmg-acid2-reference.ppm by shade rank, so no DMG palette can change the
+# result - only a wrong layer or a wrong shade fails it.
+#
+# SCALE_ORIG (2) puts the frame 1:1 in the middle of the 400x240 top screen
+# (x 120..279, y 48..191), which is the only scale where the render can be
+# compared with the 160x144 reference pixel for pixel.
+acid2:
+	@if [ "`cat $(BIN).core 2>/dev/null`" != "$(CORE)" ]; then \
+		echo "acid2: gbabe-host holds `cat $(BIN).core 2>/dev/null || echo nothing`, relinking for $(CORE)"; \
+		rm -f $(BIN); \
+		$(MAKE) --no-print-directory CORE=$(CORE) $(BIN) || exit 1; \
+	fi
+	@out=`./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(OBJDIR)/acid2.ppm 2` || exit 1; \
+	echo "$$out"; \
+	case "$$out" in \
+	*"core=$(CORE)"*) ;; \
+	*) echo "gbabe-host was built for another core; run 'make -C tools/host CORE=$(CORE)' first" >&2; exit 1 ;; \
+	esac
+	python3 $(ROOT)/tools/check-render.py --render $(OBJDIR)/acid2.ppm \
+		--reference $(ROOT)/test/dmg-acid2-reference.ppm --window 120,48,160,144
 
 run: $(BIN)
 	./$(BIN) $(ROM) $(or $(FRAMES),300) $(or $(OUT),screen.ppm)
@@ -133,6 +162,6 @@ $(OBJDIR)/bench.o: bench.c $(ROOT)/include/emu.h
 $(OBJDIR)/harness.o: harness.c $(ROOT)/include/emu.h
 
 clean:
-	rm -rf $(OBJDIR) $(BIN) gbabe-bench gbabe-logtest *.ppm
+	rm -rf $(OBJDIR) $(BIN) $(BIN).core gbabe-bench gbabe-logtest *.ppm
 
-.PHONY: all check run bench logtest clean
+.PHONY: all check acid2 run bench logtest clean

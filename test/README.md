@@ -1,12 +1,31 @@
-# Test ROM
+# Test data
 
-`dmg-acid2.gb` is Matt Currie's *dmg-acid2* PPU test ROM (MIT), the same binary
-that Walnut-CGB ships in its own test suite. It draws a face; if sprites,
-priority, window, palettes or object sizes are wrong, the face is visibly wrong.
+`dmg-acid2.gb` is Matt Currie's DMG rendering test ROM, taken unmodified from
+https://github.com/mattcurrie/dmg-acid2 (MIT, Copyright (c) 2020 Matt Currie).
 
-```sh
-make -C tools/host
-tools/host/gbabe-host test/dmg-acid2.gb 300 /tmp/acid2.ppm 0
-```
+`dmg-acid2-reference.ppm` is the reference image from the same repository
+(`img/reference-dmg.png`, MIT), converted from its 2-bit greyscale PNG to a
+plain PPM so the check that uses it needs no image library: 160x144, four
+levels (0, 85, 170, 255), one per DMG shade.
 
-`docs/screenshot-acid2.png` was produced this way.
+`tools/check-render.py` compares the emulator's output against it. The
+comparison is done on *shade indices*, not colours, so it does not care which
+DMG palette is selected: the four colours found in the render are sorted by
+luminance and matched against the four levels of the reference. What it checks
+is that the right pixels are the right shade of the right layer - which is what
+`dmg-acid2` exists to test.
+
+## Running it
+
+From the repository root:
+
+    make -C tools/host acid2                 # Gambatte
+    make -C tools/host acid2 CORE=walnut     # Walnut-CGB
+
+`acid2` renders 300 frames at `SCALE_ORIG`, which is the only scale that puts
+the frame 1:1 on the 400x240 top screen (x 120..279, y 48..191), so the render
+can be compared with the 160x144 reference pixel for pixel; then it runs the
+comparison. It relinks `tools/host/gbabe-host` when the binary was built for
+the other core, so the two invocations can be made in either order.
+
+CI runs both.

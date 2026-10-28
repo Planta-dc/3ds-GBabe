@@ -36,6 +36,7 @@ static bool fb_ready;
 /* Destination geometry, recomputed when the scale mode changes. */
 static int dst_x0, dst_y0, dst_w, dst_h;
 static int16_t map_x[LCD_TOP_W]; /* dst column -> source column */
+static int16_t map_y[LCD_TOP_H]; /* dst row    -> source row    */
 static int current_scale = -1;
 
 static void recalc_geometry(int mode)
@@ -70,6 +71,14 @@ static void recalc_geometry(int mode)
 		if (sx > 159)
 			sx = 159;
 		map_x[x] = (int16_t)sx;
+	}
+
+	for (int y = 0; y < dst_h; y++)
+	{
+		int sy = (y * 144) / dst_h;
+		if (sy > 143)
+			sy = 143;
+		map_y[y] = (int16_t)sy;
 	}
 
 	current_scale = mode;
@@ -203,6 +212,32 @@ void video_draw_line(const uint16_t *line565, int line)
 		/* Step 240 pixels per destination column, i.e. one panel row. */
 		for (int dx = 0; dx < dst_w; dx++)
 			base[dx * FB_STRIDE] = line565[map_x[dx]];
+	}
+}
+
+/* One call per frame instead of one per scanline: see video.h. The panel
+ * address of a pixel grows as y shrinks, so a column is written from its
+ * bottom row upwards, which makes the writes sequential. */
+void video_draw_frame(const uint16_t *frame565, int pitch)
+{
+	if (!fb_ready || frame565 == NULL)
+		return;
+
+	for (int dx = 0; dx < dst_w; dx++)
+	{
+		const int x = dst_x0 + dx;
+		const uint16_t *src = frame565 + map_x[dx];
+
+#if VIDEO_FLIP_Y
+		/* Mirrored vertically: the address still grows with y. */
+		u16 *dst = fb_pixel(x, dst_y0);
+		for (int dy = 0; dy < dst_h; dy++)
+			*dst++ = src[map_y[dy] * pitch];
+#else
+		u16 *dst = fb_pixel(x, dst_y0 + dst_h - 1);
+		for (int dy = dst_h - 1; dy >= 0; dy--)
+			*dst++ = src[map_y[dy] * pitch];
+#endif
 	}
 }
 
