@@ -36,7 +36,12 @@ void ui_draw_hud(void);
 
 /* Per-frame bookkeeping for the HUD: account the ticks spent emulating,
  * blitting, waiting for the panel and pacing, and refresh the profile (and the
- * HUD) once a second. A tick is 1/SYSCLOCK_ARM11 s. */
+ * HUD) once a second. A tick is 1/SYSCLOCK_ARM11 s.
+ *
+ * late_frames is how many frames in this window started after their own slot
+ * (the previous frame overran), resyncs how many times more than four frames of
+ * backlog were thrown away. Both are owed to the caller, which resets them. */
 void ui_note_frame(uint64_t core_ticks, uint64_t blit_ticks,
 		   uint64_t sync_ticks, uint64_t wait_ticks,
-		   uint64_t frame_ticks);
+		   uint64_t frame_ticks, unsigned late_frames,
+		   unsigned resyncs);

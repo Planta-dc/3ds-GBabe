@@ -33,8 +33,18 @@
 
 gbabe_perf g_perf;
 
-/* Autosave cartridge RAM every 30 seconds of emulated time. */
-#define AUTOSAVE_TICKS (SYSCLOCK_ARM11 * 30)
+/* Frame pacing, counted per HUD window. Both are zero on a console that keeps
+ * up; on one that does not they say *how* it falls behind, which the fps figure
+ * cannot: late = the frame started after its slot, resync = more than four
+ * frames of backlog were thrown away (a visible jump). */
+static unsigned pace_late;
+static unsigned pace_resync;
+
+/* Autosave cartridge RAM every 30 seconds of emulated time. The cast is not
+ * decoration: SYSCLOCK_ARM11 * 30 is 8.04e9 and does not fit in the 32-bit
+ * unsigned int the constant has in libctru, so the product used to wrap to
+ * 3.75e9 - an autosave every 14 seconds, twice the SD writes. */
+#define AUTOSAVE_TICKS ((u64)SYSCLOCK_ARM11 * 30u)
 
 static u64 next_frame_tick;
 static u64 autosave_tick;
@@ -69,8 +79,11 @@ static void platform_init(void)
 		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS",
 		 envIsHomebrew() ? "launched by a homebrew loader (3dsx)"
 				 : "installed title (cia)");
-	log_line("tick rate %.0f Hz, scale=%d palette=%d frameskip=%d",
-		 SYSCLOCK_ARM11, g_cfg.scale, g_cfg.palette, g_cfg.frameskip);
+	/* %u, not %.0f: SYSCLOCK_ARM11 is an integer constant in libctru, and
+	 * handing an int to %f printed "tick rate 0 Hz" on hardware. */
+	log_line("tick rate %u Hz, scale=%d palette=%d frameskip=%d",
+		 (unsigned)SYSCLOCK_ARM11, g_cfg.scale, g_cfg.palette,
+		 g_cfg.frameskip);
 
 	if (!audio_init())
 		g_cfg.audio_on = false;
@@ -155,10 +168,19 @@ static bool frame_due(void)
 
 	next_frame_tick += FRAME_TICKS;
 
+	/* Started after its own slot: the frame before it overran. Harmless on
+	 * its own - the next slot is still in the future - but a rate of them
+	 * means the machine is at its limit. */
+	if (now > next_frame_tick)
+		pace_late++;
+
 	/* Fell more than four frames behind (menu, stalled SD card): resync
 	 * instead of trying to catch up forever. */
 	if (now - next_frame_tick > 4 * FRAME_TICKS)
+	{
 		next_frame_tick = now + FRAME_TICKS;
+		pace_resync++;
+	}
 
 	return true;
 }
@@ -330,7 +352,9 @@ int main(int argc, char **argv)
 						   frame_start - prev_end : 0;
 				ui_note_frame(after_core - frame_start, blit,
 					      sync, waited,
-					      after_blit - (prev_end ? prev_end : frame_start));
+					      after_blit - (prev_end ? prev_end : frame_start),
+					      pace_late, pace_resync);
+				pace_late = pace_resync = 0;
 				last_frame_end = after_blit;
 
 				audio_log_stats();
@@ -347,12 +371,23 @@ int main(int argc, char **argv)
 			    now - last_slow_log > SYSCLOCK_ARM11)
 			{
 				last_slow_log = now;
+
+				/* The wait for the panel is not the blit. On
+				 * hardware the panels's own frame is 16.67 ms and
+				 * the Game Boy's is 16.74, so a frame that
+				 * arrives just after a vblank waits a whole panel
+				 * period - which reads as "blit 16.8" in this
+				 * line while the copy itself is 0.1 ms. Split it:
+				 * a 26 ms frame is core 10 + vblank 16, and the
+				 * line should say so. */
+				const u64 sync = video_present_wait();
 				log_line("slow frame %.1f ms: core %.1f blit %.1f "
-					 "audio %u ms", frame_ms,
+					 "vblank %.1f audio %u ms", frame_ms,
 					 (double)(after_core - frame_start) * 1000.0 /
 						 SYSCLOCK_ARM11,
-					 (double)(after_blit - after_core) * 1000.0 /
-						 SYSCLOCK_ARM11,
+					 (double)((after_blit - after_core) - sync) *
+						 1000.0 / SYSCLOCK_ARM11,
+					 (double)sync * 1000.0 / SYSCLOCK_ARM11,
 					 audio_queue_ms());
 			}
 

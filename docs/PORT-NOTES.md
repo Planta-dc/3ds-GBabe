@@ -563,3 +563,59 @@ The recipe this project ended up with, in order:
    reports the first bug.
 7. Make the still-picture checks and the timing checks part of the build, not
    something you ran once (`make -C tools/host acid2`, `audiotest`).
+8. Read the first log from real hardware as if it were a bug report, because it
+   is: the numbers in §9 found two more bugs and explained a third symptom.
+
+---
+
+## 9. What the console actually reports
+
+The first debug log from a real Old 3DS run of 0.2.0 (CGB title, `SCALE_FIT`,
+no frame skip, 205 seconds) is worth reading line by line, because it is the
+first measurement of this port that was not taken on a PC:
+
+```
+[    1.225] perf fps=59.8 frame=16.7 worst=18.7 core=10.0 blit=0.1 sync=6.6
+                wait=0.0 other=0.0 audio=55ms sync_skip=0 sync_late=0
+[    8.914] slow frame 26.2 ms: core 10.6 blit 0.1 vblank 15.6 audio 41 ms
+[   10.518] perf fps=52.9 frame=18.9 worst=33.4 core=15.1 blit=0.1 sync=3.1
+                wait=0.6 other=0.0 audio=62ms sync_skip=3 ...
+[   12.510] audio: 301 blocks, late 207 (worst 648.96 ms), underruns 8 ...
+```
+
+| what | measured on the console | what it means |
+|---|---|---|
+| `core` | 8.6 - 16.5 ms | the interpreter, scene dependent. Inside the 16.74 ms budget, but not by much in heavy scenes |
+| `blit` | 0.1 ms | the whole-frame column-major blit is free. The PC said 0.05 ms; the console agrees |
+| `sync` | 3 - 8 ms, occasionally 16.6 | the vblank wait, as designed |
+| `fps` | 57.8 - 58.8 | **not** 59.7275, which is the one number that explains the rest |
+| a 26 ms frame | about once a second | 10 ms of core plus a whole 16.7 ms panel period: the swap landed just after a vblank |
+| `sync_skip` | 0 in light scenes, 1 - 8/s when `core` >= 14 | frames that had to be presented without the wait: the tearing that is left |
+| `underruns` | ~0.6/s, `late` on 60 % of blocks | the APU produces one frame of samples per emulated frame, so an emulator running 1.5 % slow starves CSND 1.5 % of the time |
+
+So the sound stutter is not an audio bug any more - it is downstream of the
+frame loop running at ~98.5 %. Fixing the pacing fixes both, which is why the
+log line carries `pace_late` and `resync` now: they say whether the loop starts
+frames late (overruns) or throws away backlog (a visible jump), and the next
+round of work can be aimed with those two instead of a guess.
+
+Two other things in that log were real bugs, both invisible on the PC because
+`tools/host/3ds.h` used to define `SYSCLOCK_ARM11` as a `double` while libctru
+defines it as an integer constant:
+
+* `tick rate 0 Hz` - `%.0f` was handed an `int`. The stub now uses libctru's
+  integer, so a format mismatch fails on the host too.
+* `AUTOSAVE_TICKS` was `SYSCLOCK_ARM11 * 30` = 8.04e9, which overflows the
+  32-bit `unsigned int` the constant has on hardware and wrapped to 3.75e9 -
+  an SD write every 14 seconds instead of every 30.
+
+The ROM title in the log was `"BUGS BUNNY4AO4E\xff"`: the header is space padded
+and may contain anything above 0x7F, and the loader only stopped at control
+characters. It stops at the first byte outside printable ASCII now, and trims
+the padding.
+
+The same log has three stalls of 0.67 s, 4 s and 50 s in `wait`, all of them
+outside any frame (the emulator was not running slowly, the console was not
+running at all). Those are the lid, the HOME menu or a system applet; the loop
+resyncs after them rather than trying to catch up, which is what the `resync`
+counter is there to confirm.

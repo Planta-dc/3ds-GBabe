@@ -284,15 +284,20 @@ void fill_info(void)
 
 	/* Title at 0x134, up to 16 characters, NUL padded. CGB cartridges use
 	 * the byte at 0x143 for the CGB flag, so the title is 15 characters
-	 * long there; stopping at the first unprintable byte covers both. */
+	 * long there; stopping at the first byte outside printable ASCII covers
+	 * both. (Stopping only at control characters let 0x80-0xFF through, and
+	 * a real cartridge - "Bugs Bunny in Crazy Castle 4" - put a 0xFF in the
+	 * padding, which reached the log and the status readout as mojibake.) */
 	unsigned n = 0;
 	for (unsigned i = 0; i < sizeof info.title - 1; i++)
 	{
 		uint8_t c = rom[0x134 + i];
-		if (c == '\0' || c < 0x20 || c == 0x7F)
+		if (c < 0x20 || c >= 0x7F)
 			break;
 		info.title[n++] = (char)c;
 	}
+	while (n > 0 && info.title[n - 1] == ' ')
+		n--; /* titles are space padded */
 	info.title[n] = '\0';
 
 	info.cgb = (rom[0x143] & 0x80) != 0;

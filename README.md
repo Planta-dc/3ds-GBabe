@@ -209,28 +209,36 @@ sdmc:/3ds/gbabe/debug.log
 
 ```
 # GBabe 0.2.0 debug log
-# os time: 133987887000000000
-[    0.412] GBabe 0.2.0, Old 3DS/2DS
-[    0.414] tick rate 268123480 Hz, scale=0 palette=0 frameskip=0
-[    0.501] audio: 32768 Hz, stereo, 31 ms blocks, channels 30/29/28/27
-[    3.882] rom: "POKEMON CRYSTAL" CGB mbc5 64 rom banks 4 ram banks
-[    3.884] rom path: sdmc:/roms/Pokemon Crystal.gbc
-[    4.901] perf fps=43.1 frame=23.2 worst=31.8 core=19.6 blit=1.7 sync=12.0 wait=0.4 other=1.5 audio=60ms
-[    4.904] slow frame 31.8 ms: core 27.1 blit 1.9 audio 60 ms
-[    8.913] audio: 128 blocks, late 3 (worst 0.19 ms), underruns 0, resyncs 0, dropped 0, queue 58 ms, margin 0.71 ms
-[   30.112] setting frameskip=1
-[   30.640] perf fps=59.4 frame=16.8 worst=19.1 core=19.9 blit=1.2 sync=12.1 wait=0.0 other=0.7 audio=59ms
+# os time: 4002180240788
+[    0.018] GBabe 0.2.0, Old 3DS/2DS, installed title (cia)
+[    0.018] tick rate 268111856 Hz, scale=0 palette=0 frameskip=0
+[    0.021] audio: 32768 Hz, stereo, 31 ms blocks, channels 31/29/30/28
+[    0.191] core: gambatte 0.5.0, CGB, 64 rom banks, 0 ram banks
+[    0.204] rom: "BUGS BUNNY4" CGB mbc5 64 rom banks 0 ram banks
+[    0.204] rom path: sdmc:/roms/gb/Bugs Bunny in Crazy Castle 4 (USA).gbc
+[    1.225] perf fps=59.8 frame=16.7 worst=18.7 core=10.0 blit=0.1 sync=6.6 wait=0.0 other=0.0 audio=55ms sync_skip=0 sync_late=0 pace_late=0 resync=0
+[    8.914] slow frame 26.2 ms: core 10.6 blit 0.1 vblank 15.6 audio 41 ms
+[   10.518] perf fps=52.9 frame=18.9 worst=33.4 core=15.1 blit=0.1 sync=3.1 wait=0.6 other=0.0 audio=62ms sync_skip=3 sync_late=0 pace_late=41 resync=0
+[   12.510] audio: 301 blocks, late 207 (worst 648.96 ms), underruns 8, resyncs 0, dropped 0, queue 10 ms, margin 5.00 ms
 ```
 
 * one `perf` line a second: the same numbers the status readout shows, plus
   `sync` (waiting for the panel to take the finished frame) and `other` (the
   part of the frame nothing else accounts for);
+* four counters that say *why* the frame rate is not 59.7: `sync_skip` (frames
+  presented without waiting for the panel, because their own work overran a
+  frame period - the only way a picture can still tear), `sync_late` (swaps the
+  panel was a vblank late in taking), `pace_late` (frames that started after
+  their own slot) and `resync` (backlogs thrown away). All four should be 0 or
+  close to it; anything else points at one part of the frame;
 * `audio:` every few seconds when something happened: blocks submitted, how
   many were late and by how much, underruns, resyncs, dropped samples, the
   queue depth and the submit margin. A stutter shows up here as `late` or
   `underruns`, not as a vague "sound is bad";
 * `slow frame` whenever a presented frame takes over 20 ms, with the split and
-  the audio queue depth — a stutter is usually one of those two;
+  the audio queue depth - a stutter is usually one of those two. `vblank` is
+  the wait for the panel, kept apart from `blit`: a 26 ms frame is normally
+  10 ms of emulation and a whole 16.7 ms panel period, not a slow copy;
 * every settings change, every ROM loaded (title, CGB/DMG, MBC, bank counts,
   full path), the core's own errors, and whether CSND came up;
 * it is buffered in RAM and written every few seconds, so logging costs
