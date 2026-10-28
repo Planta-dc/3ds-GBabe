@@ -2,11 +2,11 @@
  * Gambatte 0.5.0 backend for the 3DS front-end (the default core).
  *
  * Why Gambatte: on the PC it emulates the same ROM in 1.6x-3.4x less time per
- * frame than Walnut-CGB (the numbers and the method are in
- * docs/PORT-NOTES.md). An Old 3DS has 268 MHz and no L2 cache, so the core is
- * the first thing to fix when frames do not fit; the front-end around it is
- * the same either way, which is why both cores implement include/emu.h and
- * nothing else in the program knows which one it was built with.
+ * frame than the Walnut-CGB port this project started from (the numbers and the
+ * method are in docs/PORT-NOTES.md). An Old 3DS has 268 MHz and no L2 cache, so
+ * the core is the first thing that decides whether a game runs at full speed.
+ * Walnut is no longer built: it was removed once Gambatte had been measured on
+ * the same ROM, so this is the only backend behind include/emu.h.
  *
  * The core is used through its own C++ API (gambatte.h) rather than through
  * the RetroArch libretro wrapper: that wrapper brings a file/VFS layer, a
@@ -15,15 +15,16 @@
  *
  * What this file owns, and the front-end does not:
  *
- *   video   Gambatte renders RGB565 straight into `vbuf` (60 KiB), one full
- *           frame at a time; each line is then handed to video_draw_line()
- *           like the other core does, so scaling stays in video.c.
+ *   video   Gambatte renders RGB565 straight into `vbuf` (46 KiB), one full
+ *           frame at a time, and the frame is handed to video_draw_frame(), so
+ *           scaling and presentation stay in video.c.
  *   audio   Gambatte's APU produces 35112 stereo samples per frame at
  *           2097152 Hz. Two 8:1 box-average stages bring that to 32768 Hz
  *           (a second-order CIC decimator: nothing above 16 kHz folds back
  *           loudly, and it costs one add per sample per channel).
- *   saves   .sav next to the ROM (same file the Walnut build writes, so the
- *           two builds share save data) and <rom>.rtc for MBC3/HuC3 clocks.
+ *   saves   .sav next to the ROM, in the same place and format the Walnut
+ *           build used, so save data from an older install keeps working, and
+ *           <rom>.rtc for MBC3/HuC3 clocks.
  *
  * GPL-2.0: this file is part of a work that links Gambatte, so the whole
  * binary is distributed under GPL-2.0. See third_party/gambatte/README.md.
@@ -67,8 +68,8 @@ gambatte::GB *core;
 uint8_t *rom;
 size_t   rom_size;
 
-/* Both boot ROMs are optional and not distributed; see the Walnut backend for
- * the same file names. Gambatte asks for whichever one matches the cartridge. */
+/* Both boot ROMs are optional and not distributed; the file names are the ones
+ * GBabe has always used. Gambatte asks for whichever one matches the cartridge. */
 uint8_t  bootrom_dmg[0x100];
 uint8_t  bootrom_cgb[0x900];
 size_t   bootrom_dmg_size;
@@ -265,8 +266,8 @@ bool bootloader_getter(void *userdata, bool isgbc, uint8_t *data,
 /* Header parsing, for the HUD                                               */
 /* ------------------------------------------------------------------------- */
 
-/* Same sum the Walnut build uses (gb_colour_hash()), so the "Auto" palette
- * picks the same colour for the same cartridge in either build. */
+/* The same checksum the Walnut build used (gb_colour_hash()), so "Auto" picks
+ * the same palette it always did for the same cartridge. */
 uint8_t colour_hash(void)
 {
 	uint8_t x = 0;
@@ -446,9 +447,9 @@ extern "C" const char *emu_load(const char *path)
 	if (bootrom_dmg_size > 0 || bootrom_cgb_size > 0)
 		core->setBootloaderGetter(bootloader_getter);
 
-	/* Colour correction is off: the Walnut build shows the cartridge's own
-	 * colours, and an emulator whose colours change when the core changes
-	 * would make the two impossible to compare side by side. */
+	/* Colour correction is off. It is a CGB-only filter that shifts the
+	 * whole palette; with it on, the same ROM would not render the same
+	 * colours the reference test ROM expects. */
 	core->setColorCorrection(false);
 
 	if (core->load(rom, (unsigned)rom_size, 0) != 0)

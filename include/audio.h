@@ -1,4 +1,4 @@
-/** Audio output (minigb_apu -> CSND). MIT. */
+/** Audio output (core APU -> CSND). MIT. */
 #pragma once
 
 #include "gb3ds.h"
@@ -23,10 +23,41 @@ void audio_exit(void);
  * GBABE_AUDIO_RATE, interleaved. Safe once audio_init() has run. */
 void audio_push_frames(const int16_t *stereo, unsigned frames);
 
-#if defined(GBABE_CORE_WALNUT)
-/* Walnut-CGB only: pull one emulated frame out of minigb_apu. */
-void audio_frame(void);
-#endif
+/* Submit the next block if it is due.
+ *
+ * A CSND channel plays one buffer and then stops, so the blocks have to be
+ * handed over slightly before the previous one ends; doing that only once per
+ * emulated frame is not precise enough and leaves a gap. The frame loop calls
+ * audio_next_deadline() to find out whether it is worth waking up before the
+ * next frame is due, and calls this when it does. */
+void audio_pump(void);
+
+/* When the next block should be submitted, in ARM11 ticks (svcGetSystemTick
+ * units), or 0 when there is nothing to do before the next frame arrives.
+ * A value in the past means "now". */
+uint64_t audio_next_deadline(void);
+
+/* What the block scheduler has been doing. Read by the once-a-second log line
+ * and by tools/host/audiotest.c, which is the only place these numbers can be
+ * checked without a console. Times are microseconds, or -1 when not measured. */
+typedef struct
+{
+	unsigned blocks;      /* blocks submitted since audio_init()          */
+	unsigned ear_pairs;   /* blocks submitted as a stereo pair            */
+	unsigned underruns;   /* deadlines that arrived with nothing queued   */
+	unsigned resyncs;     /* stream dropped and restarted                 */
+	unsigned dropped;     /* samples discarded because the FIFO was full  */
+	unsigned late_blocks; /* blocks whose deadline had already passed     */
+	int margin_us;        /* submit margin currently in use               */
+	int worst_late_us;    /* worst lateness seen since audio_init()       */
+	unsigned queue_ms;    /* audio buffered ahead of the hardware         */
+} audio_stats;
+
+void audio_get_stats(audio_stats *out);
+
+/* Log the same numbers. Called once a second; it decides itself how often to
+ * write a line. */
+void audio_log_stats(void);
 
 void audio_set_enabled(bool on);
 bool audio_enabled(void);

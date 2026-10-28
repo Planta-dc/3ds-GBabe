@@ -63,14 +63,14 @@ int main(int argc, char **argv)
 		emu_run_frame();
 	double t1 = now_ms();
 
+	/* The real blit: one whole frame per call. The vblank wait inside
+	 * video_end_frame() is free here (the host stand-in presents
+	 * immediately), so this measures the copy and nothing else. */
+	static uint16_t px[144 * 160];
 	for (int i = 0; i < frames; i++)
 	{
 		video_begin_frame();
-		for (int line = 0; line < 144; line++)
-		{
-			static uint16_t px[160];
-			video_draw_line(px, line);
-		}
+		video_draw_frame(px, 160);
 		video_end_frame();
 	}
 	double t2 = now_ms();
@@ -89,7 +89,7 @@ int main(int argc, char **argv)
 	const double with_apu = (t4 - t3) / frames;
 
 	printf("core          %6.3f ms/frame  (%6.0f fps)\n", core, 1000.0 / core);
-	printf("blit + present%6.3f ms/frame  (scale fit, 267x240)\n", blit);
+	printf("blit          %6.3f ms/frame  (scale fit, 267x240)\n", blit);
 	printf("core + APU    %6.3f ms/frame  (%6.0f fps)\n", with_apu,
 	       1000.0 / with_apu);
 	printf("frame total   %6.3f ms  -> %.0f %% of a 16.74 ms budget\n",

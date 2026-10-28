@@ -37,54 +37,44 @@ if [ "$want_cia" = 1 ] && { ! command -v makerom >/dev/null ||
   sh .github/scripts/install-3ds-packaging-tools.sh
 fi
 
-# Both emulation cores are built, because the only honest way to know what a
-# core costs on a 268 MHz ARM11 is to run both on the console and read the
-# debug log. The Walnut build is a separate title id, so the two .cia files can
-# be installed at the same time.
-echo "=== 3dsx (core: gambatte) ==="
-make -j"$jobs" CORE=gambatte
+# One emulation core: Gambatte 0.5.0. The Walnut-CGB build that used to be made
+# alongside it was removed - it was 1.6x-3.4x slower per frame here, and two
+# backends meant every front-end change had to be checked twice.
+echo "=== 3dsx ==="
+make -j"$jobs"
 
 if [ "$want_cia" = 1 ]; then
-  echo "=== cia (core: gambatte) ==="
-  make cia CORE=gambatte
+  echo "=== cia ==="
+  make cia
 fi
 
 mkdir -p artifacts
 cp gbabe.3dsx gbabe.smdh artifacts/ 2>/dev/null || true
 [ "$want_cia" = 1 ] && cp gbabe.cia artifacts/
 
-echo "=== 3dsx (core: walnut) ==="
-# clean, not distclean: the Gambatte objects are kept and simply not used.
-make clean
-make -j"$jobs" CORE=walnut
-
-if [ "$want_cia" = 1 ]; then
-  echo "=== cia (core: walnut) ==="
-  make cia CORE=walnut
-fi
-
-cp gbabe-walnut.3dsx gbabe-walnut.smdh artifacts/ 2>/dev/null || true
-[ "$want_cia" = 1 ] && cp gbabe-walnut.cia artifacts/
+# The binary has to agree with the header, or an artifact gets uploaded that
+# reports a different version from the one in the release notes. .github/
+# scripts/check-version.sh compares the two version *sources*; this checks the
+# thing that was actually built, and says in the log which version was packaged.
+echo "=== version stamp ==="
+ver="$(sed -n 's/^#define GBABE_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' include/gb3ds.h)"
+[ -n "$ver" ] || { echo "could not read GBABE_VERSION from include/gb3ds.h" >&2; exit 1; }
+grep -a -q -- "$ver" gbabe.elf ||
+  { echo "gbabe.elf does not contain its version string '$ver'" >&2; exit 1; }
+echo "packaged GBabe $ver"
 
 echo "=== host build + render check ==="
 make -C tools/host -j"$jobs"
 make -C tools/host check
+make -C tools/host acid2
 make -C tools/host logtest
-mkdir -p "$ROOT/build"
-tools/host/gbabe-host test/dmg-acid2.gb 300 "$ROOT/build/acid2.ppm" 0
-test -s "$ROOT/build/acid2.ppm"
+
+# Real-time: two seconds for the stereo run, two for the mono fallback.
+echo "=== sound path keeps CSND fed ==="
+make -C tools/host audiotest
 
 echo "=== ui stress test ==="
 make -C tools/uipreview asan
-
-echo "=== walnut backend compiles on the PC too ==="
-make -C tools/host CORE=walnut -j"$jobs"
-make -C tools/host CORE=walnut check
-# Put the default backend back, so what follows measures what ships. The binary
-# is removed first: gbabe-host is one file for both cores, and make cannot see
-# which backend is inside it.
-rm -f tools/host/gbabe-host
-make -C tools/host -j"$jobs"
 
 echo "=== ui preview ==="
 make -C tools/uipreview -j"$jobs"

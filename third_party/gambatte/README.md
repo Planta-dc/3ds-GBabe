@@ -1,8 +1,10 @@
 # Gambatte 0.5.0 (vendored emulation core)
 
-This directory is the emulation core GBabe builds by default (`CORE=gambatte`,
-see the top-level `Makefile`). It is not written by this project and it is not
-under this project's MIT licence: Gambatte is **GPL-2.0** (see `COPYING`).
+This directory is the emulation core GBabe is built with (see the top-level
+`Makefile`). It is the only one since the Walnut-CGB port was removed. It is not
+written by this project and it is not under this project's MIT licence: Gambatte
+is **GPL-2.0** (see `COPYING`), which makes every binary built with it GPL-2.0
+as well.
 
 ## Where it comes from
 

@@ -35,7 +35,8 @@ bool ui_in_game_menu(void);
 void ui_draw_hud(void);
 
 /* Per-frame bookkeeping for the HUD: account the ticks spent emulating,
- * presenting and waiting, and refresh the profile (and the HUD) once a second.
- * A tick is 1/SYSCLOCK_ARM11 s. */
+ * blitting, waiting for the panel and pacing, and refresh the profile (and the
+ * HUD) once a second. A tick is 1/SYSCLOCK_ARM11 s. */
 void ui_note_frame(uint64_t core_ticks, uint64_t blit_ticks,
-		   uint64_t wait_ticks, uint64_t frame_ticks);
+		   uint64_t sync_ticks, uint64_t wait_ticks,
+		   uint64_t frame_ticks);

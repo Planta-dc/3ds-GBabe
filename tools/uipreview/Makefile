@@ -34,8 +34,19 @@ uistress: $(UI_SRC) stress.c $(ROOT)/include/ui_gfx.h $(ROOT)/include/ui_screens
 	$(CC) -std=gnu11 -g -O1 -Wall -Wextra $(SAN) $(INCLUDE) -o $@ \
 		$(UI_SRC) stress.c
 
+# ASan needs a shadow mapping it can fit in the address space, and a kernel with
+# high ASLR entropy (vm.mmap_rnd_bits=32, the default on newer Ubuntu) hands out
+# addresses it cannot: the binary dies with "AddressSanitizer:DEADLYSIGNAL"
+# before it runs a line. That is the runner, not the test, so turn address
+# randomisation off for this process when the platform lets us.
+ASAN_RUN = if setarch $$(uname -m) -R true >/dev/null 2>&1; then \
+		   setarch $$(uname -m) -R ./uistress; \
+	   else \
+		   ./uistress; \
+	   fi
+
 asan: uistress
-	./uistress
+	@$(ASAN_RUN)
 
 run: $(BIN)
 	@mkdir -p out

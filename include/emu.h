@@ -11,9 +11,6 @@
 extern "C" {
 #endif
 
-/* 160x144 RGB565 framebuffer, filled by the core's lcd_draw_line callback. */
-extern uint16_t gb_fb[144][160];
-
 /* Build-time info about the loaded cartridge, for the HUD. */
 typedef struct
 {
@@ -47,9 +44,9 @@ void emu_reset(void);
 void emu_run_frame(void);
 void emu_set_rendering(bool on);
 
-/* The DMG palette selection changed. Backends that push colour values into the
- * core (Gambatte) re-apply them here; the Walnut backend looks the table up on
- * every line, so it does nothing. Safe to call when nothing is loaded. */
+/* The DMG palette selection changed: re-apply the colours to the core. It is
+ * handed the colour values directly, so this has to be pushed rather than
+ * looked up per pixel. Safe to call when nothing is loaded. */
 void emu_palette_changed(void);
 
 /* Write cartridge RAM (if any) back to the .sav file. Safe to call often. */

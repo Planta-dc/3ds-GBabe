@@ -6,8 +6,10 @@
  * Frame pacing: the Game Boy runs at 59.7275 Hz, the 3DS LCD at 60 Hz, so we
  * cannot simply follow vblank - over a minute that drifts by roughly half a
  * second. Instead the emulator runs on its own tick deadline (the ARM11 tick
- * counter is exact) and the display is updated whenever a frame is ready. Sound
- * is buffered in audio.c, which absorbs the resulting jitter.
+ * counter is exact) and the finished frame is handed to the panel and waited
+ * for (video_end_frame()), which is what stops it tearing. Sound is buffered in
+ * audio.c; its block deadlines are honoured from the same idle loop, so a block
+ * is submitted when it is due rather than whenever a frame happens to end.
  *
  * MIT licensed.
  */
@@ -24,8 +26,7 @@
 #include "ui.h"
 #include "video.h"
 
-#define GB_FRAME_HZ 59.7275
-#define FRAME_TICKS ((u64)(SYSCLOCK_ARM11 / GB_FRAME_HZ))
+#define FRAME_TICKS ((u64)GBABE_FRAME_TICKS)
 
 /* svcSleepThread() takes nanoseconds, the tick counter counts 1/268 MHz. */
 #define TICKS_TO_NS(t) ((s64)((u64)(t) * 1000000000ull / SYSCLOCK_ARM11))
@@ -64,8 +65,10 @@ static void platform_init(void)
 	/* Everything below is for the log: this is the information a bug report
 	 * needs and nobody can read off the console's own menus. */
 	log_init(GBABE_LOG_PATH, g_cfg.debug_log);
-	log_line("GBabe %s, %s", GBABE_VERSION,
-		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS");
+	log_line("GBabe %s, %s, %s", GBABE_VERSION,
+		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS",
+		 envIsHomebrew() ? "launched by a homebrew loader (3dsx)"
+				 : "installed title (cia)");
 	log_line("tick rate %.0f Hz, scale=%d palette=%d frameskip=%d",
 		 SYSCLOCK_ARM11, g_cfg.scale, g_cfg.palette, g_cfg.frameskip);
 
@@ -251,9 +254,26 @@ int main(int argc, char **argv)
 
 			update_joypad();
 
+			/* Idle until the next emulated frame is due - or until a
+			 * sound block has to be submitted, whichever comes first.
+			 * Submitting blocks only at frame boundaries leaves a gap
+			 * of up to 16.7 ms in the audio every 31 ms, which is
+			 * audible as a 32 Hz stutter. */
 			if (!frame_due())
 			{
-				svcSleepThread(200000); /* 0.2 ms, stay in the scheduler */
+				u64 now = svcGetSystemTick();
+				u64 wake = next_frame_tick;
+
+				const u64 audio_at = audio_next_deadline();
+				if (audio_at != 0 && audio_at < wake)
+					wake = audio_at;
+
+				if (wake > now)
+					svcSleepThread(TICKS_TO_NS(wake - now));
+				else
+					svcSleepThread(200000); /* 0.2 ms */
+
+				audio_pump();
 				continue;
 			}
 
@@ -296,16 +316,24 @@ int main(int argc, char **argv)
 
 			if (draw)
 			{
+				/* Waiting for the panel is not the blit: report it
+				 * apart, or the status readout blames the copy
+				 * for time the frame spent asleep. */
+				const u64 sync = video_present_wait();
+				const u64 blit = (after_blit - after_core) - sync;
+
 				/* What the emulator could not use because it was
 				 * waiting for the next Game Boy frame to be due. */
 				const u64 prev_end = last_frame_end;
 				const u64 waited = (prev_end != 0 &&
 						    frame_start > prev_end) ?
 						   frame_start - prev_end : 0;
-				ui_note_frame(after_core - frame_start,
-					      after_blit - after_core, waited,
+				ui_note_frame(after_core - frame_start, blit,
+					      sync, waited,
 					      after_blit - (prev_end ? prev_end : frame_start));
 				last_frame_end = after_blit;
+
+				audio_log_stats();
 			}
 
 			/* A frame that missed its deadline is what the player actually

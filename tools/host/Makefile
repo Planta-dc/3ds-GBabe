@@ -7,14 +7,7 @@
 #   make run ROM=game.gb FRAMES=300 OUT=shot.ppm
 #   make bench ROM=game.gb     per-frame cost of the core and the blit
 #   make logtest               check the debug log's format
-#
-# Which emulation core is compiled follows the top-level Makefile: gambatte by
-# default, walnut to compare. Both are on the same sources otherwise, so
-#
-#   make bench ROM=test/dmg-acid2.gb CORE=walnut
-#   make bench ROM=test/dmg-acid2.gb
-#
-# is the same measurement on the same ROM through two cores.
+#   make audiotest             check that the sound path keeps CSND fed
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -24,60 +17,33 @@ AR      ?= ar
 CFLAGS  ?= -O3 -flto -g -Wall -Wextra
 ROOT    := ../..
 
-CORE    ?= gambatte
-
-ifeq ($(CORE),gambatte)
 CORE_SRC  := $(ROOT)/source/emu_gambatte.cpp
 # video_pixel_t must be the same type in the backend and in the core, so
 # VIDEO_RGB565 is set for both: 16-bit pixels, which is what video.c takes.
-CORE_DEFS := -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 -DHAVE_STDINT_H \
+CORE_DEFS := -DVIDEO_RGB565 -DHAVE_STDINT_H \
              -I$(ROOT)/third_party/gambatte/libgambatte/include
-# Its own library file and object directory: the 3DS build puts an
-# arm-none-eabi archive at libgambatte.a in the same directory, and linking
-# that into a PC binary fails with "ELF object format mismatch".
+# Its own library file: the 3DS build puts an arm-none-eabi archive at
+# libgambatte.a in the same directory, and linking that into a PC binary fails
+# with "ELF object format mismatch".
 CORE_LIB  := $(ROOT)/third_party/gambatte/libgambatte-host.a
 LD        := $(CXX)
-else ifeq ($(CORE),walnut)
-CORE_SRC  := $(ROOT)/source/emu.c
-CORE_DEFS := -DGBABE_CORE_WALNUT
-CORE_LIB  :=
-LD        := $(CC)
-else
-$(error CORE must be gambatte or walnut, not '$(CORE)')
-endif
 
-INCLUDE := -I. -I$(ROOT)/include -I$(ROOT)/third_party/walnut \
-           -I$(ROOT)/third_party/minigb_apu $(CORE_DEFS)
-
-DEFS    := -DMINIGB_APU_AUDIO_FORMAT_S16SYS
+INCLUDE := -I. -I$(ROOT)/include $(CORE_DEFS)
 
 # CFLAGS goes to both compilers, so the language standard is picked per file:
 # g++ rejects -std=gnu11 and gcc rejects -std=gnu++11.
 CSTD    := -std=gnu11
 CXXSTD  := -std=gnu++11 -fno-exceptions -fno-rtti
 
-FRONT_C := $(ROOT)/source/emu.c $(ROOT)/source/video.c $(ROOT)/source/audio.c \
+FRONT_C := $(ROOT)/source/video.c $(ROOT)/source/audio.c \
            $(ROOT)/source/palette.c $(ROOT)/source/config.c \
            $(ROOT)/source/log.c \
            $(ROOT)/source/ui.c $(ROOT)/source/ui_gfx.c \
-           $(ROOT)/source/ui_screens.c $(ROOT)/source/ui_font.c \
-           $(ROOT)/third_party/minigb_apu/minigb_apu.c
+           $(ROOT)/source/ui_screens.c $(ROOT)/source/ui_font.c
 
-# Only one backend is compiled. The other one would duplicate its symbols.
-ifeq ($(CORE),gambatte)
-FRONT_C := $(filter-out $(ROOT)/source/emu.c,$(FRONT_C))
-CORE_CXX_OBJ := $(CORE_SRC)
-else
-CORE_CXX_OBJ :=
-endif
-
-# Objects are per core, so switching CORE recompiles only what differs.
-OBJDIR  := obj/$(CORE)
+OBJDIR  := obj
 FRONT_OBJ := $(addprefix $(OBJDIR)/,$(notdir $(FRONT_C:.c=.o)))
 CORE_OBJ  := $(addprefix $(OBJDIR)/,$(notdir $(CORE_SRC:.cpp=.o)))
-ifeq ($(CORE),walnut)
-CORE_OBJ :=
-endif
 
 BIN     := gbabe-host
 
@@ -89,12 +55,6 @@ all: $(BIN)
 $(BIN): $(FRONT_OBJ) $(CORE_OBJ) $(OBJDIR)/stub.o $(OBJDIR)/harness.o $(CORE_LIB)
 	$(LD) $(CFLAGS) -o $@ $(FRONT_OBJ) $(CORE_OBJ) $(OBJDIR)/stub.o \
 		$(OBJDIR)/harness.o $(CORE_LIB) -lm
-	@echo $(CORE) > $(BIN).core
-
-# gbabe-host is one file for both cores. Every object of the other core is
-# older than the binary, so make would happily keep a backend the caller did
-# not ask for; $(BIN).core records which one was linked and acid2 relinks on a
-# mismatch instead of measuring the wrong core.
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(OBJDIR)
@@ -123,42 +83,22 @@ check:
 # SCALE_ORIG (2) puts the frame 1:1 in the middle of the 400x240 top screen
 # (x 120..279, y 48..191), which is the only scale where the render can be
 # compared with the 160x144 reference pixel for pixel.
-acid2:
-	@if [ "`cat $(BIN).core 2>/dev/null`" != "$(CORE)" ]; then \
-		echo "acid2: gbabe-host holds `cat $(BIN).core 2>/dev/null || echo nothing`, relinking for $(CORE)"; \
-		rm -f $(BIN); \
-		$(MAKE) --no-print-directory CORE=$(CORE) $(BIN) || exit 1; \
-	fi
-	@out=`./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(OBJDIR)/acid2.ppm 2` || exit 1; \
-	echo "$$out"; \
-	case "$$out" in \
-	*"core=$(CORE)"*) ;; \
-	*) echo "gbabe-host was built for another core; run 'make -C tools/host CORE=$(CORE)' first" >&2; exit 1 ;; \
-	esac
+acid2: $(BIN)
+	./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(OBJDIR)/acid2.ppm 2
 	python3 $(ROOT)/tools/check-render.py --render $(OBJDIR)/acid2.ppm \
 		--reference $(ROOT)/test/dmg-acid2-reference.ppm --window 120,48,160,144
 
-# The two cores have to produce the same picture, not just a picture that looks
-# right: dmg-acid2 is rendered by each of them at all three scales and the PPMs
-# are compared byte for byte. That also pins down the two blit paths, since the
-# Gambatte backend blits a whole frame at once (video_draw_frame) while the
-# Walnut one is fed a scanline at a time (video_draw_line).
-#
-# The binary is removed before each relink: gbabe-host is one file for both
-# cores and make cannot tell which backend is inside it.
-cross:
-	@set -e; \
-	mkdir -p $(ROOT)/build/cross; \
-	for s in 0 1 2; do \
-		rm -f $(BIN); \
-		$(MAKE) --no-print-directory CORE=gambatte $(BIN) >/dev/null; \
-		./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(ROOT)/build/cross/g$$s.ppm $$s >/dev/null; \
-		rm -f $(BIN); \
-		$(MAKE) --no-print-directory CORE=walnut $(BIN) >/dev/null; \
-		./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(ROOT)/build/cross/w$$s.ppm $$s >/dev/null; \
-		cmp $(ROOT)/build/cross/g$$s.ppm $(ROOT)/build/cross/w$$s.ppm; \
-		echo "scale $$s: the two cores render identically"; \
-	done
+# The sound path is real-time, so this takes two seconds of wall clock. The
+# stand-in CSND is only enabled for this run.
+audiotest: $(OBJDIR)/audio.o $(OBJDIR)/stub.o $(OBJDIR)/log.o \
+	   $(OBJDIR)/config.o $(OBJDIR)/palette.o $(OBJDIR)/audiotest.o
+	$(CC) $(CFLAGS) -o gbabe-audiotest $(OBJDIR)/audio.o $(OBJDIR)/stub.o \
+		$(OBJDIR)/log.o $(OBJDIR)/config.o $(OBJDIR)/palette.o \
+		$(OBJDIR)/audiotest.o -lm
+	GBABE_HOST_AUDIO=1 ./gbabe-audiotest
+	@echo
+	@echo "audiotest: again with only two CSND channels (the mono fallback)"
+	GBABE_HOST_AUDIO=2 ./gbabe-audiotest
 
 run: $(BIN)
 	./$(BIN) $(ROM) $(or $(FRAMES),300) $(or $(OUT),screen.ppm)
@@ -182,9 +122,10 @@ logtest: $(OBJDIR)/log.o $(OBJDIR)/stub.o $(OBJDIR)/logtest.o
 	./gbabe-logtest
 
 $(OBJDIR)/bench.o: bench.c $(ROOT)/include/emu.h
+$(OBJDIR)/audiotest.o: audiotest.c $(ROOT)/include/audio.h
 $(OBJDIR)/harness.o: harness.c $(ROOT)/include/emu.h
 
 clean:
-	rm -rf $(OBJDIR) $(BIN) $(BIN).core gbabe-bench gbabe-logtest *.ppm
+	rm -rf $(OBJDIR) $(BIN) gbabe-bench gbabe-logtest gbabe-audiotest *.ppm
 
-.PHONY: all check acid2 cross run bench logtest clean
+.PHONY: all check acid2 audiotest run bench logtest clean

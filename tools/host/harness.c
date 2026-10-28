@@ -15,14 +15,6 @@
 
 #include "audio.h"
 #include "emu.h"
-
-#if defined(GBABE_CORE_GAMBATTE)
-#define HARNESS_CORE "gambatte"
-#elif defined(GBABE_CORE_WALNUT)
-#define HARNESS_CORE "walnut"
-#else
-#define HARNESS_CORE "unknown"
-#endif
 #include "gb3ds.h"
 #include "palette.h"
 #include "video.h"
@@ -91,15 +83,23 @@ int main(int argc, char **argv)
 	write_ppm(out);
 
 	const emu_info *info = emu_get_info();
-	/* core= names the backend that was actually linked in. One binary is
-	 * built per core, so a stale gbabe-host from the other core would
-	 * otherwise run silently and be credited to the wrong backend. */
-	printf("title=%s %s mbc=%d rom_banks=%u ram_banks=%u hash=0x%02X core=%s\n",
+	printf("title=%s %s mbc=%d rom_banks=%u ram_banks=%u hash=0x%02X\n",
 	       info->title, info->cgb ? "CGB" : "DMG", info->mbc,
-	       info->rom_banks, info->ram_banks, info->auto_hash, HARNESS_CORE);
+	       info->rom_banks, info->ram_banks, info->auto_hash);
 	printf("wrote %s after %d frames\n", out, frames);
 
 	emu_unload();
 	audio_exit();
+
+	/* Tearing: a frame that draws into the buffer the panel is still showing
+	 * produces a tear line, and because the Game Boy's 59.7275 Hz does not
+	 * divide 60 Hz it does not sit still - it slides down the screen. */
+	printf("tears=%d (must be 0)\n", g_host_tears);
+	if (g_host_tears != 0)
+	{
+		printf("torn frames: video_begin_frame() got the displayed buffer "
+		       "while a swap was still pending\n");
+		return 1;
+	}
 	return 0;
 }

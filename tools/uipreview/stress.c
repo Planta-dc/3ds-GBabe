@@ -230,7 +230,7 @@ static int check_present(void)
  *     per-frame present used to flip the bottom screen's buffer too (and the
  *     UI's present flipped the top one). With double buffering that shows the
  *     other buffer - a frame that is one old, or never drawn at all;
- *   - video_draw_line() only writes the picture rectangle, and libctru does
+ *   - video_draw_frame() only writes the picture rectangle, and libctru does
  *     not clear framebuffers, so the letterbox bars showed uninitialised
  *     memory - static - unless something cleared them.
  *
@@ -246,14 +246,13 @@ static int expect(const char *what, int bad)
 
 static void draw_game_frame(uint16_t colour)
 {
-	uint16_t px[160];
+	static uint16_t frame[144 * 160];
 
-	for (int i = 0; i < 160; i++)
-		px[i] = colour;
+	for (int i = 0; i < 144 * 160; i++)
+		frame[i] = colour;
 
 	video_begin_frame();
-	for (int line = 0; line < 144; line++)
-		video_draw_line(px, line);
+	video_draw_frame(frame, 160);
 	video_end_frame();
 }
 

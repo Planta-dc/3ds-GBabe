@@ -21,13 +21,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-Third-party components, each under the MIT license and included unmodified:
+The code in this repository is MIT licensed, as above.
 
-  third_party/walnut/     Walnut-CGB        (c) 2025 Mr-PauI
-                          based on Peanut-GB (c) 2018-2023 Mahyar Koshkouei
-                          and the Peanut-GB CGB fork (c) 2015-2019 Lior Halphon
-                          see third_party/walnut/LICENSE
+The *binary* is not. GBabe links Gambatte (third_party/gambatte/), which is
+GPL-2.0, so every .3dsx and .cia built from this tree is distributed under
+GPL-2.0 - the full text is third_party/gambatte/COPYING. That obligation
+attaches to the built program, not to this repository's own sources, which
+remain available under the MIT terms above.
 
-  third_party/minigb_apu/ minigb_apu        (c) 2017 Alex Baines
-                          (c) 2019 Mahyar Koshkouei
-                          see third_party/minigb_apu/LICENSE
+Third-party components:
+
+  third_party/gambatte/   Gambatte          (c) Sindre Aamås, and the
+                          gambatte-libretro maintainers
+                          GPL-2.0, see third_party/gambatte/COPYING
+                          and third_party/gambatte/README.md
+
+  third_party/fonts/      DejaVu Sans       Bitstream Vera / DejaVu licence,
+                          see third_party/fonts/DejaVu-LICENSE.txt. Only the
+                          bitmaps generated from it ship, in source/ui_font.c.

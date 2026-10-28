@@ -51,7 +51,8 @@ static bool      last_scan_ok;
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static float    hud_fps;
-static u64      hud_sum_core, hud_sum_blit, hud_sum_wait, hud_sum_frame;
+static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_wait,
+                hud_sum_frame;
 static u64      hud_worst; /* slowest single frame in the window */
 
 /* ------------------------------------------------------------------------- */
@@ -739,15 +740,19 @@ void ui_draw_hud(void)
 				 "palette" };
 	const char *values[6];
 
+	/* The panel shows one idle figure ("wait"); the log line keeps the two
+	 * kinds apart, because "waiting for the panel" and "pacing to 59.7275
+	 * Hz" are different problems even though both are time spent asleep. */
+	const float idle_ms = g_perf.sync_ms + g_perf.wait_ms;
 	const float other = g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-					       g_perf.wait_ms);
+					       idle_ms);
 
 	snprintf(fps, sizeof fps, "%.1f", g_perf.fps);
 	snprintf(frame, sizeof frame, "%.1f ms/frame", g_perf.frame_ms);
 
 	snprintf(stack[0], sizeof stack[0], "%.1f ms", g_perf.core_ms);
 	snprintf(stack[1], sizeof stack[1], "%.1f ms", g_perf.blit_ms);
-	snprintf(stack[2], sizeof stack[2], "%.1f ms", g_perf.wait_ms);
+	snprintf(stack[2], sizeof stack[2], "%.1f ms", idle_ms);
 	snprintf(stack[3], sizeof stack[3], "%.1f ms", g_perf.frame_ms);
 	snprintf(stack[4], sizeof stack[4], "%u ms", audio_queue_ms());
 	snprintf(stack[5], sizeof stack[5], "%s", palette_name(palette_get()));
@@ -771,7 +776,7 @@ void ui_draw_hud(void)
 				    other),
 		.core_ms = g_perf.core_ms,
 		.blit_ms = g_perf.blit_ms,
-		.wait_ms = g_perf.wait_ms,
+		.wait_ms = idle_ms,
 		.stat_label = { labels[0], labels[1], labels[2], labels[3],
 				labels[4], labels[5] },
 		.stat_value = { values[0], values[1], values[2], values[3],
@@ -783,12 +788,13 @@ void ui_draw_hud(void)
 	ui_present();
 }
 
-void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
-		   u64 frame_ticks)
+void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
+		   u64 wait_ticks, u64 frame_ticks)
 {
 	hud_frames++;
 	hud_sum_core += core_ticks;
 	hud_sum_blit += blit_ticks;
+	hud_sum_sync += sync_ticks;
 	hud_sum_wait += wait_ticks;
 	hud_sum_frame += frame_ticks;
 	if (frame_ticks > hud_worst)
@@ -813,22 +819,32 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
 	g_perf.fps = hud_fps;
 	g_perf.core_ms = (float)((double)hud_sum_core * ticks_to_ms / n);
 	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
+	g_perf.sync_ms = (float)((double)hud_sum_sync * ticks_to_ms / n);
 	g_perf.wait_ms = (float)((double)hud_sum_wait * ticks_to_ms / n);
 	g_perf.frame_ms = (float)((double)hud_sum_frame * ticks_to_ms / n);
 	g_perf.worst_ms = (float)((double)hud_worst * ticks_to_ms);
 
 	/* The same numbers the status readout shows, in the log: this is the
 	 * measurement a slow-console report needs, and a screenshot of the bottom
-	 * screen is a lot to ask of someone. */
+	 * screen is a lot to ask of someone. sync_skip/sync_late are the present
+	 * path's own counters: a frame that could not afford the vblank wait
+	 * (and may tear), and a swap the panel was a vblank late in taking. */
+	unsigned sync_skip, sync_late;
+
+	video_sync_take(&sync_skip, &sync_late);
+
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
-		 "wait=%.1f other=%.1f audio=%ums", g_perf.fps, g_perf.frame_ms,
-		 g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms, g_perf.wait_ms,
+		 "sync=%.1f wait=%.1f other=%.1f audio=%ums "
+		 "sync_skip=%u sync_late=%u", g_perf.fps,
+		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms,
+		 g_perf.sync_ms, g_perf.wait_ms,
 		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-				    g_perf.wait_ms),
-		 audio_queue_ms());
+				    g_perf.sync_ms + g_perf.wait_ms),
+		 audio_queue_ms(), sync_skip, sync_late);
 
 	hud_frames = 0;
-	hud_sum_core = hud_sum_blit = hud_sum_wait = hud_sum_frame = 0;
+	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_wait =
+		hud_sum_frame = 0;
 	hud_worst = 0;
 	hud_last_tick = now;
 
