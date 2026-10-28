@@ -391,6 +391,7 @@ make -C tools/host check      # type-checks main.c too
 make -C tools/host logtest    # checks the debug log's format
 make -C tools/host bench ROM=game.gb   # per-frame cost of core and blit
 make -C tools/host acid2               # dmg-acid2 render check (add CORE=walnut)
+make -C tools/host cross               # both cores render the same picture
 ./tools/host/gbabe-host game.gb 300 out.ppm 0
 ```
 

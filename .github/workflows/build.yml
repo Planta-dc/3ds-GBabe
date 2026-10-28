@@ -77,11 +77,19 @@ jobs:
       - name: dmg-acid2 render check, Walnut-CGB
         run: make -C tools/host CORE=walnut acid2
 
+      # Matching the reference is one thing; agreeing with each other is the
+      # other, and it is what pins down the two blit paths (the Gambatte backend
+      # blits a whole frame, the Walnut one a scanline at a time). Compared byte
+      # for byte at all three scales.
+      - name: Both cores render the same picture
+        run: make -C tools/host cross
+
       # Not a performance gate (a shared runner is far too noisy for that) - it
       # prints the per-frame split next to every build, so a regression that
       # doubles the blit or the core shows up in the log as a number.
       - name: Per-frame cost (host benchmark, informational)
         run: |
+          rm -f tools/host/gbabe-host   # still holds the Walnut backend
           make -C tools/host -j"$(nproc)"
           make -C tools/host bench ROM=test/dmg-acid2.gb FRAMES=200
 

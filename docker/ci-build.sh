@@ -80,7 +80,10 @@ make -C tools/uipreview asan
 echo "=== walnut backend compiles on the PC too ==="
 make -C tools/host CORE=walnut -j"$jobs"
 make -C tools/host CORE=walnut check
-# Put the default backend back, so what follows measures what ships.
+# Put the default backend back, so what follows measures what ships. The binary
+# is removed first: gbabe-host is one file for both cores, and make cannot see
+# which backend is inside it.
+rm -f tools/host/gbabe-host
 make -C tools/host -j"$jobs"
 
 echo "=== ui preview ==="

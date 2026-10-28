@@ -29,3 +29,7 @@ comparison. It relinks `tools/host/gbabe-host` when the binary was built for
 the other core, so the two invocations can be made in either order.
 
 CI runs both.
+
+`make -C tools/host cross` goes one step further: it renders `dmg-acid2` with
+both cores at all three scales and compares the two PPMs byte for byte, so the
+cores have to agree with each other as well as with the reference.

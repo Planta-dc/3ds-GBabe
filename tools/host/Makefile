@@ -3,6 +3,7 @@
 #   make            build ./gbabe-host
 #   make check      compile main.c as well (type check)
 #   make acid2      render dmg-acid2 and compare it with the reference frame
+#   make cross      check that both cores render the same picture, at every scale
 #   make run ROM=game.gb FRAMES=300 OUT=shot.ppm
 #   make bench ROM=game.gb     per-frame cost of the core and the blit
 #   make logtest               check the debug log's format
@@ -137,6 +138,28 @@ acid2:
 	python3 $(ROOT)/tools/check-render.py --render $(OBJDIR)/acid2.ppm \
 		--reference $(ROOT)/test/dmg-acid2-reference.ppm --window 120,48,160,144
 
+# The two cores have to produce the same picture, not just a picture that looks
+# right: dmg-acid2 is rendered by each of them at all three scales and the PPMs
+# are compared byte for byte. That also pins down the two blit paths, since the
+# Gambatte backend blits a whole frame at once (video_draw_frame) while the
+# Walnut one is fed a scanline at a time (video_draw_line).
+#
+# The binary is removed before each relink: gbabe-host is one file for both
+# cores and make cannot tell which backend is inside it.
+cross:
+	@set -e; \
+	mkdir -p $(ROOT)/build/cross; \
+	for s in 0 1 2; do \
+		rm -f $(BIN); \
+		$(MAKE) --no-print-directory CORE=gambatte $(BIN) >/dev/null; \
+		./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(ROOT)/build/cross/g$$s.ppm $$s >/dev/null; \
+		rm -f $(BIN); \
+		$(MAKE) --no-print-directory CORE=walnut $(BIN) >/dev/null; \
+		./$(BIN) $(ROOT)/test/dmg-acid2.gb 300 $(ROOT)/build/cross/w$$s.ppm $$s >/dev/null; \
+		cmp $(ROOT)/build/cross/g$$s.ppm $(ROOT)/build/cross/w$$s.ppm; \
+		echo "scale $$s: the two cores render identically"; \
+	done
+
 run: $(BIN)
 	./$(BIN) $(ROM) $(or $(FRAMES),300) $(or $(OUT),screen.ppm)
 
@@ -164,4 +187,4 @@ $(OBJDIR)/harness.o: harness.c $(ROOT)/include/emu.h
 clean:
 	rm -rf $(OBJDIR) $(BIN) $(BIN).core gbabe-bench gbabe-logtest *.ppm
 
-.PHONY: all check acid2 run bench logtest clean
+.PHONY: all check acid2 cross run bench logtest clean
