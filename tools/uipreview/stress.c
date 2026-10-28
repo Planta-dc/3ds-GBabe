@@ -58,11 +58,11 @@ static void all_screens(const char *long_name, const char *long_path)
 
 	scr_browser(long_name, long_path, names, isdir, 4, 1, 0, true);
 	scr_browser("", "", names, isdir, 4, 0, 0, false);
-	scr_browser("v0.1.0", long_path, NULL, NULL, 0, 0, 0, false);
+	scr_browser("v" GBABE_VERSION, long_path, NULL, NULL, 0, 0, 0, false);
 	/* far more entries than fit, scrolled to the end and past it */
-	scr_browser("v0.1.0", long_path, names, isdir, BIG, 3, 0, true);
-	scr_browser("v0.1.0", long_path, names, isdir, BIG, BIG - 1, BIG - 7, true);
-	scr_browser("v0.1.0", long_path, names, isdir, BIG, BIG - 1, BIG + 50, true);
+	scr_browser("v" GBABE_VERSION, long_path, names, isdir, BIG, 3, 0, true);
+	scr_browser("v" GBABE_VERSION, long_path, names, isdir, BIG, BIG - 1, BIG - 7, true);
+	scr_browser("v" GBABE_VERSION, long_path, names, isdir, BIG, BIG - 1, BIG + 50, true);
 	ui_present();
 
 	scr_message(long_name, long_name, long_name, long_name);

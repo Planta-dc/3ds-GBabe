@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gb3ds.h"
 #include "ui_gfx.h"
 #include "ui_screens.h"
 
@@ -62,12 +63,12 @@ static void show_browser(const char *dir)
 	};
 	static bool isdir[] = { true, false, false, false, false, false, false };
 
-	scr_browser("v0.1.0", "sdmc:/3ds/gbabe/Games", names, isdir, 7, 1, 0,
-		    true);
+	scr_browser("v" GBABE_VERSION, "sdmc:/3ds/gbabe/Games", names, isdir,
+		    7, 1, 0, true);
 	emit(dir, "browser");
 
 	/* Empty folder. */
-	scr_browser("v0.1.0", "sdmc:/", NULL, NULL, 0, 0, 0, false);
+	scr_browser("v" GBABE_VERSION, "sdmc:/", NULL, NULL, 0, 0, 0, false);
 	emit(dir, "browser-empty");
 }
 
@@ -90,7 +91,7 @@ static void show_menu(const char *dir)
 	};
 
 	ui_menu m = {
-		.title = "GBabe 0.1.0",
+		.title = "GBabe " GBABE_VERSION,
 		.status = "paused",
 		.tabs = tabs,
 		.n_tabs = 2,

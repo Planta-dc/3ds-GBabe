@@ -8,6 +8,8 @@
  */
 #include <3ds.h>
 
+#include "gb3ds.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,7 +58,7 @@ int main(void)
 
 	/* on: lines carry a timestamp and end with a newline */
 	check("log_init() opens the file", log_init(path, true));
-	log_line("GBabe %s test", "0.1.0");
+	log_line("GBabe %s test", GBABE_VERSION);
 	log_line("perf fps=%0.1f core=%0.1f", 59.7, 9.8);
 	log_line(""); /* empty lines are legal */
 	log_line("a very long line: %s", "0123456789012345678901234567890123456789"
@@ -95,7 +97,8 @@ int main(void)
 	printf("log has %d lines + %d header lines\n", lines, header);
 	check("the header is present", header == 2);
 	check("every entry is timestamped", lines > 0 && stamped == lines);
-	check("startup line is present", strstr(text, "GBabe 0.1.0 test") != NULL);
+	check("startup line is present",
+	      strstr(text, "GBabe " GBABE_VERSION " test") != NULL);
 	check("values are formatted", strstr(text, "fps=59.7 core=9.8") != NULL);
 	check("long lines are truncated, not split",
 	      strstr(text, "0123456789") != NULL);

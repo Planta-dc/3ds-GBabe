@@ -124,7 +124,11 @@ void g_host_csnd_reset(void);
 #define SOUND_REPEAT SOUND_LOOPMODE(CSND_LOOPMODE_NORMAL)
 #define SOUND_FORMAT_16BIT SOUND_FORMAT(CSND_ENCODING_PCM16)
 
-#define SYSCLOCK_ARM11 268123480.0
+/* libctru's own value and, importantly, its own *type*: an integer constant
+ * (include/3ds/os.h). It used to be a double here, which hid two bugs that the
+ * console found - %.0f of it printed 0, and SYSCLOCK_ARM11 * 30 overflowed a
+ * 32-bit int - because a double never mismatches a %f nor overflows. */
+#define SYSCLOCK_ARM11 268111856u
 #define SYSCLOCK_SOC 16756991.0
 
 /* Host-only output buffer so the harness can dump what would be on screen. */

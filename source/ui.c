@@ -54,6 +54,8 @@ static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_wait,
                 hud_sum_frame;
 static u64      hud_worst; /* slowest single frame in the window */
+static unsigned hud_late;    /* frames that started after their slot      */
+static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
 
 /* ------------------------------------------------------------------------- */
 /* Input                                                                     */
@@ -789,8 +791,11 @@ void ui_draw_hud(void)
 }
 
 void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
-		   u64 wait_ticks, u64 frame_ticks)
+		   u64 wait_ticks, u64 frame_ticks, unsigned late_frames,
+		   unsigned resyncs)
 {
+	hud_late += late_frames;
+	hud_resyncs += resyncs;
 	hud_frames++;
 	hud_sum_core += core_ticks;
 	hud_sum_blit += blit_ticks;
@@ -828,21 +833,24 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 	 * measurement a slow-console report needs, and a screenshot of the bottom
 	 * screen is a lot to ask of someone. sync_skip/sync_late are the present
 	 * path's own counters: a frame that could not afford the vblank wait
-	 * (and may tear), and a swap the panel was a vblank late in taking. */
+	 * (and may tear), and a swap the panel was a vblank late in taking.
+	 * pace_late/pace_resync are the frame loop's: a frame that started after
+	 * its own slot, and a thrown-away backlog. */
 	unsigned sync_skip, sync_late;
 
 	video_sync_take(&sync_skip, &sync_late);
 
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
 		 "sync=%.1f wait=%.1f other=%.1f audio=%ums "
-		 "sync_skip=%u sync_late=%u", g_perf.fps,
+		 "sync_skip=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms,
 		 g_perf.sync_ms, g_perf.wait_ms,
 		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
 				    g_perf.sync_ms + g_perf.wait_ms),
-		 audio_queue_ms(), sync_skip, sync_late);
+		 audio_queue_ms(), sync_skip, sync_late, hud_late, hud_resyncs);
 
 	hud_frames = 0;
+	hud_late = hud_resyncs = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_wait =
 		hud_sum_frame = 0;
 	hud_worst = 0;
