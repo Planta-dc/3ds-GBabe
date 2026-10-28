@@ -113,6 +113,15 @@ to set up the two packaging tools:
 sudo bash .github/scripts/install-3ds-packaging-tools.sh
 ```
 
+### The file browser
+
+The browser opens in the folder of the last ROM you played, takes D-pad/Circle
+Pad to move, `L`/`R` to jump a page and `A`/`B` to go in and back; `START`
+quits. It only shows folders and `.gb`/`.gbc`/`.sgb`/`.dmg` files, and it scans
+a folder when you enter it rather than on every key press — on a card with a lot
+of files that difference is the difference between instant and a second per
+tap.
+
 ### Expectations on hardware
 
 Written for the Old 3DS: one interpreter, no dynarec, no GPU. DMG titles are
