@@ -149,6 +149,10 @@ u64   osGetTime(void);
 void  osSetSpeedupEnable(bool enable);
 u32   osConvertVirtToPhys(const void *vaddr);
 
+/* libctru: true when launched by a homebrew loader. The host stands in for an
+ * installed title. */
+bool  envIsHomebrew(void);
+
 bool  aptMainLoop(void);
 Result APT_SetAppCpuTimeLimit(u32 percent);
 Result APT_CheckNew3DS(bool *out);

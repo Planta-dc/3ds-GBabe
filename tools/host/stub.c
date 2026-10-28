@@ -26,9 +26,10 @@ u16 g_host_bottom_fb[320 * 240];
 int g_host_frames;
 int g_host_tears;
 
-/* libctru's envIsHomebrew() is a static inline over this symbol; the host build
- * models the installed-title case (it is not running from a homebrew loader). */
-void *__service_ptr;
+/* libctru answers this from the homebrew launcher's environment block. The host
+ * build stands in for an installed title, which is the case that has a version
+ * string to check. */
+bool envIsHomebrew(void) { return false; }
 int g_host_max_frames = 300;
 bool g_host_quit;
 
