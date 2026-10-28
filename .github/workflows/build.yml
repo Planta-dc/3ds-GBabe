@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: write # only used when release_tag is given
+  pull-requests: write # diagnostic comment when the .cia packaging fails
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -83,8 +84,20 @@ jobs:
     env:
       DEVKITPRO: /opt/devkitpro
       DEVKITARM: /opt/devkitpro/devkitARM
+      GH_VERSION: 2.62.0
+    # Every step in this job sticks to POSIX sh on purpose: the devkitPro
+    # image's /bin/sh is dash, so a step written for bash (`set -o pipefail`,
+    # arrays, `[[ ]]`) dies with "Illegal option" and exit 2 before any of its
+    # commands run, which is indistinguishable from the build itself failing.
     steps:
       - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          echo "shell: $(readlink -f /bin/sh)"
+          command -v bash sh dash || true
+          echo "PATH=$PATH"
+          bash --version 2>/dev/null | head -n1 || echo "bash: not installed"
 
       - name: Decide what to build
         id: plan
@@ -111,13 +124,76 @@ jobs:
         if: steps.plan.outputs.want_3dsx == 'true'
         run: make -j"$(nproc)"
 
-      - name: Install makerom and bannertool
+      - name: Build makerom and bannertool
         if: steps.plan.outputs.want_cia == 'true'
-        run: bash .github/scripts/install-3ds-packaging-tools.sh
+        run: sh .github/scripts/install-3ds-packaging-tools.sh
 
       - name: Build .cia
         if: steps.plan.outputs.want_cia == 'true'
-        run: make cia -j"$(nproc)"
+        run: |
+          if make cia > cia-build.log 2>&1; then
+            cat cia-build.log
+          else
+            status=$?
+            cat cia-build.log
+            exit "$status"
+          fi
+
+      # A failed step's log is often the only description of the problem, and
+      # neither `gh run view --log` nor the raw log download is always
+      # reachable. So on failure: replay the packaging commands one at a time
+      # with tracing, mirror the tail into annotations, and (for pull requests)
+      # post it as a comment, which is readable through the API.
+      - name: Report .cia failure
+        if: failure() && steps.plan.outputs.want_cia == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          {
+            echo "pwd: $(pwd)"
+            ls -l gbabe.elf gbabe.3dsx build 2>&1 | head -n 10
+            echo "--- tools"
+            command -v bannertool makerom
+            bannertool --version
+            makerom -help | head -n 1
+            echo "--- build log from 'make cia'"
+            if [ -f cia-build.log ]; then
+              tail -n 60 cia-build.log
+            else
+              echo "(no cia-build.log, the step died before make ran)"
+            fi
+            echo "--- shell"
+            echo "step shell: $0"
+            ( set -o pipefail ) && echo "pipefail: supported" || echo "pipefail: NOT supported"
+            echo "--- replay make cia"
+            make cia 2>&1
+            echo "make cia rc=$?"
+          } > packaging-report.log 2>&1
+          {
+            echo "### .cia packaging failed"
+            echo ''
+            echo '```'
+            tail -n 60 packaging-report.log
+            echo '```'
+          } > comment.md
+          tail -n 60 packaging-report.log
+          # Only a handful of annotations are kept per step, so spend them on the
+          # exit statuses and the last error line.
+          grep -E 'rc=[1-9]|RROR|rror' packaging-report.log | head -n 3 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          # Full report as a pull-request comment: readable through the API, and
+          # `gh` is not installed inside the devkitPro container.
+          if [ -n "$PR" ]; then
+            python3 -c 'import json; print(json.dumps({"body": open("comment.md").read()}))' > comment.json
+            curl -sS -o /dev/null -w 'comment http=%{http_code}\n' \
+              -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+              -d @comment.json
+          fi
 
       - name: List outputs
         run: ls -la *.3dsx *.smdh *.cia 2>/dev/null || true
@@ -146,14 +222,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag }}
         run: |
-          set -euo pipefail
-          files=()
-          if [ -f gbabe.3dsx ]; then files+=(gbabe.3dsx gbabe.smdh); fi
-          if [ -f gbabe.cia ];  then files+=(gbabe.cia); fi
-          if [ ${#files[@]} -eq 0 ]; then
+          set -eu
+          # gh is not part of the devkitPro image; fetch it if it is missing.
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "fetching gh"
+            curl -sSL -o /tmp/gh.tar.gz \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            tar xzf /tmp/gh.tar.gz -C /tmp
+            PATH="/tmp/gh_${GH_VERSION}_linux_amd64/bin:$PATH"
+            export PATH
+          fi
+          gh --version | head -n1
+          files=""
+          if [ -f gbabe.3dsx ]; then files="$files gbabe.3dsx gbabe.smdh"; fi
+          if [ -f gbabe.cia ];  then files="$files gbabe.cia"; fi
+          if [ -z "$files" ]; then
             echo "nothing to upload"; exit 1
           fi
+          short=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "$TAG" \
-              --notes "GBabe build from ${GITHUB_SHA::7}"
-          gh release upload "$TAG" "${files[@]}" --clobber
+            gh release create "$TAG" --title "$TAG" --notes "GBabe build from $short"
+          # shellcheck disable=SC2086 # deliberately word-split into file names
+          gh release upload "$TAG" $files --clobber
