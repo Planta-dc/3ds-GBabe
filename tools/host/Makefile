@@ -7,7 +7,7 @@
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
 CC      ?= cc
-CFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra
+CFLAGS  ?= -O3 -flto -g -std=gnu11 -Wall -Wextra
 ROOT    := ../..
 
 INCLUDE := -I. -I$(ROOT)/include -I$(ROOT)/third_party/walnut \

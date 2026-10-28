@@ -118,8 +118,33 @@ sudo bash .github/scripts/install-3ds-packaging-tools.sh
 Written for the Old 3DS: one interpreter, no dynarec, no GPU. DMG titles are
 the comfortable case; most CGB titles should hold full speed with the default
 "fit height" scaler, and the menu has a frame-skip toggle for the ones that
-don't. If a CGB game runs short on an Old 3DS, that is a core-speed limit, not
-a rendering one — the blit is a straight 160-pixel-per-line copy.
+don't.
+
+If a game *is* too slow, the bottom screen tells you why — it prints a
+per-frame breakdown once a second:
+
+```
+                               <- fps, and the wall time per frame
+fps 58.9  (17 ms)
+core 9.8 + blit 1.6 + wait 5.1 ms
+```
+
+* a large **core** figure is the interpreter: nothing else is competing for
+  that time, so it needs a faster core (see below) or frame skip;
+* a large **blit** figure means the scaled copy is the cost, which scale mode
+  changes (the pixel-perfect 160x144 mode is the cheapest to fill);
+* a large **wait** figure is normal — it is the time the console spends idle
+  waiting for the next Game Boy frame.
+
+Known speed levers, in order of effect:
+
+| lever | effect |
+|---|---|
+| `-O3 -flto` (the default, `OPT=` in the `Makefile`) | ~45% faster emulation loop than `-O2` |
+| X (turbo) | runs two emulated frames per presented one, at the cost of dropped frames |
+| frame skip in the menu | halves the blit cost, keeps emulation speed |
+| sound off in the menu | removes the APU mixing and the CSND hand-off |
+| `WALNUT_GB_16_BIT_OPS` in `third_party/walnut/walnut_cgb.h` | a few percent, at the cost of accuracy in some games |
 
 ---
 

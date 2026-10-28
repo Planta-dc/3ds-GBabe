@@ -27,11 +27,17 @@
 #define GB_FRAME_HZ 59.7275
 #define FRAME_TICKS ((u64)(SYSCLOCK_ARM11 / GB_FRAME_HZ))
 
+/* svcSleepThread() takes nanoseconds, the tick counter counts 1/268 MHz. */
+#define TICKS_TO_NS(t) ((s64)((u64)(t) * 1000000000ull / SYSCLOCK_ARM11))
+
+gbabe_perf g_perf;
+
 /* Autosave cartridge RAM every 30 seconds of emulated time. */
 #define AUTOSAVE_TICKS (SYSCLOCK_ARM11 * 30)
 
 static u64 next_frame_tick;
 static u64 autosave_tick;
+static u64 last_frame_end;
 
 /* ------------------------------------------------------------------------- */
 
@@ -111,21 +117,24 @@ static bool frame_due(void)
 		return true;
 	}
 
-	/* If we are early, sleep off most of the wait. svcSleepThread only has
-	 * millisecond-ish granularity, so keep the last eighth of a frame as a
-	 * short spin rather than overshooting the deadline. */
-	if (now + FRAME_TICKS < next_frame_tick)
+	/* If we are early, sleep off most of the wait. The kernel's sleep
+	 * granularity is coarser than a frame, so keep the last eighth of a
+	 * frame as short polls rather than overshooting the deadline.
+	 *
+	 * (This used to pass ticks straight to svcSleepThread(), which wants
+	 * nanoseconds - 3.7x too short, so the loop spent the rest of the frame
+	 * polling and never really slept.) */
+	if (now < next_frame_tick)
 	{
-		const u64 wake = next_frame_tick - FRAME_TICKS + FRAME_TICKS / 8;
-		if (wake > now)
+		const u64 margin = FRAME_TICKS / 8;
+		if (next_frame_tick - now > margin)
 		{
-			svcSleepThread(wake - now);
+			svcSleepThread(TICKS_TO_NS(next_frame_tick - now - margin));
 			now = svcGetSystemTick();
 		}
+		if (now < next_frame_tick)
+			return false;
 	}
-
-	if (now < next_frame_tick)
-		return false;
 
 	next_frame_tick += FRAME_TICKS;
 
@@ -189,6 +198,7 @@ int main(int argc, char **argv)
 			gbabe_copy(g_cfg.rom_path, sizeof g_cfg.rom_path, path);
 			config_save();
 			next_frame_tick = 0;
+			last_frame_end = 0;
 		}
 
 		/* ---- play ---------------------------------------------------- */
@@ -229,6 +239,8 @@ int main(int argc, char **argv)
 				continue;
 			}
 
+			const u64 frame_start = svcGetSystemTick();
+
 			/* Frame skip: present every other frame and skip drawing on
 			 * the ones in between, so the two hardware buffers never
 			 * disagree by more than one frame. */
@@ -249,10 +261,26 @@ int main(int argc, char **argv)
 
 			emu_run_frame();
 
+			const u64 after_core = svcGetSystemTick();
+
 			if (draw)
 				video_end_frame();
 
-			ui_note_frame();
+			const u64 after_blit = svcGetSystemTick();
+
+			if (draw)
+			{
+				/* What the emulator could not use because it was
+				 * waiting for the next Game Boy frame to be due. */
+				const u64 prev_end = last_frame_end;
+				const u64 waited = (prev_end != 0 &&
+						    frame_start > prev_end) ?
+						   frame_start - prev_end : 0;
+				ui_note_frame(after_core - frame_start,
+					      after_blit - after_core, waited,
+					      after_blit - (prev_end ? prev_end : frame_start));
+				last_frame_end = after_blit;
+			}
 
 			const u64 now = svcGetSystemTick();
 			if (now - autosave_tick > AUTOSAVE_TICKS)

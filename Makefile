@@ -53,14 +53,21 @@ BANNERTOOL  ?=  bannertool
 #---------------------------------------------------------------------------------
 ARCH    :=  -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS  :=  -g -Wall -Wextra -O2 -ffunction-sections -fdata-sections \
+# -O3 -flto is worth ~45% over -O2 on the emulation loop: the core is one giant
+# switch inside a header-only library, so link-time inlining of the front-end
+# hooks into it is what costs the time. Override with `make OPT=-O2` if a
+# toolchain update ever miscompiles something.
+OPT     ?=  -O3 -flto -DNDEBUG
+
+CFLAGS  :=  -g -Wall -Wextra $(OPT) -ffunction-sections -fdata-sections \
             -fno-strict-aliasing -fomit-frame-pointer \
             -std=gnu11 $(ARCH)
 
 CFLAGS  +=  $(INCLUDE) -D__3DS__ -DMINIGB_APU_AUDIO_FORMAT_S16SYS
 
 ASFLAGS :=  -g $(ARCH)
-LDFLAGS  =  -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# -flto has to be given to the link as well for the objects to be optimised.
+LDFLAGS  =  -specs=3dsx.specs -g $(ARCH) $(OPT) -Wl,-Map,$(notdir $*.map)
 
 LIBS    :=  -lctru -lm
 

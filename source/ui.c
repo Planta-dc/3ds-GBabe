@@ -43,6 +43,7 @@ static char      cur_dir[512];
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static float    hud_fps;
+static u64      hud_sum_core, hud_sum_blit, hud_sum_wait, hud_sum_frame;
 
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
@@ -478,9 +479,14 @@ bool ui_in_game_menu(void)
 /* HUD                                                                       */
 /* ------------------------------------------------------------------------- */
 
-void ui_note_frame(void)
+void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
+		   u64 frame_ticks)
 {
 	hud_frames++;
+	hud_sum_core += core_ticks;
+	hud_sum_blit += blit_ticks;
+	hud_sum_wait += wait_ticks;
+	hud_sum_frame += frame_ticks;
 
 	u64 now = svcGetSystemTick();
 	if (hud_last_tick == 0)
@@ -489,12 +495,23 @@ void ui_note_frame(void)
 		return;
 	}
 
-	double elapsed = (double)(now - hud_last_tick) / SYSCLOCK_ARM11;
+	const double elapsed = (double)(now - hud_last_tick) / SYSCLOCK_ARM11;
 	if (elapsed < 1.0)
 		return;
 
 	hud_fps = (float)(hud_frames / elapsed);
+
+	/* Milliseconds per presented frame, from the tick sums. */
+	const double ticks_to_ms = 1000.0 / SYSCLOCK_ARM11;
+	const double n = (hud_frames > 0) ? (double)hud_frames : 1.0;
+	g_perf.fps = hud_fps;
+	g_perf.core_ms = (float)((double)hud_sum_core * ticks_to_ms / n);
+	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
+	g_perf.wait_ms = (float)((double)hud_sum_wait * ticks_to_ms / n);
+	g_perf.frame_ms = (float)((double)hud_sum_frame * ticks_to_ms / n);
+
 	hud_frames = 0;
+	hud_sum_core = hud_sum_blit = hud_sum_wait = hud_sum_frame = 0;
 	hud_last_tick = now;
 
 	if (g_cfg.show_hud && emu_loaded())
@@ -507,20 +524,23 @@ void ui_draw_hud(void)
 
 	consoleClear();
 	line_at(1, 1, "%.16s %s", info->title, info->cgb ? "CGB" : "DMG");
-	line_at(2, 1, "%d.%d fps", (int)hud_fps, (int)(hud_fps * 10) % 10);
-	line_at(3, 1, "sound %s  out %ums", g_cfg.audio_on ? "on" : "off",
+	line_at(2, 1, "%d.%d fps  (%.0f ms)", (int)g_perf.fps,
+		(int)(g_perf.fps * 10) % 10, g_perf.frame_ms);
+	line_at(3, 1, "core %.1f + blit %.1f + wait %.1f ms", g_perf.core_ms,
+		g_perf.blit_ms, g_perf.wait_ms);
+	line_at(4, 1, "sound %s  out %ums", g_cfg.audio_on ? "on" : "off",
 		audio_queue_ms());
-	line_at(4, 1, "skip  %s", frameskip_label(g_cfg.frameskip));
+	line_at(5, 1, "skip  %s", frameskip_label(g_cfg.frameskip));
 
-	line_at(6, 1, "pal %.18s", palette_name(palette_get()));
-	line_at(7, 1, "vid %s", scale_label(g_cfg.scale));
+	line_at(7, 1, "pal %.18s", palette_name(palette_get()));
+	line_at(8, 1, "vid %s", scale_label(g_cfg.scale));
 
-	line_at(9, 1, "A/B Start/Select");
-	line_at(10, 1, "D-Pad or Circle Pad");
-	line_at(11, 1, "X turbo, Y palette");
-	line_at(12, 1, "Touch here for menu");
+	line_at(10, 1, "A/B Start/Select");
+	line_at(11, 1, "D-Pad or Circle Pad");
+	line_at(12, 1, "X turbo, Y palette");
+	line_at(13, 1, "Touch here for menu");
 
-	line_at(14, 1, "rom %u ram %u banks", info->rom_banks, info->ram_banks);
+	line_at(15, 1, "rom %u ram %u banks", info->rom_banks, info->ram_banks);
 }
 
 void ui_init(void)

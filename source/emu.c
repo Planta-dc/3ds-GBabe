@@ -38,6 +38,7 @@ static size_t   rom_size;
 static uint8_t *bootrom;   /* optional, sdmc:/3ds/gbabe/bootrom */
 static uint8_t *cart_ram;
 static size_t   cart_ram_size;
+static uint32_t cart_ram_mask; /* cart_ram_size - 1; every GB RAM size is 2^n */
 static char     save_path[512];
 static bool     sram_dirty;
 static bool     loaded;
@@ -74,12 +75,14 @@ static uint32_t rom_dword(struct gb_s *g, const uint_fast32_t addr)
 	return v;
 }
 
+/* Cartridge RAM is a power of two bytes (2K..128K), so wrap with a mask: a
+ * modulo here would compile to a software divide in the hot read callback. */
 static uint8_t cart_ram_byte(struct gb_s *g, const uint_fast32_t addr)
 {
 	(void)g;
 	if (cart_ram == NULL)
 		return 0xFF;
-	return cart_ram[addr % (cart_ram_size ? cart_ram_size : 1)];
+	return cart_ram[addr & cart_ram_mask];
 }
 
 static void cart_ram_write_byte(struct gb_s *g, const uint_fast32_t addr,
@@ -88,7 +91,7 @@ static void cart_ram_write_byte(struct gb_s *g, const uint_fast32_t addr,
 	(void)g;
 	if (cart_ram == NULL)
 		return;
-	cart_ram[addr % (cart_ram_size ? cart_ram_size : 1)] = val;
+	cart_ram[addr & cart_ram_mask] = val;
 	sram_dirty = true;
 }
 
@@ -248,6 +251,7 @@ void emu_unload(void)
 	}
 	rom_size = 0;
 	cart_ram_size = 0;
+	cart_ram_mask = 0;
 	loaded = false;
 	memset(&info, 0, sizeof info);
 }
@@ -320,6 +324,9 @@ const char *emu_load(const char *path)
 			emu_unload();
 			return "Not enough memory for the save RAM.";
 		}
+		/* 0 when the size is not a power of two, which gives the plain
+		 * truncating behaviour of the modulo it replaces. */
+		cart_ram_mask = (uint32_t)cart_ram_size - 1;
 	}
 
 	make_save_path(path);

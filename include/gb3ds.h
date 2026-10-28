@@ -41,6 +41,21 @@ enum video_scale
 };
 
 /* ------------------------------------------------------------------------- */
+/* Runtime profile, refreshed once a second by the HUD                       */
+/* ------------------------------------------------------------------------- */
+
+typedef struct
+{
+	float fps;      /* presented frames per second                          */
+	float frame_ms; /* wall time per presented frame (all of it)            */
+	float core_ms;  /* emulation: CPU + PPU + APU                           */
+	float blit_ms;  /* scaled copy into the framebuffer + present           */
+	float wait_ms;  /* paced off waiting for the next Game Boy frame        */
+} gbabe_perf;
+
+extern gbabe_perf g_perf;
+
+/* ------------------------------------------------------------------------- */
 
 typedef struct
 {
