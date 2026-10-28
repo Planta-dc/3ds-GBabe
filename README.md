@@ -69,6 +69,12 @@ Put both on `PATH`, or point the build at them:
 make cia MAKEROM=/path/to/makerom BANNERTOOL=/path/to/bannertool
 ```
 
+Prefer building them yourself over the prebuilt Linux archives: those are linked
+against a newer glibc than many build images ship, and the only symptom is a
+`GLIBC_2.3x not found` failure at the very end of the build. `.github/scripts/install-3ds-packaging-tools.sh`
+does exactly that (a `make deps && make` for makerom, one `g++` line for
+bannertool) at pinned tags.
+
 The result is `gbabe.cia`, installed either by copying it to the SD card and
 opening it with [FBI](https://github.com/Steveice10/FBI), or with GodMode9.
 The CIA is unsigned, so it needs a console that will run unsigned titles (CFW);
@@ -104,8 +110,15 @@ is not addressable as `steps.plan.outputs.3dsx` (GitHub's expression grammar
 rejects property names starting with a digit) and has to be called something
 like `want_3dsx`.
 
-The workflow runs in the official `devkitpro/devkitarm` container and fetches
-makerom (v0.19.0) and bannertool (v1.2.3) with
+Two more that only show up on the runner, both now handled explicitly: the
+`devkitpro/devkitarm` container's default `run:` shell is **dash** (`bash` is
+not on `PATH` for `run:` steps either, so `shell: bash` is not a way out), which
+is why every step in that job is plain POSIX `sh`; and the container's glibc is
+older than the one the published `makerom`/`bannertool` binaries are linked
+against, so those are compiled from source instead of downloaded.
+
+The workflow runs in the official `devkitpro/devkitarm` container and builds
+makerom (v0.19.0) and bannertool (v1.2.3) from source with
 `.github/scripts/install-3ds-packaging-tools.sh`, which you can also run locally
 to set up the two packaging tools:
 
