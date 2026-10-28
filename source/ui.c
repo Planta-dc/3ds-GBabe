@@ -826,14 +826,21 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 
 	/* The same numbers the status readout shows, in the log: this is the
 	 * measurement a slow-console report needs, and a screenshot of the bottom
-	 * screen is a lot to ask of someone. */
+	 * screen is a lot to ask of someone. sync_skip/sync_late are the present
+	 * path's own counters: a frame that could not afford the vblank wait
+	 * (and may tear), and a swap the panel was a vblank late in taking. */
+	unsigned sync_skip, sync_late;
+
+	video_sync_take(&sync_skip, &sync_late);
+
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
-		 "sync=%.1f wait=%.1f other=%.1f audio=%ums", g_perf.fps,
+		 "sync=%.1f wait=%.1f other=%.1f audio=%ums "
+		 "sync_skip=%u sync_late=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms,
 		 g_perf.sync_ms, g_perf.wait_ms,
 		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
 				    g_perf.sync_ms + g_perf.wait_ms),
-		 audio_queue_ms());
+		 audio_queue_ms(), sync_skip, sync_late);
 
 	hud_frames = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_wait =

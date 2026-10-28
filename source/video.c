@@ -41,6 +41,10 @@ static u64 present_wait;     /* ticks spent waiting for the panel last frame */
 static u64 frame_start;      /* when video_begin_frame() was called          */
 static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
 
+/* Diagnostics for the present path, see video_sync_take(). */
+static unsigned sync_skips;  /* frames presented without waiting for the panel */
+static unsigned sync_late;   /* swaps the panel did not take at the next vblank */
+
 /* One Game Boy frame, in ARM11 ticks. Used to decide whether there is time to
  * wait for the panel: see video_end_frame(). */
 #define FRAME_TICKS ((u64)GBABE_FRAME_TICKS)
@@ -269,7 +273,14 @@ void video_end_frame(void)
 		 * says whether that happened; give it one more vblank rather
 		 * than guess. */
 		if (gspIsPresentPending(GFX_TOP))
+		{
+			sync_late++;
 			gspWaitForVBlank();
+		}
+	}
+	else
+	{
+		sync_skips++;
 	}
 
 	present_wait = svcGetSystemTick() - now;
@@ -280,4 +291,14 @@ void video_end_frame(void)
 uint64_t video_present_wait(void)
 {
 	return present_wait;
+}
+
+void video_sync_take(unsigned *skipped, unsigned *late_applies)
+{
+	if (skipped != NULL)
+		*skipped = sync_skips;
+	if (late_applies != NULL)
+		*late_applies = sync_late;
+
+	sync_skips = sync_late = 0;
 }

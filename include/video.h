@@ -52,6 +52,18 @@ void video_end_frame(void);
 /* ARM11 ticks spent waiting for the panel in the last video_end_frame(). */
 uint64_t video_present_wait(void);
 
+/* Present-path diagnostics since the previous call, for the log:
+ *
+ *   skipped       frames presented without waiting, because their own work
+ *                 already overran a frame period (they may tear)
+ *   late_applies  swaps the panel did not take at the next vblank, so a second
+ *                 one was waited for
+ *
+ * Both should be 0 on a console that is keeping up. A non-zero skipped count
+ * means the machine is too slow for the scale mode in use, and that is the only
+ * way tearing can still appear. */
+void video_sync_take(unsigned *skipped, unsigned *late_applies);
+
 /* Fill the top screen with black (used by menus). */
 void video_clear(void);
 
