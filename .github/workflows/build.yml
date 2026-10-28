@@ -147,6 +147,12 @@ jobs:
             else
               echo "(no cia-build.log, the step died before make ran)"
             fi
+            echo "--- shell"
+            echo "step shell: $0"
+            ( set -o pipefail ) && echo "pipefail: supported" || echo "pipefail: NOT supported"
+            echo "--- replay make cia"
+            make cia 2>&1
+            echo "make cia rc=$?"
             echo "--- replay"
             bannertool makebanner -i resources/banner.png -a resources/banner.wav -o build/banner.bnr
             echo "makebanner rc=$?"
