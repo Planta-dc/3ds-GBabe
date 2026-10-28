@@ -30,7 +30,10 @@ CORE_SRC  := $(ROOT)/source/emu_gambatte.cpp
 # VIDEO_RGB565 is set for both: 16-bit pixels, which is what video.c takes.
 CORE_DEFS := -DGBABE_CORE_GAMBATTE -DVIDEO_RGB565 -DHAVE_STDINT_H \
              -I$(ROOT)/third_party/gambatte/libgambatte/include
-CORE_LIB  := $(ROOT)/third_party/gambatte/libgambatte.a
+# Its own library file and object directory: the 3DS build puts an
+# arm-none-eabi archive at libgambatte.a in the same directory, and linking
+# that into a PC binary fails with "ELF object format mismatch".
+CORE_LIB  := $(ROOT)/third_party/gambatte/libgambatte-host.a
 LD        := $(CXX)
 else ifeq ($(CORE),walnut)
 CORE_SRC  := $(ROOT)/source/emu.c
@@ -96,7 +99,7 @@ $(OBJDIR)/%.o: %.cpp
 # The vendored Gambatte core, built with the host compiler.
 $(CORE_LIB):
 	$(MAKE) -C $(ROOT)/third_party/gambatte CXX="$(CXX)" AR="$(AR)" \
-		OPT="-O2"
+		OPT="-O2" BUILD=build-host LIB=libgambatte-host.a
 
 # main.c defines its own main(); compile it with main renamed. Everything else,
 # the UI included, is linked for real by the $(BIN) rule above.

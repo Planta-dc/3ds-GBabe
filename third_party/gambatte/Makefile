@@ -30,7 +30,8 @@ LIB      := libgambatte.a
 # with 13.
 CORE_FLAGS := -DVIDEO_RGB565 -DHAVE_STDINT_H -D__LIBRETRO__ -DNDEBUG \
               -fno-exceptions -fno-rtti -fno-strict-aliasing \
-              -ffunction-sections -fdata-sections -fomit-frame-pointer
+              -ffunction-sections -fdata-sections -fomit-frame-pointer \
+              -Wno-deprecated-enum-enum-conversion
 
 # The front-end's headers (log.h) live at the repository root.
 ROOT    ?= ../..

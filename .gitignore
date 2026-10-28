@@ -10,7 +10,9 @@ build/
 
 # The vendored Gambatte core's build output
 third_party/gambatte/build/
+third_party/gambatte/build-host/
 third_party/gambatte/libgambatte.a
+third_party/gambatte/libgambatte-host.a
 
 # Host harness
 tools/host/gbabe-host
