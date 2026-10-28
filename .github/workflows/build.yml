@@ -255,7 +255,10 @@ jobs:
             ls -l gbabe.elf gbabe.3dsx gbabe.smdh gbabe.cia artifacts/ 2>&1
             echo "--- build log"
             if [ -s build.log ]; then
-              tail -n 80 build.log
+              echo "(build.log: $(wc -l < build.log) lines)"
+              grep -n -i -m 20 'error\|Error [0-9]\|exited [1-9]\|No rule\|not found' build.log || true
+              echo "--- tail"
+              tail -n 200 build.log
             else
               echo "(build.log is missing or empty: the container died before it ran)"
             fi
@@ -271,7 +274,7 @@ jobs:
             done
 
           if [ -n "${PR:-}" ]; then
-            tail -c 8000 /tmp/report.log > /tmp/tail.log
+            tail -c 40000 /tmp/report.log > /tmp/tail.log
             {
               echo '### 3DS build failed'
               echo

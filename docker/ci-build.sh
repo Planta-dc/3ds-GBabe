@@ -8,6 +8,8 @@
 # GBABE_TARGET limits the packaging: 3dsx (just the .3dsx + .smdh), cia (also
 # the installable .cia), or both (the default).
 set -e
+# On failure, say which command failed and where, so the log does not just stop.
+trap 'rc=$?; echo "ci-build.sh: line $LINENO exited $rc" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
