@@ -65,8 +65,10 @@ static void platform_init(void)
 	/* Everything below is for the log: this is the information a bug report
 	 * needs and nobody can read off the console's own menus. */
 	log_init(GBABE_LOG_PATH, g_cfg.debug_log);
-	log_line("GBabe %s, %s", GBABE_VERSION,
-		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS");
+	log_line("GBabe %s, %s, %s", GBABE_VERSION,
+		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS",
+		 envIsHomebrew() ? "launched by a homebrew loader (3dsx)"
+				 : "installed title (cia)");
 	log_line("tick rate %.0f Hz, scale=%d palette=%d frameskip=%d",
 		 SYSCLOCK_ARM11, g_cfg.scale, g_cfg.palette, g_cfg.frameskip);
 

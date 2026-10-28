@@ -52,6 +52,17 @@ mkdir -p artifacts
 cp gbabe.3dsx gbabe.smdh artifacts/ 2>/dev/null || true
 [ "$want_cia" = 1 ] && cp gbabe.cia artifacts/
 
+# The binary has to agree with the header, or an artifact gets uploaded that
+# reports a different version from the one in the release notes. .github/
+# scripts/check-version.sh compares the two version *sources*; this checks the
+# thing that was actually built, and says in the log which version was packaged.
+echo "=== version stamp ==="
+ver="$(sed -n 's/^#define GBABE_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' include/gb3ds.h)"
+[ -n "$ver" ] || { echo "could not read GBABE_VERSION from include/gb3ds.h" >&2; exit 1; }
+grep -a -q -- "$ver" gbabe.elf ||
+  { echo "gbabe.elf does not contain its version string '$ver'" >&2; exit 1; }
+echo "packaged GBabe $ver"
+
 echo "=== host build + render check ==="
 make -C tools/host -j"$jobs"
 make -C tools/host check
