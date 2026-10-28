@@ -120,7 +120,7 @@ jobs:
         if: steps.plan.outputs.want_cia == 'true'
         run: |
           set -o pipefail
-          make cia 2>&1 | tee cia-build.log
+          { make cia; echo "make rc=$?"; } 2>&1 | tee cia-build.log
 
       # A failed step's log is often the only description of the problem, and
       # neither `gh run view --log` nor the raw log download is always
@@ -160,18 +160,28 @@ jobs:
               -DAPP_TITLE="GBabe" -DAPP_PRODUCT_CODE="CTR-H-GBABE" -DAPP_UNIQUE_ID=0xEABE1
             echo "makerom rc=$?"
           } > packaging-report.log 2>&1
-          tail -n 60 packaging-report.log
-          tail -n 12 packaging-report.log | grep -v '^$' | while IFS= read -r line; do
-            echo "::error::$line"
-          done
           {
             echo "### .cia packaging failed"
+            echo ''
             echo '```'
-            tail -n 40 packaging-report.log
+            tail -n 60 packaging-report.log
             echo '```'
           } > comment.md
+          tail -n 60 packaging-report.log
+          # Only a handful of annotations are kept per step, so spend them on the
+          # exit statuses and the last error line.
+          grep -E 'rc=[1-9]|RROR|rror' packaging-report.log | head -n 3 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          # Full report as a pull-request comment: readable through the API, and
+          # `gh` is not installed inside the devkitPro container.
           if [ -n "$PR" ]; then
-            gh pr comment "$PR" --body-file comment.md || true
+            python3 -c 'import json; print(json.dumps({"body": open("comment.md").read()}))' > comment.json
+            curl -sS -o /dev/null -w 'comment http=%{http_code}\n' \
+              -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+              -d @comment.json
           fi
 
       - name: List outputs
