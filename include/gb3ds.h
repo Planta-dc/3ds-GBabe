@@ -43,6 +43,13 @@
 #define GBABE_FRAME_HZ    59.7275
 #define GBABE_FRAME_TICKS ((uint64_t)(SYSCLOCK_ARM11 / GBABE_FRAME_HZ))
 
+/* Autosave cartridge RAM every 30 seconds of emulated time. The cast is not
+ * decoration: SYSCLOCK_ARM11 is an integer constant in libctru, 30 x it is
+ * 8.04e9, and that does not fit in 32 bits - the product wrapped to 3.75e9 and
+ * the console wrote the save file every 14 seconds instead of every 30. */
+#define GBABE_AUTOSAVE_SECONDS 30u
+#define GBABE_AUTOSAVE_TICKS ((uint64_t)SYSCLOCK_ARM11 * GBABE_AUTOSAVE_SECONDS)
+
 enum video_scale
 {
 	SCALE_FIT = 0,  /* full height, keeps the Game Boy aspect ratio (default) */

@@ -85,6 +85,13 @@ jobs:
       - name: Debug log format
         run: make -C tools/host logtest
 
+      # The frame loop paces itself off the tick counter, and the arithmetic
+      # used to make every single frame look like a resync - so the schedule was
+      # re-anchored on every frame and lateness was never recovered (58.6 fps
+      # instead of 59.7 in a heavy scene). Tested as arithmetic, exactly.
+      - name: Frame pacing
+        run: make -C tools/host pacetest
+
       - name: Version numbers agree
         run: sh .github/scripts/check-version.sh
 

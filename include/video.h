@@ -49,6 +49,14 @@ void video_draw_frame(const uint16_t *frame565, int pitch);
  * struggling - one torn frame is the lesser evil. */
 void video_end_frame(void);
 
+/* Forget which framebuffers already have a black letterbox.
+ *
+ * The letterbox is cleared once per buffer instead of once per frame, because
+ * it cannot change while the scale does not. Anything else that writes to the
+ * top screen has to say so - the scale mode does it itself, and so does every
+ * path that fills the screen with video_clear(). */
+void video_letterbox_unknown(void);
+
 /* ARM11 ticks spent waiting for the panel in the last video_end_frame(). */
 uint64_t video_present_wait(void);
 
