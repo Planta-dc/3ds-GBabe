@@ -31,6 +31,8 @@ tools/uipreview/out/
 # Anything the build or the workflows leave behind
 build.log
 *.ppm
+# ...except the reference frame the render check compares against
+!test/dmg-acid2-reference.ppm
 
 # Editors / OS
 .DS_Store
