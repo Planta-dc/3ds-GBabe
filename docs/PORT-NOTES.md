@@ -500,8 +500,12 @@ a vblank has gone by and the panel shows it for two panel periods. That is one
 frame held 33 ms instead of 16.7 ms, and no amount of scheduling removes it
 short of running the Game Boy 0.45 % fast or interpolating frames.
 
-The host harness now counts torn frames - a frame that fetches the top
-framebuffer while a swap is still pending - and fails if there are any:
+The host harness counts torn frames - a frame that fetches the top framebuffer
+while a swap is still pending - and `make -C tools/host presenttest` covers both
+halves of the decision, including the deliberate exception: a frame that has
+already overrun its own 16.74 ms period skips the wait and presents at once
+(one torn frame beats 30 fps). The same test confirms the wait comes back on the
+next on-time frame.
 
 | | torn frames out of 60 |
 |---|---|

@@ -92,6 +92,12 @@ jobs:
       - name: Frame pacing
         run: make -C tools/host pacetest
 
+      # The other half of the tearing story: a frame that fits in a panel period
+      # waits for the vblank, one that does not presents at once rather than
+      # halving the frame rate. Real time, so it takes ~0.1 s.
+      - name: Present path
+        run: make -C tools/host presenttest
+
       - name: Version numbers agree
         run: sh .github/scripts/check-version.sh
 
