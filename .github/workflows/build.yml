@@ -46,7 +46,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build the PC harness
-        run: make -C tools/host -j"$(nproc)"
+        run: |
+          set -o pipefail
+          make -C tools/host -j"$(nproc)" 2>&1 | tee host-build.log
 
       - name: Type-check main.c
         run: make -C tools/host check
@@ -124,6 +126,30 @@ jobs:
           for f in sorted(glob.glob(f"{sys.argv[1]}/*.ppm")):
               Image.open(f).save(f[:-4] + ".png")
           PY
+
+      # Same reasoning as the 3DS job below: a failed step's log is not always
+      # downloadable from every environment, so put the tail where it can be
+      # read - a pull request comment.
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          {
+            echo "--- build log"
+            cat host-build.log 2>/dev/null || echo "(no host-build.log)"
+          } > /tmp/report.log 2>&1
+          tail -n 60 /tmp/report.log
+          grep -E 'rror|No such file|cannot' /tmp/report.log | head -n 3 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          if [ -n "${PR:-}" ]; then
+            tail -c 6000 /tmp/report.log > /tmp/tail.log
+            { echo '### host build failed'; echo; echo '```'; cat /tmp/tail.log; echo '```'; } > /tmp/comment.md
+            gh pr comment "$PR" --body-file /tmp/comment.md || true
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
