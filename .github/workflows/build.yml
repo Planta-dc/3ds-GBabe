@@ -85,13 +85,19 @@ jobs:
       DEVKITPRO: /opt/devkitpro
       DEVKITARM: /opt/devkitpro/devkitARM
       GH_VERSION: 2.62.0
-    # The devkitPro image's /bin/sh is dash, so `set -o pipefail` (and arrays,
-    # `[[ ]]`, ...) fail with "Illegal option" and exit 2 before anything runs.
-    defaults:
-      run:
-        shell: bash
+    # Every step in this job sticks to POSIX sh on purpose: the devkitPro
+    # image's /bin/sh is dash, so a step written for bash (`set -o pipefail`,
+    # arrays, `[[ ]]`) dies with "Illegal option" and exit 2 before any of its
+    # commands run, which is indistinguishable from the build itself failing.
     steps:
       - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          echo "shell: $(readlink -f /bin/sh)"
+          command -v bash sh dash || true
+          echo "PATH=$PATH"
+          bash --version 2>/dev/null | head -n1 || echo "bash: not installed"
 
       - name: Decide what to build
         id: plan
@@ -120,7 +126,7 @@ jobs:
 
       - name: Build makerom and bannertool
         if: steps.plan.outputs.want_cia == 'true'
-        run: bash .github/scripts/install-3ds-packaging-tools.sh
+        run: sh .github/scripts/install-3ds-packaging-tools.sh
 
       - name: Build .cia
         if: steps.plan.outputs.want_cia == 'true'
@@ -216,7 +222,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag }}
         run: |
-          set -euo pipefail
+          set -eu
           # gh is not part of the devkitPro image; fetch it if it is missing.
           if ! command -v gh >/dev/null 2>&1; then
             echo "fetching gh"
@@ -227,13 +233,14 @@ jobs:
             export PATH
           fi
           gh --version | head -n1
-          files=()
-          if [ -f gbabe.3dsx ]; then files+=(gbabe.3dsx gbabe.smdh); fi
-          if [ -f gbabe.cia ];  then files+=(gbabe.cia); fi
-          if [ ${#files[@]} -eq 0 ]; then
+          files=""
+          if [ -f gbabe.3dsx ]; then files="$files gbabe.3dsx gbabe.smdh"; fi
+          if [ -f gbabe.cia ];  then files="$files gbabe.cia"; fi
+          if [ -z "$files" ]; then
             echo "nothing to upload"; exit 1
           fi
+          short=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "$TAG" \
-              --notes "GBabe build from ${GITHUB_SHA::7}"
-          gh release upload "$TAG" "${files[@]}" --clobber
+            gh release create "$TAG" --title "$TAG" --notes "GBabe build from $short"
+          # shellcheck disable=SC2086 # deliberately word-split into file names
+          gh release upload "$TAG" $files --clobber

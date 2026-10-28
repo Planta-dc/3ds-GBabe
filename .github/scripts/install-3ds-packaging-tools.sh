@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # Install the two tools needed to turn a 3DS ELF into a .cia:
 #
@@ -18,7 +18,7 @@
 #
 # Override with MAKEROM_VERSION / BANNERTOOL_VERSION, or point MAKEROM /
 # BANNERTOOL at existing binaries to skip a build.
-set -euo pipefail
+set -eu
 
 MAKEROM_VERSION="${MAKEROM_VERSION:-0.19.0}"
 BANNERTOOL_VERSION="${BANNERTOOL_VERSION:-1.2.3}"
