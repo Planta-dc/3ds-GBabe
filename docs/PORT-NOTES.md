@@ -109,11 +109,17 @@ throughput, which is the open question on real hardware (see §4).
      flushes again. Per-line `printf` plus cursor addressing per redraw
      multiplied both.
 
-   The browser/menu/HUD now compose a 40x30 shadow screen and write it with a
-   single `fwrite` of 1200 bytes containing no newlines, then flush once; the
-   directory is scanned only when it changes, ROM-named entries are never
-   `stat()`'d, and the browser starts in the last ROM's folder. Anything UI
-   related should stay in that shape.
+   Two rounds of fixes followed. First the console was made to behave: one
+   `fwrite` of a 1200-byte shadow screen with no newlines, one flush, the
+   directory scanned only when it changes, ROM-named entries never `stat()`'d.
+   That made it navigable. Then the console was dropped altogether - see §5 -
+   because even a well-behaved text console redraws glyph by glyph and cannot
+   draw a selection highlight, an icon or a smooth bar.
+
+   The lesson generalises past this port: on an Old 3DS, **per-character text
+   output is the expensive thing, not pixels**. A full 320x240 RGB565 canvas
+   costs 0.2 ms to compose and 0.3 ms to present, i.e. ~3% of a frame, and it
+   only happens when something changes.
 
 3. **Where a frame goes.** The HUD now reports the split (core / blit /
    wait) once a second, because tuning this thing without a console in hand
@@ -148,10 +154,17 @@ throughput, which is the open question on real hardware (see §4).
    orientation flags in `video.c`, CSND channel choice, console font metrics).
 
    `.github/workflows/build.yml` now produces both artifacts on GitHub's
-   runners (`.3dsx` always, `.cia` when requested) using the
-   `devkitpro/devkitarm` container plus makerom/bannertool built from source at
-   pinned tags, so the ARM compile and the makerom packaging step are one
-   "Run workflow" click away.
+   runners (`.3dsx` always, `.cia` when requested), and pushes a tagged build
+   straight to a release with a QR code FBI can scan. The build runs inside
+   `docker/gbabe-devcontainer.Dockerfile`: a pinned devkitARM plus
+   makerom/bannertool compiled from pinned sources, cached in GHCR and tagged
+   with a hash of its own Dockerfile, so the toolchain cannot change under a
+   commit and a local build matches CI byte for byte. That image is also the
+   devcontainer (`.devcontainer/devcontainer.json`), and `docker/ci-build.sh` is
+   the single entry point both use. If the image is missing or broken the
+   workflow builds it; failing that it falls back to the stock
+   `devkitpro/devkitarm` image, which `ci-build.sh` sets the packaging tools up
+   in itself.
 
    The packaging inputs are checked offline rather than in CI, by feeding a
    synthetic ARM ELF (`tools/make-test-elf.py`) through the same `bannertool`
@@ -187,7 +200,51 @@ throughput, which is the open question on real hardware (see §4).
 
 ---
 
-## 5. If you want to do the same port from scratch
+## 5. The bottom screen is drawn, not printed
+
+The browser, menu and status readout are a software-rendered UI in a 320x240
+RGB565 canvas (`source/ui_gfx.c`, `source/ui_screens.c`, `source/ui_font.c`).
+The layout language - dark panels, one accent colour, value pills, a footer of
+key hints, touch hit-testing - follows bheppe's
+[gpSP 3D](https://github.com/bheppe/gpsp-3d); the code is written from scratch
+and only the look is shared (gpSP 3D is GPLv2, this is MIT).
+
+* **Text.** Five anti-aliased faces (11/13/13/17/26 px) baked into 4-bit
+  coverage atlases by `tools/make-font.py`, so there is no font file to load and
+  no runtime rasteriser: a glyph is a nibble lookup, a blend and a store. The
+  atlases are ~136 KiB of source and cost nothing at runtime.
+  DejaVu Sans is the source font (permissive licence, `third_party/fonts/`);
+  the generator takes any TrueType file.
+* **Shapes.** Rounded rectangles and circles are drawn with integer edge
+  coverage: the corner distance is compared against the circles of radius
+  `r-1` and `r+1`, which gives anti-aliasing without a square root, without
+  floats and without a per-pixel table.
+* **Present.** One `ui_present()` copies the canvas into the bottom
+  framebuffer in 16x16 tiles - the bottom LCD is also a rotated panel, so this
+  is a transpose with flipped rows - then flushes only that screen's 153 KiB and
+  swaps. Nothing is drawn per frame during gameplay except when the status
+  readout refreshes, once a second.
+* **Redraws.** Screens are composed when something changes (a key, a tap, a new
+  directory), never per frame; the browse/menu loops block on `hidScanInput()`
+  and only touch the canvas when their state actually moved.
+* **Touch.** The 3DS reports touch coordinates in the same 320x240 landscape
+  space the canvas uses, so hit-testing is `scr_browser_hit()` /
+  `scr_menu_hit_row()` on the layout constants - no second geometry to keep in
+  sync, and every row is a large target.
+* **Offline preview.** `tools/uipreview` links the real `ui_gfx.c`,
+  `ui_screens.c` and `ui_font.c` against the host stub and renders every screen
+  to an image, through the same rotation the hardware applies. CI attaches the
+  PNGs as an artifact, which is how these layouts were designed without the
+  console to look at them on.
+
+Cost on the host, for calibration: a full screen compose is ~0.2 ms and the
+transpose+flush ~0.3 ms. Even an order of magnitude slower on an Old 3DS, a
+keypress costs a small fraction of a frame - against roughly 400 ms per redraw
+for the same screen printed through the text console.
+
+---
+
+## 6. If you want to do the same port from scratch
 
 The minimal recipe, in order:
 
@@ -199,3 +256,5 @@ The minimal recipe, in order:
 5. Map `hidKeysHeld()` into `gb.direct.joypad` (active-low).
 6. Add `audio_read`/`audio_write` to `minigb_apu` and pump samples to CSND.
 7. Pace with `svcGetSystemTick()` at 59.7275 Hz instead of vblank.
+8. Draw the UI yourself (§5). A text console is fine for a splash screen and
+   too slow for anything a user navigates on an Old 3DS.

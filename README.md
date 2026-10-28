@@ -23,15 +23,17 @@ render path by `tools/host`, not a mock-up)*
 | Video (RGB565, line-by-line blit, 3 scale modes) | done |
 | Audio (minigb_apu → CSND, buffered) | done |
 | ROM browser, in-game menu, config file | done |
+| Bottom-screen UI: drawn (fonts, panels, animation), touch + buttons | done |
 | `.sav` cartridge RAM (auto-save every 30 s) | done |
 | Optional boot ROM | done |
 | Save states | **not yet** |
 | Link cable, cheat codes, SGB borders | not planned |
 
-`.github/workflows/build.yml` builds the release artifacts on GitHub's runners
-(manually or on push) but has not had its first run yet; the
-platform-independent parts are compiled and run on the host by `tools/host`,
-which renders the screenshot above. See [docs/PORT-NOTES.md](docs/PORT-NOTES.md).
+`.github/workflows/build.yml` builds `.3dsx` and `.cia` on GitHub's runners, on
+every push and on demand. The platform-independent parts are compiled and run
+on the host by `tools/host` (which renders the screenshot above) and
+`tools/uipreview` (which renders the bottom screen). What none of that checks is
+behaviour on real hardware — see [docs/PORT-NOTES.md](docs/PORT-NOTES.md).
 
 ---
 
@@ -47,6 +49,28 @@ export PATH=$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH
 
 make -j4
 ```
+
+### The devcontainer (the toolchain CI uses)
+
+`docker/gbabe-devcontainer.Dockerfile` is the whole build environment: a pinned
+devkitARM plus makerom and bannertool, built from pinned sources. CI builds
+inside it and so can you, which means the binary you get locally is the binary
+CI produces:
+
+```sh
+bash docker/build-image.sh --pull      # ghcr.io/<owner>/gbabe-devcontainer:<hash>
+docker run --rm -v "$PWD:/workspace" -w /workspace \
+  "$(bash docker/build-image.sh)" bash docker/ci-build.sh
+```
+
+`docker/ci-build.sh` runs the whole pipeline — `.3dsx`, `.cia`, then the PC
+harness, the dmg-acid2 render check and the UI previews — so one command tells
+you whether a change is good. The image is tagged with a hash of its Dockerfile,
+so changing the Dockerfile cannot silently reuse an old image.
+
+VS Code / GitHub Codespaces: `.devcontainer/devcontainer.json` uses the same
+Dockerfile, so "Reopen in container" gives you `make` and the packaging tools
+ready to go.
 
 That produces `gbabe.3dsx` (and `gbabe.smdh`). Copy `gbabe.3dsx` to
 `sdmc:/3ds/gbabe.3dsx` and launch it from the Homebrew Launcher.
@@ -110,30 +134,39 @@ is not addressable as `steps.plan.outputs.3dsx` (GitHub's expression grammar
 rejects property names starting with a digit) and has to be called something
 like `want_3dsx`.
 
-Two more that only show up on the runner, both now handled explicitly: the
-`devkitpro/devkitarm` container's default `run:` shell is **dash** (`bash` is
-not on `PATH` for `run:` steps either, so `shell: bash` is not a way out), which
-is why every step in that job is plain POSIX `sh`; and the container's glibc is
-older than the one the published `makerom`/`bannertool` binaries are linked
-against, so those are compiled from source instead of downloaded.
-
-The workflow runs in the official `devkitpro/devkitarm` container and builds
-makerom (v0.19.0) and bannertool (v1.2.3) from source with
-`.github/scripts/install-3ds-packaging-tools.sh`, which you can also run locally
-to set up the two packaging tools:
+One more that only shows up on the runner: the container's glibc is older than
+the one the published `makerom`/`bannertool` binaries are linked against (they
+are built on Ubuntu 24.04, `devkitpro/devkitarm` is Debian), so those are
+compiled from source instead of downloaded — otherwise the build dies at the
+last step with `version `GLIBC_2.3x' not found`.
+`.github/scripts/install-3ds-packaging-tools.sh` does that, at pinned tags; it
+also works on a normal machine:
 
 ```sh
 sudo bash .github/scripts/install-3ds-packaging-tools.sh
 ```
 
-### The file browser
+The 3DS job itself runs in the build image above (`docker run`), so nothing in
+it depends on the runner's shell or libraries. If the published image is missing
+or broken it builds the image; if that fails too it falls back to the stock
+`devkitpro/devkitarm` image, and `docker/ci-build.sh` installs the packaging
+tools itself.
+
+### The bottom screen
+
+The browser, the pause menu and the status readout are drawn by GBabe itself
+into a 320x240 canvas (`source/ui_gfx.c` for the rasteriser, `ui_screens.c` for
+the layouts, `ui_font.c` for the anti-aliased text) and pushed to the screen
+with a single framebuffer write. libctru's text console is not used at all; see
+[docs/PORT-NOTES.md](docs/PORT-NOTES.md) for why that mattered more than
+anything else on an Old 3DS.
 
 The browser opens in the folder of the last ROM you played, takes D-pad/Circle
-Pad to move, `L`/`R` to jump a page and `A`/`B` to go in and back; `START`
-quits. It only shows folders and `.gb`/`.gbc`/`.sgb`/`.dmg` files, and it scans
-a folder when you enter it rather than on every key press — on a card with a lot
-of files that difference is the difference between instant and a second per
-tap.
+Pad to move, `L`/`R` to jump a page — or just tap a ROM twice. `B` goes up a
+folder (so does tapping the path bar), `START` quits. It only shows folders and
+`.gb`/`.gbc`/`.sgb`/`.dmg` files, and it scans a folder when you enter it rather
+than on every key press — on a card with a lot of files that difference is the
+difference between instant and a second per tap.
 
 ### Expectations on hardware
 
@@ -142,13 +175,14 @@ the comfortable case; most CGB titles should hold full speed with the default
 "fit height" scaler, and the menu has a frame-skip toggle for the ones that
 don't.
 
-If a game *is* too slow, the bottom screen tells you why — it prints a
+If a game *is* too slow, the bottom screen tells you why — it redraws a
 per-frame breakdown once a second:
 
 ```
-                               <- fps, and the wall time per frame
-fps 58.9  (17 ms)
-core 9.8 + blit 1.6 + wait 5.1 ms
+59.7 fps            16.8 ms/frame          <- fps, and the wall time per frame
+core #########.....  blit  wait            <- how the 16.7 ms budget is spent
+core 11.4   blit 1.9
+wait  3.5   frame 16.8
 ```
 
 * a large **core** figure is the interpreter: nothing else is competing for
@@ -203,9 +237,11 @@ In game:
 | Touch the bottom screen | open the menu |
 | L + R | open the menu (alternative) |
 
-In the menu: D-Pad to move, L/R or Left/Right to change a value, A to select,
-B to resume. The menu has palette, scaling, frame skip, sound, status line,
-reset, "load another ROM" and "quit".
+In the menu: D-Pad to move, Left/Right to change a value, A to select, B to
+resume, and L/R (or a tap on the tab) to switch between the *Game* and
+*Settings* tabs. The menu has palette, scaling, frame skip, sound, the status
+readout, reset, "load another ROM" and "quit". Everything in it is also
+reachable with the stylus: tap a row to select it, tap it again to activate it.
 
 ---
 
@@ -232,11 +268,16 @@ source/emu.c      Walnut-CGB glue: ROM/save RAM callbacks, save files, boot ROM
 source/video.c    RGB565 scanline blit into the rotated 3DS framebuffer
 source/audio.c    minigb_apu -> software FIFO -> CSND blocks
 source/palette.c  DMG palettes, including Game Boy Color "auto" colouring
-source/ui.c       ROM browser, in-game menu, status readout
+source/ui.c       ROM browser, in-game menu, status readout (state + input)
+source/ui_screens.c  what every screen looks like
+source/ui_gfx.c   software rasteriser + the framebuffer write
+source/ui_font.c  generated 4-bit glyph atlases (tools/make-font.py)
 source/config.c   key=value settings on the SD card
 resources/        CIA spec (gbabe.rsf) and banner, generated by tools/make-artwork.py
+docker/           build image used by CI and the devcontainer, + ci-build.sh
 third_party/      Walnut-CGB (MIT) and minigb_apu (MIT), vendored unmodified
 tools/host/       PC harness: builds and runs the front-end without a 3DS
+tools/uipreview/  renders every UI screen to an image, on the PC
 ```
 
 Design notes, the reasoning behind the CSND choice, and the measurements taken
@@ -254,6 +295,23 @@ It substitutes `tools/host/3ds.h` for libctru (same prototypes, no behaviour),
 runs the real `emu.c`/`video.c`/`palette.c` and dumps the top screen as a PPM —
 handy for checking a rendering or palette change without a console.
 
+### UI previews
+
+The bottom screen can be rendered the same way — same `ui_gfx.c`, same
+`ui_screens.c`, through the same rotated framebuffer:
+
+```sh
+make -C tools/uipreview run          # writes tools/uipreview/out/*.ppm
+```
+
+CI runs this on every push and attaches the PNGs as the `ui-preview` artifact,
+so a layout change can be checked without a 3DS. The font atlases are generated
+the same way:
+
+```sh
+python3 tools/make-font.py /usr/share/fonts/truetype/dejavu source/ui_font.c
+```
+
 ---
 
 ## Credits and licences
@@ -265,6 +323,12 @@ handy for checking a rendering or palette change without a console.
 * **[minigb_apu](https://github.com/deltabeard/Peanut-GB)** by Alex Baines and
   Mahyar Koshkouei, MIT — the audio processing unit emulation.
   Vendored unmodified in `third_party/minigb_apu/`.
+* **DejaVu Sans** (Bitstream Vera / DejaVu licence, see
+  `third_party/fonts/DejaVu-LICENSE.txt`) — the UI text. Only bitmaps baked by
+  `tools/make-font.py` are distributed, in `source/ui_font.c`.
+* The look of the bottom screen — dark panels, one accent colour, value pills,
+  a footer of key hints — follows **gpSP 3D** by bheppe (GPLv2). No code was
+  taken from it; the screens here are written from scratch for GBabe.
 * Everything else in this repository is MIT licensed, see [LICENSE](LICENSE).
 
 Neither upstream project endorses this port; bugs in the front-end are mine,
