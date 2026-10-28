@@ -19,6 +19,7 @@
 #include "emu.h"
 #include "video.h"
 #include "audio.h"
+#include "log.h"
 #include "palette.h"
 
 /* The core wants these two before it is included. */
@@ -164,6 +165,9 @@ static void gb_error_cb(struct gb_s *g, const enum gb_error_e err,
 	snprintf(gb_error_text, sizeof gb_error_text,
 		 "Core error %d at 0x%04X", (int)err, (unsigned)addr);
 	gb_error_pending = true;
+
+	/* The log gets it even if the user dismisses the message on screen. */
+	log_line("core: %s", gb_error_text);
 }
 
 /* ------------------------------------------------------------------------- */

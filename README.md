@@ -175,6 +175,43 @@ folder (so does tapping the path bar), `START` quits. It only shows folders and
 than on every key press — on a card with a lot of files that difference is the
 difference between instant and a second per tap.
 
+### The debug log
+
+Reading numbers off a 3-inch screen is not how anyone should report a bug, so
+GBabe writes a plain text log:
+
+```
+sdmc:/3ds/gbabe/debug.log
+```
+
+```
+# GBabe 0.1.0 debug log
+# os time: 133987887000000000
+[    0.412] GBabe 0.1.0, Old 3DS/2DS
+[    0.414] tick rate 268123480 Hz, scale=0 palette=0 frameskip=0
+[    0.501] audio: on, requested on
+[    3.882] rom: "POKEMON CRYSTAL" CGB mbc5 64 rom banks 4 ram banks
+[    3.884] rom path: sdmc:/roms/Pokemon Crystal.gbc
+[    4.901] perf fps=43.1 frame=23.2 worst=31.8 core=19.6 blit=1.7 wait=0.4 other=1.5 audio=18ms
+[    4.904] slow frame 31.8 ms: core 27.1 blit 1.9 audio 24 ms
+[   30.112] setting frameskip=1
+[   30.640] perf fps=59.4 frame=16.8 worst=19.1 core=19.9 blit=1.2 wait=0.0 other=0.7 audio=9ms
+```
+
+* one `perf` line a second: the same numbers the status readout shows, plus
+  `other` (the part of the frame nothing else accounts for);
+* `slow frame` whenever a presented frame takes over 20 ms, with the split and
+  the audio queue depth — a stutter is usually one of those two;
+* every settings change, every ROM loaded (title, CGB/DMG, MBC, bank counts,
+  full path), the core's own errors, and whether CSND came up;
+* it is buffered in RAM and written every few seconds, so logging costs
+  nothing per frame, and it stops at 384 KiB instead of filling the card;
+* on by default, and switchable in **Settings → Debug log** (or `log=0` in
+  `config.cfg`).
+
+If something is slow or wrong, that file plus a sentence about what you were
+doing is a far better bug report than a photo of the bottom screen.
+
 ### Expectations on hardware
 
 Written for the Old 3DS: one interpreter, no dynarec, no GPU. DMG titles are
@@ -235,6 +272,7 @@ Known speed levers, in order of effect:
 ```
 sdmc:/3ds/gbabe.3dsx          the app
 sdmc:/3ds/gbabe/config.cfg    settings (created on first run)
+sdmc:/3ds/gbabe/debug.log     diagnostic log (see above)
 sdmc:/3ds/gbabe/saves/        reserved for saved states
 sdmc:/3ds/gbabe/bootrom/
     dmg_boot.bin              optional, not included
@@ -283,6 +321,7 @@ palette=0      ; 0 = auto (per game), see source/palette.c for the table
 frameskip=0    ; 0 = off, 1 = present every other frame
 audio=1
 hud=0          ; 1 = status lines on the bottom screen while playing
+log=1          ; 1 = write sdmc:/3ds/gbabe/debug.log
 rom=sdmc:/roms/game.gbc
 ```
 
@@ -297,6 +336,7 @@ source/video.c    RGB565 scanline blit into the rotated 3DS framebuffer
 source/audio.c    minigb_apu -> software FIFO -> CSND blocks
 source/palette.c  DMG palettes, including Game Boy Color "auto" colouring
 source/ui.c       ROM browser, in-game menu, status readout (state + input)
+source/log.c      the diagnostic log on the SD card
 source/ui_screens.c  what every screen looks like
 source/ui_gfx.c   software rasteriser + the framebuffer write
 source/ui_font.c  generated 4-bit glyph atlases (tools/make-font.py)
@@ -315,7 +355,9 @@ while validating the port are in [docs/PORT-NOTES.md](docs/PORT-NOTES.md).
 
 ```sh
 make -C tools/host            # builds ./gbabe-host
-make -C tools/host check      # type-checks main.c and ui.c too
+make -C tools/host check      # type-checks main.c too
+make -C tools/host logtest    # checks the debug log's format
+make -C tools/host bench ROM=game.gb   # per-frame cost of core and blit
 ./tools/host/gbabe-host game.gb 300 out.ppm 0
 ```
 

@@ -28,6 +28,7 @@
 
 #include "audio.h"
 #include "emu.h"
+#include "log.h"
 #include "palette.h"
 #include "ui_gfx.h"
 #include "ui_screens.h"
@@ -372,6 +373,7 @@ enum
 	ACT_SKIP,
 	ACT_SOUND,
 	ACT_HUD,
+	ACT_LOG,
 };
 
 static const ui_row game_rows[] = {
@@ -388,13 +390,14 @@ static const ui_row settings_rows[] = {
 	{ "Frameskip", NULL, UI_ROW_CHOICE },
 	{ "Sound", NULL, UI_ROW_TOGGLE },
 	{ "Status on screen", NULL, UI_ROW_TOGGLE },
+	{ "Debug log", NULL, UI_ROW_TOGGLE },
 };
 #define SETTINGS_ROWS ((int)(sizeof settings_rows / sizeof settings_rows[0]))
 
 static const int game_actions[] = { ACT_RESUME, ACT_RESET, ACT_LOAD,
 				    ACT_QUIT };
 static const int settings_actions[] = { ACT_PALETTE, ACT_VIDEO, ACT_SKIP,
-					ACT_SOUND, ACT_HUD };
+					ACT_SOUND, ACT_HUD, ACT_LOG };
 
 static const char *const menu_tabs[] = { "Game", "Settings" };
 #define MENU_TABS ((int)(sizeof menu_tabs / sizeof menu_tabs[0]))
@@ -418,6 +421,7 @@ static const char *menu_note(int tab, int sel)
 	case ACT_VIDEO: return "How the 160x144 screen is scaled up.";
 	case ACT_SKIP: return "Fold an occasional frame when running late.";
 	case ACT_SOUND: return "Turn the emulated audio output on or off.";
+	case ACT_LOG: return "Writes sdmc:/3ds/gbabe/debug.log.";
 	default: return "The status readout on this screen.";
 	}
 }
@@ -442,6 +446,7 @@ static void draw_menu(int tab, int sel)
 		rows[2].value = frameskip_label(g_cfg.frameskip);
 		rows[3].value = g_cfg.audio_on ? "on" : "off";
 		rows[4].value = g_cfg.show_hud ? "on" : "off";
+		rows[5].value = g_cfg.debug_log ? "on" : "off";
 	}
 
 	ui_menu m = {
@@ -508,6 +513,8 @@ static bool run_action(int act, int delta, bool *close)
 		palette_set((palette_get() + delta + palette_count()) %
 			    palette_count());
 		g_cfg.palette = palette_get();
+		log_line("setting palette=%d (%s)", g_cfg.palette,
+			 palette_name(palette_get()));
 		config_save();
 		return true;
 
@@ -515,22 +522,36 @@ static bool run_action(int act, int delta, bool *close)
 		delta = (delta == 0) ? 1 : delta;
 		g_cfg.scale = (g_cfg.scale + delta + SCALE_COUNT) % SCALE_COUNT;
 		video_set_scale(g_cfg.scale);
+		log_line("setting scale=%d", g_cfg.scale);
 		config_save();
 		return true;
 
 	case ACT_SKIP:
 		g_cfg.frameskip = (g_cfg.frameskip + 1) % 2;
+		log_line("setting frameskip=%d", g_cfg.frameskip);
 		config_save();
 		return true;
 
 	case ACT_SOUND:
 		g_cfg.audio_on = !g_cfg.audio_on;
 		audio_set_enabled(g_cfg.audio_on);
+		log_line("setting sound=%d", g_cfg.audio_on);
 		config_save();
 		return true;
 
 	case ACT_HUD:
 		g_cfg.show_hud = !g_cfg.show_hud;
+		log_line("setting hud=%d", g_cfg.show_hud);
+		config_save();
+		return true;
+
+	case ACT_LOG:
+		g_cfg.debug_log = !g_cfg.debug_log;
+		/* Turning it on has to reopen the file, which needs the path. */
+		if (g_cfg.debug_log)
+			log_init(GBABE_LOG_PATH, true);
+		else
+			log_set_enabled(false);
 		config_save();
 		return true;
 
@@ -794,6 +815,16 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 wait_ticks,
 	g_perf.wait_ms = (float)((double)hud_sum_wait * ticks_to_ms / n);
 	g_perf.frame_ms = (float)((double)hud_sum_frame * ticks_to_ms / n);
 	g_perf.worst_ms = (float)((double)hud_worst * ticks_to_ms);
+
+	/* The same numbers the status readout shows, in the log: this is the
+	 * measurement a slow-console report needs, and a screenshot of the bottom
+	 * screen is a lot to ask of someone. */
+	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
+		 "wait=%.1f other=%.1f audio=%ums", g_perf.fps, g_perf.frame_ms,
+		 g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms, g_perf.wait_ms,
+		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
+				    g_perf.wait_ms),
+		 audio_queue_ms());
 
 	hud_frames = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_wait = hud_sum_frame = 0;

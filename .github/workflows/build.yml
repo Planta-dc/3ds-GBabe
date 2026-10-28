@@ -63,6 +63,9 @@ jobs:
       - name: Per-frame cost (host benchmark, informational)
         run: make -C tools/host bench ROM=test/dmg-acid2.gb FRAMES=200
 
+      - name: Debug log format
+        run: make -C tools/host logtest
+
       - name: Version numbers agree
         run: sh .github/scripts/check-version.sh
 

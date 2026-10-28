@@ -237,11 +237,11 @@ int scr_browser_hit(int y, int top, int n)
 /* Pause menu                                                                */
 /* ------------------------------------------------------------------------- */
 
-#define TAB_Y   36
+#define TAB_Y   34
 #define TAB_H   20
-#define ROW_Y   64
-#define ROW_PITCH 22
-#define ROW_H   19
+#define ROW_Y   60
+#define ROW_PITCH 20
+#define ROW_H   18
 
 /* Only this many tabs / rows fit on the screen; a larger count would walk off
  * the caller's array and draw over the footer. */
@@ -363,12 +363,14 @@ void scr_menu(const ui_menu *m)
 		}
 	}
 
-	if (m->note != NULL && m->note[0] != '\0')
-	{
-		const int note_y = ROW_Y + n_rows * ROW_PITCH + 5;
+	/* The note goes right under the rows, and only if it fits above the
+	 * footer: with a full tab there is no room, and one line of help is not
+	 * worth pushing the key hints off the screen. */
+	const int note_y = ROW_Y + n_rows * ROW_PITCH + 3;
+
+	if (m->note != NULL && m->note[0] != '\0' && note_y <= 201)
 		ui_text(&ui_font_small, MARGIN, note_y, m->note, C_DIM,
 			CONTENT_W);
-	}
 
 	const char *hints[] = {
 		"D-Pad move   Left/Right change   A select",

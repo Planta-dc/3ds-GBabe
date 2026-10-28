@@ -25,6 +25,8 @@
 
 #include <3ds/allocator/linear.h>
 
+#include "log.h"
+
 /* minigb_apu needs to know the sample format at compile time. */
 #ifndef MINIGB_APU_AUDIO_FORMAT_S16SYS
 #define MINIGB_APU_AUDIO_FORMAT_S16SYS
@@ -159,6 +161,7 @@ static void pump(void)
 				  BLOCK_BYTES)))
 	{
 		/* Channel refused (another app owns it?): go quiet for good. */
+		log_line("audio: channel %d refused, running silent", CHANNEL);
 		csnd_ok = false;
 		return;
 	}
@@ -197,8 +200,11 @@ bool audio_init(void)
 	minigb_apu_audio_init(&apu);
 
 	/* Sound is a nice-to-have: if CSND will not start, keep emulating. */
-	if (R_FAILED(csndInit()))
+	Result rc = csndInit();
+	if (R_FAILED(rc))
 	{
+		log_line("audio: csndInit failed (0x%08lX), running silent",
+			 (unsigned long)rc);
 		csnd_ok = false;
 		return false;
 	}

@@ -21,6 +21,7 @@
 #define GBABE_SAVE_DIR      GBABE_ROOT "/saves"
 #define GBABE_STATE_DIR     GBABE_ROOT "/states"
 #define GBABE_LAST_ROM_PATH GBABE_ROOT "/last-rom"
+#define GBABE_LOG_PATH      GBABE_ROOT "/debug.log"
 
 /* ------------------------------------------------------------------------- */
 /* Screen / scaling                                                          */
@@ -65,6 +66,7 @@ typedef struct
 	int  frameskip;    /* 0 = off (default), 1 = skip when running late */
 	bool audio_on;
 	bool show_hud;     /* draw a status line on the bottom screen */
+	bool debug_log;    /* write sdmc:/3ds/gbabe/debug.log       */
 	bool fast_forward; /* session only, not persisted */
 	char rom_path[512];
 } gbabe_config;

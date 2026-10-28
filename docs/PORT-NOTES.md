@@ -285,7 +285,34 @@ for the same screen printed through the text console.
 
 ---
 
-## 6. If you want to do the same port from scratch
+## 6. Debugging a console you cannot attach to
+
+Everything in this port was written without a 3DS in hand, so the question
+"why is it slow on *your* console" has to be answerable by the person holding
+it. Two things make that possible:
+
+* **the status readout** (§5) names the bottleneck in words, so a screenshot is
+  enough to triage;
+* **`sdmc:/3ds/gbabe/debug.log`** (`source/log.c`) records what a screenshot
+  cannot: one line a second with the whole frame split, a line for every frame
+  over 20 ms with the audio queue depth, every settings change, every ROM
+  loaded with its header details and path, CSND start-up failures and the
+  emulator core's own errors.
+
+The log is written to be free at runtime: lines are formatted into a 2 KiB RAM
+buffer and pushed to the card only every few seconds (or immediately for
+events, so a crash does not lose them), it stops at 384 KiB, and it writes
+nothing at all once switched off. `make -C tools/host logtest` checks the
+format, because the file is the interface: a report is read from it by hand.
+
+That is also why the numbers it prints are defined precisely. `core` is the
+emulator core (CPU + PPU + APU), `blit` is scaling plus cache flush plus
+present, `wait` is pacing, and `other` is the rest of the loop - which is
+where a blocking service call would show up. A frame that is slow with a large
+`other` is the port's fault; a large `core` is the ARM11 and needs a dynarec,
+not tuning.
+
+## 7. If you want to do the same port from scratch
 
 The minimal recipe, in order:
 
@@ -299,3 +326,5 @@ The minimal recipe, in order:
 7. Pace with `svcGetSystemTick()` at 59.7275 Hz instead of vblank.
 8. Draw the UI yourself (§5). A text console is fine for a splash screen and
    too slow for anything a user navigates on an Old 3DS.
+9. Log to a file (§6). You will not have the console, and neither will whoever
+   reports the first bug.

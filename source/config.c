@@ -29,6 +29,8 @@ void config_defaults(void)
 	g_cfg.frameskip = 0;    /* off */
 	g_cfg.audio_on = true;
 	g_cfg.show_hud = true;
+	g_cfg.debug_log = true; /* on by default: it is the only way to see why a
+				  build is slow on someone else's console */
 	g_cfg.fast_forward = false;
 	g_cfg.rom_path[0] = '\0';
 }
@@ -66,6 +68,8 @@ void config_load(void)
 			g_cfg.audio_on = atoi(val) != 0;
 		else if (!strcmp(key, "hud"))
 			g_cfg.show_hud = atoi(val) != 0;
+		else if (!strcmp(key, "log"))
+			g_cfg.debug_log = atoi(val) != 0;
 		else if (!strcmp(key, "rom"))
 		{
 			strncpy(g_cfg.rom_path, val, sizeof g_cfg.rom_path - 1);
@@ -93,6 +97,7 @@ void config_save(void)
 	fprintf(f, "frameskip=%d\n", g_cfg.frameskip);
 	fprintf(f, "audio=%d\n", g_cfg.audio_on ? 1 : 0);
 	fprintf(f, "hud=%d\n", g_cfg.show_hud ? 1 : 0);
+	fprintf(f, "log=%d\n", g_cfg.debug_log ? 1 : 0);
 	fprintf(f, "rom=%s\n", g_cfg.rom_path);
 	fclose(f);
 }

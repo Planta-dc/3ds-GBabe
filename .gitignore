@@ -11,6 +11,8 @@ build/
 # Host harness
 tools/host/gbabe-host
 tools/host/gbabe-bench
+tools/host/gbabe-logtest
+tools/host/logtest.log
 tools/host/*.ppm
 tools/host/*.png
 

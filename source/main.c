@@ -19,6 +19,7 @@
 #include "audio.h"
 #include "emu.h"
 #include "gb3ds.h"
+#include "log.h"
 #include "palette.h"
 #include "ui.h"
 #include "video.h"
@@ -60,13 +61,27 @@ static void platform_init(void)
 	palette_set(g_cfg.palette);
 	video_set_scale(g_cfg.scale);
 
+	/* Everything below is for the log: this is the information a bug report
+	 * needs and nobody can read off the console's own menus. */
+	log_init(GBABE_LOG_PATH, g_cfg.debug_log);
+	log_line("GBabe %s, %s", GBABE_VERSION,
+		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS");
+	log_line("tick rate %.0f Hz, scale=%d palette=%d frameskip=%d",
+		 SYSCLOCK_ARM11, g_cfg.scale, g_cfg.palette, g_cfg.frameskip);
+
 	if (!audio_init())
 		g_cfg.audio_on = false;
 	audio_set_enabled(g_cfg.audio_on);
+	log_line("audio: %s, requested %s", audio_enabled() ? "on" : "off",
+		 g_cfg.audio_on ? "on" : "off");
+	log_flush();
 }
 
 static void platform_exit(void)
 {
+	log_line("exiting");
+	log_shutdown();
+
 	emu_flush_save();
 	config_save();
 	audio_exit();
@@ -194,6 +209,13 @@ int main(int argc, char **argv)
 			config_save();
 			next_frame_tick = 0;
 			last_frame_end = 0;
+
+			const emu_info *ri = emu_get_info();
+			log_line("rom: \"%s\" %s mbc%d %u rom banks %u ram banks",
+				 ri->title, ri->cgb ? "CGB" : "DMG", ri->mbc,
+				 ri->rom_banks, ri->ram_banks);
+			log_line("rom path: %s", path);
+			log_flush();
 		}
 
 		/* ---- play ---------------------------------------------------- */
@@ -285,7 +307,26 @@ int main(int argc, char **argv)
 				last_frame_end = after_blit;
 			}
 
+			/* A frame that missed its deadline is what the player actually
+			 * feels, and an average hides it. Logged at most once a second,
+			 * with the split, so a stutter can be traced to one part. */
+			static u64 last_slow_log;
 			const u64 now = svcGetSystemTick();
+			const double frame_ms = (double)(after_blit - frame_start) *
+						1000.0 / SYSCLOCK_ARM11;
+			if (draw && frame_ms > 20.0 &&
+			    now - last_slow_log > SYSCLOCK_ARM11)
+			{
+				last_slow_log = now;
+				log_line("slow frame %.1f ms: core %.1f blit %.1f "
+					 "audio %u ms", frame_ms,
+					 (double)(after_core - frame_start) * 1000.0 /
+						 SYSCLOCK_ARM11,
+					 (double)(after_blit - after_core) * 1000.0 /
+						 SYSCLOCK_ARM11,
+					 audio_queue_ms());
+			}
+
 			if (now - autosave_tick > AUTOSAVE_TICKS)
 			{
 				emu_flush_save();

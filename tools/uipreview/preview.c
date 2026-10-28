@@ -86,6 +86,7 @@ static void show_menu(const char *dir)
 		{ "Frameskip", "off", UI_ROW_CHOICE },
 		{ "Sound", "on", UI_ROW_TOGGLE },
 		{ "Status on screen", "off", UI_ROW_TOGGLE },
+		{ "Debug log", "on", UI_ROW_TOGGLE },
 	};
 
 	ui_menu m = {
@@ -95,9 +96,9 @@ static void show_menu(const char *dir)
 		.n_tabs = 2,
 		.tab = 1,
 		.rows = settings,
-		.n_rows = 5,
+		.n_rows = 6,
 		.sel = 1,
-		.note = "D-Pad / Circle Pad, then A to change.",
+		.note = NULL, /* the Settings tab is full: no room for a note */
 	};
 	scr_menu(&m);
 	emit(dir, "menu-settings");

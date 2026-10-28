@@ -4,6 +4,7 @@
 #   make check      compile main.c as well (type check)
 #   make run ROM=game.gb FRAMES=300 OUT=shot.ppm
 #   make bench ROM=game.gb     per-frame cost of the core and the blit
+#   make logtest               check the debug log's format
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -16,6 +17,7 @@ INCLUDE := -I. -I$(ROOT)/include -I$(ROOT)/third_party/walnut \
 
 SRC     := $(ROOT)/source/emu.c $(ROOT)/source/video.c $(ROOT)/source/audio.c \
            $(ROOT)/source/palette.c $(ROOT)/source/config.c \
+           $(ROOT)/source/log.c \
            $(ROOT)/source/ui.c $(ROOT)/source/ui_gfx.c \
            $(ROOT)/source/ui_screens.c $(ROOT)/source/ui_font.c \
            $(ROOT)/third_party/minigb_apu/minigb_apu.c \
@@ -54,7 +56,14 @@ bench: $(BENCH_SRC) bench.c
 	esac; \
 	./gbabe-bench "$$rom" $(or $(FRAMES),600)
 
-clean:
-	rm -f $(BIN) gbabe-bench *.ppm
+# The log is what a bug report is read from, so its shape is checked rather
+# than assumed: timestamps, one line per event, truncation, off switch.
+logtest: $(ROOT)/source/log.c logtest.c
+	$(CC) $(CFLAGS) $(DEFS) $(INCLUDE) -o gbabe-logtest $(ROOT)/source/log.c \
+		stub.c logtest.c -lm
+	./gbabe-logtest
 
-.PHONY: all check run bench clean
+clean:
+	rm -f $(BIN) gbabe-bench gbabe-logtest *.ppm
+
+.PHONY: all check run bench logtest clean

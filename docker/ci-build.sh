@@ -46,6 +46,7 @@ fi
 echo "=== host build + render check ==="
 make -C tools/host -j"$jobs"
 make -C tools/host check
+make -C tools/host logtest
 tools/host/gbabe-host test/dmg-acid2.gb 300 "$ROOT/build/acid2.ppm" 0
 test -s "$ROOT/build/acid2.ppm"
 
