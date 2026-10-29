@@ -43,6 +43,14 @@ bool ui_in_game_menu(void);
  * time asleep. `late`/`resyncs` belong to the caller, which resets them. */
 void ui_note_frame(const gbabe_frame_cost *cost);
 
+/* Write the whole session as one line to the debug log - frames, average and
+ * worst whole-second frame rate, average and worst frame time, average core
+ * time, average CGB palette conversions, and how many frames started late.
+ * Called when a game is unloaded and on quit; it resets the totals, so each
+ * session gets its own line. This is what a "how did it run?" report should
+ * quote. */
+void ui_log_session(void);
+
 /* Do the once-a-second work that is too expensive for a frame boundary: redraw
  * the bottom-screen status readout if it is due, and spend one band of its
  * present. Call it in the idle time between frames, where the loop would

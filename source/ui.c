@@ -57,6 +57,19 @@ static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
 static u64      hud_sum_emu, hud_sum_audio, hud_sum_push, hud_sum_draw;
 static u64      hud_sum_palette;
 static u64      hud_worst; /* slowest single frame in the window */
+
+/* The whole session, accumulated one window at a time. Reading a log for
+ * "how did that Game Boy Color game do" should not mean scrolling a second at
+ * a time and averaging in your head, so the totals are kept and written once,
+ * as one line, when the game goes away. */
+static unsigned sess_windows;
+static unsigned sess_frames;
+static unsigned sess_late;
+static double   sess_fps_sum;
+static double   sess_fps_min;   /* the worst whole-second average */
+static u64      sess_frame_ticks, sess_core_ticks, sess_emu_ticks;
+static u64      sess_palette;
+static u64      sess_worst;     /* slowest frame of the session, in ticks */
 static unsigned hud_late;    /* frames that started after their slot      */
 static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
 
@@ -884,6 +897,19 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		 audio_queue_ms(), g_perf.palette, sync_free, sync_late,
 		 hud_late, hud_resyncs);
 
+	sess_windows++;
+	sess_frames += hud_frames;
+	sess_late += hud_late;
+	sess_fps_sum += hud_fps;
+	if (sess_windows == 1 || hud_fps < sess_fps_min)
+		sess_fps_min = hud_fps;
+	sess_frame_ticks += hud_sum_frame;
+	sess_core_ticks += hud_sum_core;
+	sess_emu_ticks += hud_sum_emu;
+	sess_palette += hud_sum_palette;
+	if (hud_worst > sess_worst)
+		sess_worst = hud_worst;
+
 	hud_frames = 0;
 	hud_late = hud_resyncs = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
@@ -902,6 +928,42 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	 * wait. */
 	if (g_cfg.show_hud && emu_loaded())
 		hud_due = true;
+}
+
+/* One line for the whole session, written when the game is unloaded or the app
+ * is quit: the answer to "how did it run" without reading a second at a time.
+ *
+ * `fps min` is the worst whole-second average, not the worst frame - a single
+ * 20 ms frame in a minute of perfect emulation is not a problem, and a minute
+ * of 57 fps is. `late` is frames that started after their own slot, which is
+ * the number to read for "did it ever miss", as opposed to how far off it was.
+ * `pal` is CGB palette conversions per frame: ~0 on a monochrome game, and the
+ * thing that tells a colour-correction cost from a core cost (see
+ * docs/PORT-NOTES.md 21). */
+void ui_log_session(void)
+{
+	if (sess_windows == 0)
+		return;
+
+	const double n = sess_frames ? (double)sess_frames : 1.0;
+	const double ticks_to_ms = 1000.0 / SYSCLOCK_ARM11;
+
+	log_line("session: %u s, %u frames, fps avg %.1f min %.1f, "
+		 "frame avg %.1f ms worst %.1f, core avg %.1f (emu %.1f), "
+		 "pal avg %u, late %u (%.1f %%)",
+		 sess_windows, sess_frames,
+		 sess_fps_sum / (double)sess_windows, sess_fps_min,
+		 (double)sess_frame_ticks * ticks_to_ms / n,
+		 (double)sess_worst * ticks_to_ms,
+		 (double)sess_core_ticks * ticks_to_ms / n,
+		 (double)sess_emu_ticks * ticks_to_ms / n,
+		 (unsigned)((double)sess_palette / n + 0.5),
+		 sess_late, (double)sess_late * 100.0 / n);
+
+	sess_windows = sess_frames = sess_late = 0;
+	sess_fps_sum = sess_fps_min = 0.0;
+	sess_frame_ticks = sess_core_ticks = sess_emu_ticks = 0;
+	sess_palette = sess_worst = 0;
 }
 
 /* Everything worth doing exactly once a second, done where it is free.

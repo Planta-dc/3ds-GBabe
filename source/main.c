@@ -470,9 +470,15 @@ int main(int argc, char **argv)
 					 audio_queue_ms());
 			}
 		}
+
+		/* The game has been unloaded - quit to the browser, or the menu
+		 * reset it: either way this session is over, and its one-line
+		 * summary belongs in the log before the next one starts. */
+		ui_log_session();
 	}
 
 done:
+	ui_log_session();
 	emu_unload();
 	platform_exit();
 	return 0;
