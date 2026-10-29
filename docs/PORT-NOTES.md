@@ -1540,3 +1540,85 @@ audio: ... underruns 0, resyncs 0, dropped 0, queue 40 ms, level 1500/1536,
 `produced 1.000` and `rate 1.000` on a full-speed game is the target, and
 `produced 0.954` means 57 fps, measured from the sound rather than assumed from
 the frame.
+
+## 23. What the Croc 2 log says: the sound was doubled, not starved
+
+The first log from the version that was actually on the console - Game Boy
+Color, Croc 2, 210 s, `debug-2.log` - and it settles two things and finds one
+more fault.
+
+**The performance is real.** 143 one-second windows, three of them stalls
+(browser, save):
+
+```
+fps    median 59.80   min 52.9 (steady)   max 61.0
+frame  median 16.70   core median 9.50 = emu 6.00 + dec 1.80 + push 0.70 + draw 1.00
+blit   median  6.80   of which sync (waiting for the panel) 5.60
+```
+
+`core` is 65 % emulation and 1.8 ms of decimation, and the frame sits inside
+the 16.74 ms a Game Boy frame has. That is full speed, for a Color game, on an
+Old 3DS - which is what the report said, and the numbers agree.
+
+**Colour correction is not the Color cost.** `pal=` has median 0, maximum 58,
+and is non-zero in 36 seconds out of 143. Tens of conversions per frame, never
+thousands: the gamma round trip is a rounding error next to a 6.0 ms emulated
+frame, and a Color game is not paying for being Color here. `emu` at 6.0 ms is
+in fact *lower* than the 8.4 ms a monochrome game measured in the earlier log.
+The CGB question that §21 opened is answered, and the answer is "nothing to do".
+
+**The sound was doubled.** `margin 5.00 ms` - the ceiling - in every audio line
+from the fifth second to the end. The margin is how early a block is submitted,
+and CSND has no scheduled start: submitting a block early does not queue it, it
+*plays* it, on top of the block that is still running. Two adjacent blocks of the
+stream, mixed for 5 ms, 32 times a second, 16 % of every block. That is a comb
+filter at the block rate, and it is a steady harshness rather than a stutter -
+which is what "pretty bad" describes.
+
+The comment that put it there had the reasoning backwards, and it is worth
+quoting because it sounds sensible:
+
+> being a little early is deliberate, because a short overlap of the same audio
+> is far less audible than a gap
+
+It is not the same audio. It is the next block, so the overlap doubles the first
+5 ms of it against the last 5 ms of the one before. A gap is a click; this was a
+permanent filter.
+
+Why the margin reached its ceiling: the frame loop never idles. `wait=0.0` in the
+steady windows, because a frame's work (9.5 ms) plus the panel wait (5.6 ms) plus
+the once-a-second work fills all 16.7 ms; `pace_late` counts 53 of 60 frames per
+second as having started late. The scheduler only ran from inside the emulator -
+`audio_push_frames()` pumps it - so every block whose deadline fell inside the
+5.6 ms `gspWaitForVBlank()` in `video_begin_frame()`, or inside the log write,
+was submitted late. Late blocks grew `late_max`, `late_max` grew the margin, and
+the margin was paid for in doubled audio.
+
+Three changes, then:
+
+* **The panel wait pumps the sound.** It is spent polling `video_swap_pending()`
+  with `audio_pump()` every 0.2 ms, and the same pump brackets the log write.
+  The wait is still the wait; it is now also a place the sound can be fed.
+* **The margin ceiling is 2 ms, not 5.** It is not only a safety net - it is an
+  overlap budget, and 2 ms is 6 % of a block against 16 %. 1 ms was tried and is
+  too tight: at 95 % speed the rate control starts hunting (wobble 0.03 % to
+  3.9 % rms), because the margin is also the slack that lets a submission land
+  one poll late without becoming a hole.
+* **The seam is measured.** `audio:` now reports `holes` (blocks that started
+  after their turn: silence), the worst of them, and `overlap` (the mean amount
+  a block starts early: doubling). The old `late` counter measures the
+  *difference* between consecutive overshoots, which cancels itself out - a
+  block 8 ms late followed by one 8 ms early reads as two late blocks and is in
+  fact one hole. It is still printed, because it is what the previous logs were
+  read against, but it is not the number to look at.
+
+On the host, with a 6 ms panel stall per frame - the console's 5.6 ms - the pump
+turns 61 holes into 13, with the same audio and the same schedule. The overlap
+itself is the thing to watch in the next log: it should read about 1 ms where it
+was 5.
+
+One more, found while reading the accounting: `other` in the perf line was
+computed as `frame - (core + blit + post + wait + sync)` while `frame` already
+contained `sync` and `blit` contained it too, so it printed exactly `-sync` in
+every line of this log (`other=-6.9` next to `sync=6.3`). It is zero now when
+everything is accounted for, which makes it a check instead of noise.

@@ -48,6 +48,14 @@ typedef struct
 	unsigned resyncs;     /* stream dropped and restarted                 */
 	unsigned dropped;     /* samples discarded because the FIFO was full  */
 	unsigned late_blocks; /* blocks whose deadline had already passed     */
+	unsigned holes;       /* blocks that started after they were due, so  *
+	                       * the one before had run out: silence          */
+	int hole_ms;          /* total silence those holes left, in ms        */
+	int worst_hole_ms;    /* the worst single one                         */
+	int overlap_us;       /* mean amount a block starts early, in us - the *
+	                       * two blocks play on top of each other for that *
+	                       * long, which is a comb filter at the block    *
+	                       * rate, so it is worth keeping small           */
 	int margin_us;        /* submit margin currently in use               */
 	int worst_late_us;    /* worst lateness seen since audio_init()       */
 	unsigned queue_ms;    /* audio buffered ahead of the hardware         */

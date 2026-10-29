@@ -226,6 +226,108 @@ static int run(double speed, int seconds)
 	(void)queue_min;
 }
 
+/* The console's real trouble, isolated: after the frame's audio has been
+ * pushed, the frame loop blocks waiting for the panel to hand back a buffer -
+ * measured at 5.6 ms a frame in the console log - and it used to do that
+ * inside gspWaitForVBlank(), where nothing can feed the sound. Any block whose
+ * deadline fell inside that window was submitted late, by the wait minus the
+ * margin.
+ *
+ * `pump` says whether the stall calls audio_pump() while it waits, which is
+ * what main.c does now. Same work, same rate, same scheduling: the only
+ * difference is whether the sound gets fed while the picture is being handed
+ * over. */
+static int run_stall(int stall_ms, int pump)
+{
+	g_host_csnd_reset();
+	resamp_reset(&shaper);
+	owed_in = 0.0;
+
+	static s16 wave;
+	for (unsigned i = 0; i < sizeof in / sizeof in[0]; i += 2)
+	{
+		wave = (s16)(((i / 2) / 16 & 1) ? 4000 : -4000);
+		in[i] = wave;
+		in[i + 1] = wave;
+	}
+
+	if (!audio_init())
+		return 2;
+
+	/* The frame as the console actually spends it: ~9 ms of emulation, one
+	 * runFor() chunk at a time (each chunk pushes audio, and the push is
+	 * what pumps the scheduler), then ~7 ms waiting for the panel.
+	 *
+	 * 17 chunks a frame of 32 and 33 output frames is 548.6 - the same
+	 * fractional count the backend produces, because a flat 33 would have
+	 * the test feed the FIFO 4 % too slowly and that would be measured as
+	 * the fault rather than the stall. */
+	const u64 frame_ticks = (u64)(SYSCLOCK_ARM11 / FULL_FPS);
+	const unsigned frames = (unsigned)(FULL_FPS * 6.0);
+	const u64 stall_ticks = (u64)stall_ms * SYSCLOCK_ARM11 / 1000u;
+	const u64 chunk_ticks = SYSCLOCK_ARM11 / 2000u; /* 0.5 ms */
+
+	const u64 start = svcGetSystemTick();
+	u64 next = start;
+	const int chunks = 17;
+	double owed = 0.0;
+
+	for (unsigned f = 0; f < frames; f++)
+	{
+		const u64 frame_end = next + frame_ticks;
+
+		/* Emulation: spread the chunks over the frame's work, exactly
+		 * as runFor() does. */
+		for (int c = 0; c < chunks; c++)
+		{
+			const int32_t step = audio_rate_step();
+
+			resamp_set_step(&shaper, step);
+
+			owed += IN_PER_FRAME / chunks;
+			unsigned want = (unsigned)owed;
+			owed -= want;
+
+			const unsigned out = resamp_run(&shaper, in, want, played,
+							sizeof played /
+							(2 * sizeof played[0]));
+			if (out > 0)
+				audio_push_frames(played, out); /* pumps */
+
+			const u64 until = svcGetSystemTick() + chunk_ticks;
+			while ((s64)(until - svcGetSystemTick()) > 0)
+				svcSleepThread(100000);
+		}
+
+		/* The panel wait. Nothing else happens in here: no emulation,
+		 * no chunks - so nothing pumps the scheduler unless the wait
+		 * itself does. */
+		const u64 until = svcGetSystemTick() + stall_ticks;
+		while ((s64)(until - svcGetSystemTick()) > 0)
+		{
+			if (pump)
+				audio_pump();
+			svcSleepThread(100000);
+		}
+
+		next = frame_end;
+		while ((s64)(next - svcGetSystemTick()) > 0)
+			svcSleepThread(100000);
+	}
+
+	audio_stats st;
+	audio_get_stats(&st);
+	audio_exit();
+
+	printf("audiospeed panel %d ms, %-22s %4u blocks, %4u late, %4u holes "
+	       "(%6.1f ms of silence), %u underruns, overlap %d ms\n",
+	       stall_ms, pump ? "pumping while it waits" : "blocking (before):",
+	       st.blocks, st.late_blocks, st.holes, st.hole_ms / 1000.0,
+	       st.underruns, st.margin_us / 1000);
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc >= 2)
@@ -240,6 +342,10 @@ int main(int argc, char **argv)
 
 	for (unsigned i = 0; i < sizeof speeds / sizeof speeds[0]; i++)
 		bad |= run(speeds[i], 4);
+
+	/* The console's own stall, both ways round. */
+	run_stall(6, 0);
+	run_stall(6, 1);
 
 	return bad ? 1 : 0;
 }

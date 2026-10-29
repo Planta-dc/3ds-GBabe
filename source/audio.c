@@ -88,9 +88,26 @@
  * a hole every 31 ms is a buzz. So the margin is deliberately biased early and
  * grown to cover the worst wake-up seen recently, which is measured margin-free
  * from the interval between submissions. */
+/* The margin is not free, and the comment above is only half the story: CSND
+ * has no scheduled start, so submitting a block early does not queue it, it
+ * *plays it* - the two blocks are mixed for `margin` worth of audio. That is a
+ * comb filter at the block rate, and at the 5 ms this used to grow to it was
+ * 16 % of every block doubled, 32 times a second. The console log shows
+ * the margin pinned at exactly that ceiling for a whole session: every seam,
+ * every time.
+ *
+ * So the ceiling is 2 ms - 6 % of a block, against 16 % before. Being later
+ * than the margin is a hole instead, which is what the poll-and-pump in main.c's
+ * present exists to prevent: the block is submitted from inside the panel wait
+ * as well as from the emulator, so the deadline is hit within a poll (0.2 ms)
+ * rather than within a frame. 1 ms was tried and is too tight: at 95 % speed the
+ * stream cannot stay ahead and the rate control starts hunting (measured wobble
+ * went from 0.03 % to 3.9 % rms), so the margin is not only an overlap budget -
+ * it is the slack that lets a submission land after a poll without becoming a
+ * hole. */
 #define MARGIN_MIN      (SYSCLOCK_ARM11 / 10000) /* 0.1 ms */
-#define MARGIN_MAX      (SYSCLOCK_ARM11 / 200)   /* 5 ms   */
-#define MARGIN_BIAS     (SYSCLOCK_ARM11 / 2000)  /* 0.5 ms */
+#define MARGIN_MAX      (SYSCLOCK_ARM11 / 500)   /* 2 ms   */
+#define MARGIN_BIAS     (SYSCLOCK_ARM11 / 4000)  /* 0.25 ms */
 
 static s16 *fifo;          /* ring buffer, FIFO_SAMPLES stereo frames */
 static unsigned fifo_head, fifo_tail;
@@ -144,6 +161,11 @@ static unsigned stat_underruns;
 static unsigned stat_resyncs;
 static unsigned stat_dropped;
 static unsigned stat_late_blocks;
+static unsigned stat_holes;        /* blocks that started after their turn */
+static u64      stat_hole_ticks;   /* the silence they left, in total      */
+static u64      stat_worst_hole;   /* the worst of it                      */
+static unsigned stat_overlaps;     /* blocks that started before it        */
+static u64      stat_overlap_ticks;/* the doubling that cost              */
 static unsigned stat_stalled;      /* blocks over half a second late      */
 static s64      stat_worst_late;   /* ticks, negative = early */
 
@@ -367,6 +389,7 @@ void audio_pump(void)
 		{
 			stat_late_blocks++;
 
+
 			/* A gap longer than half a second is not a late block,
 			 * it is the application having been somewhere else (an
 			 * SD write, a menu, a stalled kernel thread) - and the
@@ -391,6 +414,37 @@ void audio_pump(void)
 
 	if (!scheduled)
 		next_start = now; /* starts as soon as it is given to CSND */
+	else
+	{
+		/* The seam, which is what the ear hears. `next_start` is when
+		 * this block should begin, i.e. when the one before it ends;
+		 * CSND has no scheduled start, so submitting before that
+		 * moment plays the two blocks on top of each other and
+		 * submitting after it leaves silence. Both are single figures
+		 * here rather than something to be inferred from `late`,
+		 * which is the *difference* between consecutive overshoots and
+		 * cancels itself out: a block 8 ms late followed by one 8 ms
+		 * early is one hole, not two late blocks.
+		 *
+		 * A centisecond either way is a stopwatch artefact (a stalled
+		 * kernel thread, the app being suspended), not a seam. */
+		const s64 seam = (s64)now - (s64)next_start;
+		if (seam > 0)
+		{
+			if ((u64)seam < SYSCLOCK_ARM11 / 100)
+			{
+				stat_holes++;
+				stat_hole_ticks += (u64)seam;
+				if ((u64)seam > stat_worst_hole)
+					stat_worst_hole = (u64)seam;
+			}
+		}
+		else if ((u64)-seam < SYSCLOCK_ARM11 / 100)
+		{
+			stat_overlaps++;
+			stat_overlap_ticks += (u64)-seam;
+		}
+	}
 
 	start_block();
 	last_submit = now;
@@ -437,6 +491,13 @@ bool audio_init(void)
 	cmd_ticks = late_max = margin = 0;
 	last_submit = 0;
 	have_last = false;
+	stat_blocks = stat_pairs = stat_underruns = 0;
+	stat_resyncs = stat_dropped = stat_late_blocks = 0;
+	stat_holes = stat_overlaps = 0;
+	stat_hole_ticks = stat_overlap_ticks = stat_worst_hole = 0;
+	stat_stalled = 0;
+	stat_worst_late = 0;
+
 	rate_start = 0;
 	rate_frames = 0;
 	rate_frac = 0;
@@ -665,6 +726,13 @@ void audio_get_stats(audio_stats *out)
 	out->resyncs = stat_resyncs;
 	out->dropped = stat_dropped;
 	out->late_blocks = stat_late_blocks;
+	out->holes = stat_holes;
+	out->hole_ms = (int)(stat_hole_ticks * 1000ull / (u64)SYSCLOCK_ARM11);
+	out->worst_hole_ms =
+		(int)(stat_worst_hole * 1000ull / (u64)SYSCLOCK_ARM11);
+	out->overlap_us = (int)(stat_overlap_ticks /
+				(stat_overlaps ? stat_overlaps : 1) *
+				1000000ull / (u64)SYSCLOCK_ARM11);
 	out->margin_us = (int)(margin * 1000000ull / (u64)SYSCLOCK_ARM11);
 	out->worst_late_us = (stat_worst_late == 0) ? 0 :
 		(int)(stat_worst_late * 1000000ll / (s64)SYSCLOCK_ARM11);
@@ -680,6 +748,7 @@ void audio_log_stats(void)
 {
 	static u64 last_log;
 	static unsigned last_blocks, last_underruns, last_resyncs, last_dropped;
+	static unsigned last_holes;
 
 	if (!csnd_ok)
 		return;
@@ -689,7 +758,7 @@ void audio_log_stats(void)
 		return;
 	if (last_log != 0 && stat_blocks == last_blocks &&
 	    stat_underruns == last_underruns && stat_resyncs == last_resyncs &&
-	    stat_dropped == last_dropped)
+	    stat_dropped == last_dropped && stat_holes == last_holes)
 		return; /* nothing happened */
 
 	last_log = now;
@@ -697,6 +766,7 @@ void audio_log_stats(void)
 	last_underruns = stat_underruns;
 	last_resyncs = stat_resyncs;
 	last_dropped = stat_dropped;
+	last_holes = stat_holes;
 
 	audio_stats st;
 	audio_get_stats(&st);
@@ -712,10 +782,13 @@ void audio_log_stats(void)
 	 * stretched to match. The two go together with `rate`: `rate` should
 	 * equal `produced`, and either one away from 1.000 on a full-speed game
 	 * is a measurement to disbelieve rather than a fault. */
-	log_line("audio: %u blocks, late %u (worst %.2f ms), stalled %u, "
+	log_line("audio: %u blocks, holes %u (worst %.2f ms), overlap %.2f ms, "
+		 "late %u (worst %.2f ms), stalled %u, "
 		 "underruns %u, resyncs %u, dropped %u, queue %u ms, "
 		 "level %d/%d, produced %.3f, margin %.2f ms, rate %u.%03u",
-		 st.blocks, st.late_blocks, st.worst_late_us / 1000.0,
+		 st.blocks, st.holes, st.worst_hole_ms / 1000.0,
+		 st.overlap_us / 1000.0,
+		 st.late_blocks, st.worst_late_us / 1000.0,
 		 stat_stalled, st.underruns, st.resyncs, st.dropped,
 		 st.queue_ms, st.fill_frames, st.fill_target,
 		 (double)st.rate_meas_q16 / RESAMP_UNITY,

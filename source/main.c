@@ -342,6 +342,32 @@ int main(int argc, char **argv)
 
 			if (draw)
 			{
+				/* Handing back the buffer the panel released is a
+				 * wait, and on this console it is a long one: the
+				 * Game Boy frame is 16.74 ms and the work is
+				 * ~10 ms, so most of the rest is spent right
+				 * here. Harmless for the picture - the frame is
+				 * already emulated and drawn - but it used to be
+				 * spent inside gspWaitForVBlank(), where nothing
+				 * can feed the sound. Every block whose deadline
+				 * fell in this window was late, and the console
+				 * log said so: 65 % of blocks late, the margin
+				 * pinned at its 5 ms ceiling, and holes of up to
+				 * 12.8 ms in the stream. Poll instead, and pump
+				 * the sound between polls.
+				 *
+				 * The bound is a safety net, not a schedule: the
+				 * panel releases the buffer at the next vblank,
+				 * so ten polls of 0.2 ms is four times the longest
+				 * wait that can legitimately happen. */
+				for (int poll = 0; poll < 100; poll++)
+				{
+					if (!video_swap_pending())
+						break;
+					audio_pump();
+					svcSleepThread(200000); /* 0.2 ms */
+				}
+
 				video_begin_frame();
 
 				const uint16_t *px = emu_frame_buffer();
@@ -378,6 +404,13 @@ int main(int argc, char **argv)
 				ui_idle_work();
 				log_flush();
 				audio_log_stats();
+
+				/* The log write above is an SD card operation, and
+				 * on a slow card it is milliseconds - a dead window
+				 * for the sound in the middle of every frame that
+				 * had something to write. One pump before and one
+				 * after is enough to keep the deadline inside it. */
+				audio_pump();
 
 				if (svcGetSystemTick() - autosave_tick > AUTOSAVE_TICKS)
 				{

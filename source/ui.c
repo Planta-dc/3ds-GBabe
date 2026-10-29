@@ -764,8 +764,13 @@ static void hud_render(void)
 	 * kinds apart, because "waiting for the panel" and "pacing to 59.7275
 	 * Hz" are different problems even though both are time spent asleep. */
 	const float idle_ms = g_perf.sync_ms + g_perf.wait_ms;
+	/* `blit` already contains `sync` - it is the whole stretch from the end
+	 * of the emulation to the swap, and the wait for the panel is inside
+	 * it. Subtracting `sync` a second time here made `other` come out at
+	 * exactly -sync every frame, which is how a console log ended up
+	 * printing other=-6.9 on a frame where everything was accounted for. */
 	const float other = g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-					       idle_ms);
+					       g_perf.post_ms + g_perf.wait_ms);
 
 	snprintf(fps, sizeof fps, "%.1f", g_perf.fps);
 	snprintf(frame, sizeof frame, "%.1f ms/frame", g_perf.frame_ms);
@@ -885,15 +890,12 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		 g_perf.emu_ms, g_perf.audio_ms, g_perf.push_ms,
 		 g_perf.draw_ms, g_perf.blit_ms,
 		 g_perf.post_ms, g_perf.sync_ms, g_perf.wait_ms,
-		/* `sync` and `wait` are different waits and neither is
-		 * extra: `wait` is the idle at the top of the loop before the
-		 * frame was due, `sync` is the panel handing back the buffer
-		 * this frame draws into. Both are inside the frame's period
-		 * and neither is work, so both are subtracted along with the
-		 * work to leave `other`. */
+		/* `wait` is the idle at the top of the loop before the frame
+		 * was due. `sync` is *not* subtracted here: it is already
+		 * inside `blit`. What is left should be zero; it was -sync
+		 * for every frame until this was fixed. */
 		g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-				   g_perf.post_ms + g_perf.wait_ms +
-				   g_perf.sync_ms),
+				   g_perf.post_ms + g_perf.wait_ms),
 		 audio_queue_ms(), g_perf.palette, sync_free, sync_late,
 		 hud_late, hud_resyncs);
 

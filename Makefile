@@ -47,7 +47,7 @@ TARGET      :=  gbabe
 #---------------------------------------------------------------------------------
 VERSION_MAJOR   :=  0
 VERSION_MINOR   :=  3
-VERSION_MICRO   :=  4
+VERSION_MICRO   :=  5
 
 APP_PRODUCT_CODE :=  CTR-H-GBABE
 APP_UNIQUE_ID    :=  0xEABE1
@@ -86,7 +86,7 @@ CFLAGS  :=  -g -Wall -Wextra $(OPT) -ffunction-sections -fdata-sections \
             -fno-strict-aliasing -fomit-frame-pointer \
             -std=gnu11 $(ARCH)
 
-# Which build this is: the version says 0.3.4 for everything that lands while
+# Which build this is: the version says 0.3.5 for everything that lands while
 # 0.3.4 is current, so the log identifies its own binary by date + revision
 # instead. `date` is used rather than only the revision because a build from a
 # dirty tree is exactly the one worth identifying. Git is absent when the tree
