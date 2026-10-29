@@ -208,9 +208,9 @@ sdmc:/3ds/gbabe/debug.log
 ```
 
 ```
-# GBabe 0.2.0 debug log
+# GBabe 0.3.0 build 20261028-9562afd debug log
 # os time: 4002180240788
-[    0.018] GBabe 0.2.0, Old 3DS/2DS, installed title (cia)
+[    0.018] GBabe 0.3.0 build 20261028-9562afd, Old 3DS/2DS, installed title (cia)
 [    0.018] tick rate 268111856 Hz, scale=0 palette=0 frameskip=0
 [    0.021] audio: 32768 Hz, stereo, 31 ms blocks, channels 31/29/30/28
 [    0.191] core: gambatte 0.5.0, CGB, 64 rom banks, 0 ram banks
@@ -222,6 +222,10 @@ sdmc:/3ds/gbabe/debug.log
 [   12.510] audio: 301 blocks, late 207 (worst 648.96 ms), underruns 8, resyncs 0, dropped 0, queue 10 ms, margin 5.00 ms
 ```
 
+* the version *and the build*: date plus the git revision the binary was
+  compiled from, in the header and the startup line. One version number covers
+  however many fixes land while it is current, so without the stamp two
+  different `.cia` files report exactly the same thing;
 * one `perf` line a second: the same numbers the status readout shows, plus
   `post` (the once-a-second work - status redraw, log flush, cartridge save -
   done in the gap between handing the frame to the panel and waiting for it,

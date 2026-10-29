@@ -97,6 +97,8 @@ int main(void)
 	printf("log has %d lines + %d header lines\n", lines, header);
 	check("the header is present", header == 2);
 	check("every entry is timestamped", lines > 0 && stamped == lines);
+	check("the header names the build",
+	      strstr(text, "build " GBABE_BUILD " debug log") != NULL);
 	check("startup line is present",
 	      strstr(text, "GBabe " GBABE_VERSION " test") != NULL);
 	check("values are formatted", strstr(text, "fps=59.7 core=9.8") != NULL);

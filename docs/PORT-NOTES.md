@@ -747,3 +747,30 @@ counter measures the wrong thing once the frame is being presented at the
 panel's pace rather than the schedule's. The next log will say which, because
 `post` removes the delay that was making it plausible.
 
+
+---
+
+## 12. Versions, and telling two builds apart
+
+The version sat at 0.2.0 through the whole of §10 and §11 — a rewritten frame
+loop, a restructured present path, a version-string bug, and a dozen fixes —
+because nothing forced it to move. It is 0.3.0 now: the frame loop is a
+different design and the present path is a different shape, which is a minor
+bump rather than a patch.
+
+The lesson worth keeping is the one from §9's table: a user cannot tell two
+builds apart by a version number that only changes at releases. So the log
+identifies its own binary now:
+
+```
+# GBabe 0.3.0 build 20261028-9562afd debug log
+[    0.018] GBabe 0.3.0 build 20261028-9562afd, Old 3DS/2DS, installed title (cia)
+```
+
+`GBABE_BUILD` is stamped in by the Makefile as `date -u +%Y%m%d` plus
+`git rev-parse --short HEAD`, with `nogit` for a tree unpacked from an archive
+and `dev` for the host tools. It exists because the one thing a bug report has
+to answer first - *which binary wrote this log* - could not be answered before.
+
+`check-version.sh` still refuses any version typed into a source file, so the
+stamp is the only new string and it comes from the build, not from the source.

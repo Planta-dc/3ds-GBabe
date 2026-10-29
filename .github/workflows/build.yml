@@ -2,7 +2,7 @@ name: build
 
 # Automatic: every push to main and every pull request builds the .3dsx, the
 #           .cia, the PC harness and the UI previews.
-# Tags:      pushing v0.2.0 builds and attaches the files to that release,
+# Tags:      pushing v0.3.0 builds and attaches the files to that release,
 #           with QR codes FBI can scan to install straight from the release.
 # Manual:    Actions -> build -> "Run workflow" lets you pick 3dsx, cia or both,
 #           and optionally attach the result to a release tag.

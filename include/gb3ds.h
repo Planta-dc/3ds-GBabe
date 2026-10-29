@@ -17,7 +17,18 @@
 #include <stddef.h>
 #include <string.h>
 
-#define GBABE_VERSION       "0.2.0"
+#define GBABE_VERSION       "0.3.0"
+
+/* Which build this is, stamped in by the Makefile (date + git revision).
+ *
+ * The version alone cannot tell two builds apart: one version number covers
+ * however many fixes land while it is current, and once the .cia is on a card
+ * there is no other way to know which one is installed. The debug log prints
+ * it, so a log from the console identifies its own binary. Host tools, which
+ * are built without the Makefile, get "dev". */
+#ifndef GBABE_BUILD
+#define GBABE_BUILD         "dev"
+#endif
 #define GBABE_APP_TITLE     "GBabe"
 #define GBABE_ROOT          "sdmc:/3ds/gbabe"
 #define GBABE_CONFIG_PATH   GBABE_ROOT "/config.cfg"

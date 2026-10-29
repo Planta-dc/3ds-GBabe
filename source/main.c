@@ -67,7 +67,7 @@ static void platform_init(void)
 	/* Everything below is for the log: this is the information a bug report
 	 * needs and nobody can read off the console's own menus. */
 	log_init(GBABE_LOG_PATH, g_cfg.debug_log);
-	log_line("GBabe %s, %s, %s", GBABE_VERSION,
+	log_line("GBabe %s build %s, %s, %s", GBABE_VERSION, GBABE_BUILD,
 		 is_new ? "New 3DS/2DS" : "Old 3DS/2DS",
 		 envIsHomebrew() ? "launched by a homebrew loader (3dsx)"
 				 : "installed title (cia)");
