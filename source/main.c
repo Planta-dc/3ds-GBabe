@@ -39,6 +39,10 @@ gbabe_perf g_perf;
 #define AUTOSAVE_TICKS GBABE_AUTOSAVE_TICKS
 
 static pace_state pace;
+
+/* Per-second totals for the four things the loop does after the emulation, in
+ * ticks. Reported as one `once:` line a second: see the block that fills them. */
+static u64 once_hud, once_log, once_audio, once_save, once_since;
 static u64 autosave_tick;
 static u64 last_frame_end;
 
@@ -396,8 +400,31 @@ int main(int argc, char **argv)
 			 * 33 ms frame in every second of the console log. */
 			if (draw)
 			{
+				/* Timed apart, and reported once a second as `once:`
+				 * in the log. Every second the console's log showed
+				 * a 33 ms frame whose `post` was 20-27 ms while the
+				 * emulation in it was 6-8, and there are four
+				 * candidates in this block - the status readout,
+				 * the log's SD write, the audio bookkeeping and the
+				 * cartridge autosave. Guessing which one is how
+				 * this project has wasted time before, so the log
+				 * says which one it is. */
+				u64 t = svcGetSystemTick();
+
 				ui_idle_work();
-				log_flush();
+
+				const u64 t_hud = svcGetSystemTick();
+
+				once_hud += t_hud - t;
+				t = t_hud;
+
+				log_flush_soft();
+
+				const u64 t_log = svcGetSystemTick();
+
+				once_log += t_log - t;
+				t = t_log;
+
 				audio_log_stats();
 
 				/* The log write above is an SD card operation, and
@@ -407,10 +434,31 @@ int main(int argc, char **argv)
 				 * after is enough to keep the deadline inside it. */
 				audio_pump();
 
-				if (svcGetSystemTick() - autosave_tick > AUTOSAVE_TICKS)
+				const u64 t_audio = svcGetSystemTick();
+
+				once_audio += t_audio - t;
+				t = t_audio;
+
+				if (t - autosave_tick > AUTOSAVE_TICKS)
 				{
 					emu_flush_save();
 					autosave_tick = svcGetSystemTick();
+				}
+
+				once_save += svcGetSystemTick() - t;
+
+				if (svcGetSystemTick() - once_since > SYSCLOCK_ARM11)
+				{
+					const double ms = 1000.0 / SYSCLOCK_ARM11;
+
+					log_line("once: hud %.1f log %.1f audio %.1f "
+						 "save %.1f ms (worst frame of the "
+						 "second: see above)", (double)once_hud * ms,
+						 (double)once_log * ms,
+						 (double)once_audio * ms,
+						 (double)once_save * ms);
+					once_hud = once_log = once_audio = once_save = 0;
+					once_since = svcGetSystemTick();
 				}
 			}
 
@@ -464,7 +512,11 @@ int main(int argc, char **argv)
 					 * still line up with new ones. */
 					.blit = present,
 					.sync = 0,
-					.post = after_post - after_swap,
+					/* From the end of the emulation: the present
+					 * block now happens at the top of the slot,
+					 * so measuring from it swallowed `core` and
+					 * made `other` a constant -core. */
+					.post = after_post - after_core,
 					.wait = waited,
 					.frame = after_post - (prev_end ? prev_end : frame_start),
 					.late = late,

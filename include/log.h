@@ -37,6 +37,11 @@ bool log_init(const char *path, bool enabled);
 void log_set_enabled(bool on);
 bool log_enabled(void);
 
+/* Write the buffer only if it has enough in it to be worth the card write, or
+ * if it has been waiting too long. Safe to call every frame; log_flush() is for
+ * the places that need the bytes on the card now (settings, shutdown). */
+void log_flush_soft(void);
+
 /* One formatted line. `urgent` lines are flushed right away.
  *
  * The format string is checked by the compiler. Without that, a %u where a

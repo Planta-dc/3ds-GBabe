@@ -28,6 +28,7 @@ static char buf[LOG_BUF];
 static size_t used;
 static size_t written;
 static u64 start_tick;
+static u64 last_write;
 static bool truncated;
 
 /* Seconds since the log started. */
@@ -48,6 +49,7 @@ static void write_out(void)
 	fflush(file);
 	written += used;
 	used = 0;
+	last_write = svcGetSystemTick();
 }
 
 static bool open_file(const char *path)
@@ -145,6 +147,29 @@ void log_line(const char *fmt, ...)
 
 void log_flush(void)
 {
+	write_out();
+}
+
+/* For a caller in a frame loop: write only when it is worth an SD card write.
+ *
+ * log_flush() is an fwrite and an fflush, and on a slow card that is 10-20 ms -
+ * longer than a frame. The console log showed a 33 ms frame in every single
+ * second of a session, and this was one of the candidates. The buffer is 2 KiB
+ * and a second of lines is ~500 bytes, so writing it every second spends a
+ * hitch to move a quarter of a buffer: wait until it is three quarters full
+ * (four seconds of lines) or has been waiting five seconds, and the writes go
+ * down four-fold at no cost but how much a crash could lose. */
+void log_flush_soft(void)
+{
+	const u64 now = svcGetSystemTick();
+
+	if (used == 0 || file == NULL)
+		return;
+
+	if (used * 4 < sizeof buf * 3 && now - last_write < SYSCLOCK_ARM11 * 5)
+		return;
+
+	last_write = now;
 	write_out();
 }
 

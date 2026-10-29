@@ -128,11 +128,12 @@ presenttest: $(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c \
 		$(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c
 	./gbabe-presenttest
 
-# The decimator: bit-exact against the two-stage version it replaced, in every
-# block size the backend can hand it, plus an indicative timing.
+# The decimator: one output per 64 inputs at any block size, the passband kept,
+# what is above the new Nyquist measured folding back in (against the box filters
+# it replaced), plus an indicative timing. -lm for the tone measurements.
 dectest: $(ROOT)/source/decimator.c $(ROOT)/include/decimator.h dectest.c
 	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-dectest \
-		$(ROOT)/source/decimator.c dectest.c
+		$(ROOT)/source/decimator.c dectest.c -lm
 	./gbabe-dectest
 
 # The audio rate matcher, as arithmetic: the control law and the resampler on

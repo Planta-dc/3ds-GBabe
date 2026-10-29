@@ -131,9 +131,16 @@ static bool av_set;
 /* Audio: 2097152 Hz -> 32768 Hz                                             */
 /* ------------------------------------------------------------------------- */
 
-/* Two stages of 8:1 box averaging - the same decimator as the 3DS front-end, so
- * the two paths produce the same stream and a comparison between them is a
- * comparison of frontends and not of resamplers. */
+/* Two stages of 8:1 box averaging.
+ *
+ * This is what the 3DS front-end used before source/decimator.c replaced its
+ * second stage with a 64-tap windowed sinc (-74 dB of aliasing at 50 kHz
+ * against -14 dB here). The core does not get that filter, and is not
+ * going to: this file is deliberately independent of source/ and include/ (see
+ * Makefile), because it is the thing the front-end is compared *against*. So a
+ * comparison between the two paths is a comparison of frontends, and the two
+ * do not produce the same samples - the front-end's stream is the cleaner of
+ * the two. Nothing else in the core's output differs. */
 struct Downsampler
 {
 	int32_t sum_l, sum_r;
