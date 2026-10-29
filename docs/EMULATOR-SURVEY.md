@@ -110,3 +110,51 @@ would trade a solved problem for an unsolved one.
 `deltabeard/Peanut-GB` (MIT), and this repository's vendored Gambatte 0.5.0.
 File and line references are for orientation; no code was taken from any of
 them.*
+
+## Addendum: three more emulators, read afterwards
+
+Four more references were pointed at this survey; one of them contradicts a
+claim made above, so it is corrected here rather than left to stand.
+
+| emulator | licence | scale | audio | note |
+|---|---|---|---|---|
+| **gnuboy-3ds** (RetroGamer02) | GPL-2.0 | **none - `delegate_scaling = 1`**, the GPU stretches 160x144 (`sys/sdl2/sdl2.c:104,130`, honoured in `lcd.c:591-593`) | **mixed at the output rate, inline, per line** (`sound.c:164-175`: `for (; cpu.snd >= RATE; cpu.snd -= RATE)`, called from `emu.c:153-161`) | the classic speed-first GBC emulator; its frame loop is emulate-whole-frame -> swap -> mix -> submit -> sleep until the audio says otherwise |
+| **PlutoBoy 3DS** (RossMeikleham) | GPL-3.0 | **CPU scale to 266x240** (`graphics_3DS.c:13-16`), 24-bit BGR8, one `memcpy(3)` per pixel, into the rotated panel | **blargg `Gb_Apu` + `Blip_Buffer`**, band-limited synthesis *at the output rate* (`src/core/audio/Blip_Buffer.h:32-38`) | renders 266x240 - almost exactly GBabe's 267x240 - and still works |
+| **GBEMU43DS** (TS-DEV-DEBUG-V2) | GPL-3.0 | **none** - 160x144 into a 256x256 RGBA8 texture, `GPU_NEAREST`, `GX_DisplayTransfer` + citro3d quad (`platform/3ds/source/main.cpp:1266-1300`) | **11,025 Hz mono, mixed inline** (`src/gb_apu.h:6`, `src/gb_apu.cpp:387`) | full 3DS-native feature set: camera, printer, savestates |
+
+### Correction: CPU scaling is not unique to GBabe
+
+The first half of this document said "nobody else scales on the CPU". PlutoBoy
+does, on the 3DS, at 266x240 - within one pixel per row of GBabe's 267x240 in
+the default mode - and writes **three bytes per pixel into a 24-bit
+framebuffer**, which is strictly more memory traffic per pixel than GBabe's
+sixteen bits. That does not make the transpose free (PlutoBoy's `graphics_3DS.c`
+even carries a commented-out nearest-neighbour variant marked "Slow :("), but it
+does mean the 1.0 ms measured here is in line with what another 3DS port
+considers acceptable, and it further weakens "the scaling is why this port was
+slow". The blocking vblank in section 17 was.
+
+### The audio finding gets stronger, not weaker
+
+Five of the six emulators read for this document generate audio **at the output
+rate, inline, only when a sample is due**: GameYob (84 cycles), GBEMU43DS
+(11,025 Hz), gnuboy (accumulator, per line), PlutoBoy (Blargg band-limited),
+Peanut-GB (external APU). Only Gambatte mixes at 2 MHz and leaves the
+decimation to its frontend - which is why both Gambatte frontends in this
+document (RetroArch's and this one) carry a resampler.
+
+That is not an argument for replacing Gambatte (its API has no sample-rate
+control, and the accuracy is the reason for the port), but it does say where the
+last 3.0 ms lives: in a fixed cost of Gambatte 0.5.0's interface. The cheapest
+realistic recovery is fusing GBabe's two decimation stages into one pass over
+the 2 MHz buffer (~1.5 ms), not a new core.
+
+### On "just port one of them"
+
+All three of the new ones are GPL (gnuboy GPL-2.0, PlutoBoy and GBEMU43DS
+GPL-3.0), as is RetroArch, so nothing of theirs can be copied into this
+MIT-frontend/GPL-core tree's frontend; and all three are speed-first cores of
+the same kind as GameYob, which is the trade the earlier section already
+rejected. What they are good for is exactly what they were used for here:
+confirming what "full speed on a 3DS" looks like from three independent
+implementations.
