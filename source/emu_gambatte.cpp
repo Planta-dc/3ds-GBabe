@@ -560,6 +560,15 @@ extern "C" void emu_flush_save(void)
  * say which half it was. */
 static u64 emu_ticks_, audio_ticks_, push_ticks_;
 
+/* CGB palette conversions in this frame. Gambatte converts a 15-bit colour to
+ * the framebuffer format every time a CGB palette register is written, and with
+ * colour correction on (the default) that is a gamma round trip per call. A
+ * fade rewrites all 64 entries repeatedly, which is the only time it can cost
+ * anything - and it is the one part of a Game Boy Color frame that a monochrome
+ * game does not pay. Counted here, logged as `pal=`. */
+extern "C" unsigned long gbabe_cgb_palette_count(void);
+static unsigned long palette_mark_;
+
 extern "C" void emu_run_frame(void)
 {
 	if (!loaded || core == NULL)
@@ -636,6 +645,15 @@ extern "C" const uint16_t *emu_frame_buffer(void)
 		return NULL;
 
 	return (const uint16_t *)vbuf;
+}
+
+extern "C" unsigned emu_palette_take(void)
+{
+	const unsigned long now = gbabe_cgb_palette_count();
+	const unsigned long n = now - palette_mark_;
+
+	palette_mark_ = now;
+	return (unsigned)n;
 }
 
 extern "C" void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks,

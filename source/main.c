@@ -313,6 +313,7 @@ int main(int argc, char **argv)
 			 * here too - an emulated frame with no drawing still decodes
 			 * audio, and a skipped frame still runs the emulator. */
 			u64 emu_ticks, audio_ticks, push_ticks, draw_ticks;
+			const unsigned palette = emu_palette_take();
 
 			emu_timing_take(&emu_ticks, &audio_ticks, &push_ticks);
 
@@ -402,6 +403,7 @@ int main(int argc, char **argv)
 					.emu = emu_ticks,
 					.audio = audio_ticks,
 					.push = push_ticks,
+					.palette = palette,
 					.draw = draw_ticks,
 					.blit = after_swap - after_core,
 					.sync = sync,

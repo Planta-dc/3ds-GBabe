@@ -62,6 +62,13 @@ const uint16_t *emu_frame_buffer(void);
 void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks,
 		     uint64_t *push_ticks);
 
+/* CGB palette conversions since the last call. Gambatte converts a 15-bit
+ * colour every time a CGB palette register is written - a fade rewrites all 64
+ * entries over and over - and with colour correction on that is a gamma round
+ * trip each time. This is the one Game Boy Color cost that a monochrome frame
+ * does not pay, so it is counted rather than guessed at. */
+unsigned emu_palette_take(void);
+
 /* The DMG palette selection changed: re-apply the colours to the core. It is
  * handed the colour values directly, so this has to be pushed rather than
  * looked up per pixel. Safe to call when nothing is loaded. */

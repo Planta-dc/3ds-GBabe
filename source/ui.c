@@ -55,6 +55,7 @@ static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
                 hud_sum_wait, hud_sum_frame;
 static u64      hud_sum_emu, hud_sum_audio, hud_sum_push, hud_sum_draw;
+static u64      hud_sum_palette;
 static u64      hud_worst; /* slowest single frame in the window */
 static unsigned hud_late;    /* frames that started after their slot      */
 static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
@@ -802,6 +803,7 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	hud_sum_emu += c->emu;
 	hud_sum_audio += c->audio;
 	hud_sum_push += c->push;
+	hud_sum_palette += c->palette;
 	hud_sum_draw += c->draw;
 	hud_sum_blit += c->blit;
 	hud_sum_sync += c->sync;
@@ -832,6 +834,7 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	g_perf.emu_ms = (float)((double)hud_sum_emu * ticks_to_ms / n);
 	g_perf.audio_ms = (float)((double)hud_sum_audio * ticks_to_ms / n);
 	g_perf.push_ms = (float)((double)hud_sum_push * ticks_to_ms / n);
+	g_perf.palette = (unsigned)((double)hud_sum_palette / n + 0.5);
 	g_perf.draw_ms = (float)((double)hud_sum_draw * ticks_to_ms / n);
 	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
 	g_perf.sync_ms = (float)((double)hud_sum_sync * ticks_to_ms / n);
@@ -863,7 +866,7 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	 * idle waiting for its own next slot. */
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f emu=%.1f "
 		 "dec=%.1f push=%.1f draw=%.1f blit=%.1f "
-		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums "
+		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums pal=%u "
 		 "sync_free=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms,
 		 g_perf.emu_ms, g_perf.audio_ms, g_perf.push_ms,
@@ -878,13 +881,15 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
 				   g_perf.post_ms + g_perf.wait_ms +
 				   g_perf.sync_ms),
-		 audio_queue_ms(), sync_free, sync_late, hud_late, hud_resyncs);
+		 audio_queue_ms(), g_perf.palette, sync_free, sync_late,
+		 hud_late, hud_resyncs);
 
 	hud_frames = 0;
 	hud_late = hud_resyncs = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
 		hud_sum_wait = hud_sum_frame = 0;
 	hud_sum_emu = hud_sum_audio = hud_sum_push = hud_sum_draw = 0;
+	hud_sum_palette = 0;
 	hud_worst = 0;
 	hud_last_tick = now;
 

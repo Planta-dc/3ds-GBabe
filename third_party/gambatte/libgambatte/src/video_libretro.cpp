@@ -34,6 +34,21 @@
 #define GBC_CC_BR  -0.06f
 #define GBC_CC_BG  0.21f
 
+/* How many palette conversions the core has done. One per CGB palette register
+ * write, each worth several powf() calls - so this is the number that says
+ * whether GB colour correction costs a Game Boy Color game anything on a
+ * 268 MHz CPU during a fade. Read by the frontend and logged as `pal=`; see
+ * docs/PORT-NOTES.md. C linkage so the backend needs no namespace. */
+unsigned long gbabe_cgb_palette_calls = 0;
+
+extern "C" unsigned long gbabe_cgb_palette_count(void);
+
+/* C linkage accessor, so the backend needs no namespace. */
+extern "C" unsigned long gbabe_cgb_palette_count(void)
+{
+   return gbabe_cgb_palette_calls;
+}
+
 namespace gambatte
 {
    void LCD::setDmgPaletteColor(const unsigned index, const video_pixel_t rgb32)
@@ -207,8 +222,38 @@ namespace gambatte
       b = b * darkFactor;
    }
 
+   /* The three gamma-expansion powf() calls in gbcToRgb32() take one of 32
+    * possible inputs, so they are tabulated: powf(v / 31, adjustedGamma) for
+    * v = 0..31. This is bit-exact - the same function on the same arguments -
+    * and it removes half of the six powf() calls per conversion. Rebuilt only
+    * if the brightness (and therefore the exponent) changes. */
+   namespace
+   {
+      /* `rgbMaxInv` is passed in rather than recomputed so that the table holds
+       * exactly the value the old code computed: `v * (1.0f / 31.0f)` is not
+       * the same float as `v / 31.0f`, and "nearly identical" is not a property
+       * worth risking on 32,768 colours. */
+      const float *gammaExpansion(const float adjustedGamma, const float rgbMaxInv)
+      {
+         static float table[32];
+         static float builtFor = -1.0f;
+         static float builtWith = 0.0f;
+
+         if (builtFor != adjustedGamma || builtWith != rgbMaxInv)
+         {
+            for (unsigned v = 0; v < 32; ++v)
+               table[v] = std::pow(static_cast<float>(v) * rgbMaxInv,
+                                   adjustedGamma);
+            builtFor = adjustedGamma;
+            builtWith = rgbMaxInv;
+         }
+         return table;
+      }
+   }
+
    video_pixel_t LCD::gbcToRgb32(const unsigned bgr15)
    {
+      ++gbabe_cgb_palette_calls;
       const unsigned r = bgr15       & 0x1F;
       const unsigned g = bgr15 >>  5 & 0x1F;
       const unsigned b = bgr15 >> 10 & 0x1F;
@@ -250,11 +295,12 @@ namespace gambatte
             // Constants
             static const float targetGamma = 2.2;
             static const float displayGammaInv = 1.0 / targetGamma;
-            // Perform gamma expansion
+            // Perform gamma expansion (tabulated, see above)
             float adjustedGamma = targetGamma - colorCorrectionBrightness;
-            float rFloat = std::pow(static_cast<float>(r) * rgbMaxInv, adjustedGamma);
-            float gFloat = std::pow(static_cast<float>(g) * rgbMaxInv, adjustedGamma);
-            float bFloat = std::pow(static_cast<float>(b) * rgbMaxInv, adjustedGamma);
+            const float *exp32 = gammaExpansion(adjustedGamma, rgbMaxInv);
+            float rFloat = exp32[r];
+            float gFloat = exp32[g];
+            float bFloat = exp32[b];
             // Perform colour mangling
             float rCorrect = GBC_CC_LUM * ((GBC_CC_R  * rFloat) + (GBC_CC_GR * gFloat) + (GBC_CC_BR * bFloat));
             float gCorrect = GBC_CC_LUM * ((GBC_CC_RG * rFloat) + (GBC_CC_G  * gFloat) + (GBC_CC_BG * bFloat));

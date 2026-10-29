@@ -1397,3 +1397,41 @@ perf ... core=12.4 emu=8.4 dec=1.5 push=0.2 draw=1.0 ...
 `core` is now exactly `emu + dec + push + draw`. If the next console log shows
 `dec` still near 3.0, the cost was the service call and this change is
 irrelevant, which the log will now say instead of leaving it to be guessed.
+
+## 21. What a Game Boy Color frame costs that a monochrome one does not
+
+The Game Boy Color half of the last console log is the slower half, and the
+front-end is not why: the transpose, the blit and the present are the same
+267x240 of work whatever is in the cartridge. Everything that differs is inside
+`emu=`, which measured 8.4 ms on Super Mario Land and 8.1-12.7 ms on Croc 2.
+
+So the CGB question is a core question, and there is exactly one CGB-only thing
+this port does that monochrome does not: **colour correction**. `LCD` is
+constructed with `setColorCorrection(true)` and mode 0, which is Pokefan531's
+"gold standard" conversion - a gamma expansion, a 3x3 colour matrix and a gamma
+compression, six `powf()` calls, per palette register write. A fade rewrites all
+64 entries every step, so a fade costs 64 conversions and a game that fades
+constantly pays it constantly. `setColorCorrection(false)` is the identity and
+costs six comparisons.
+
+Two things are done about it here, and neither changes the picture:
+
+* **Half of the arithmetic is tabulated.** The gamma expansion takes one of 32
+  inputs per channel, so it is a 32-entry table now - the same `powf()` on the
+  same arguments, computed once per brightness change instead of once per colour
+  per write. (The multiplication is kept as `v * (1/31)` and not `v / 31`,
+  because those are not the same float and "nearly identical" is not a property
+  worth risking on 32,768 colours.)
+* **It is counted, so the next log can answer the question.** The perf line grew
+  `pal=` - CGB palette conversions per frame. Zero on a monochrome game by
+  construction, which is also the sanity check for the counter.
+
+If `pal=` is in the tens, colour correction is a rounding error and the CGB gap
+is Gambatte doing more work on more colours, which is what it was bought for. If
+it is in the thousands, one fade-heavy game can be made much cheaper by making
+the correction a setting - and `colorCorrectionMode = 1` (the fast approximation)
+instead of 0 is a third option that costs six integer multiply-adds.
+
+What is *not* going to happen: turning colour correction off by default to win a
+number. It changes what every Game Boy Color game looks like, and this project
+has spent enough rounds confusing "faster" with "better".

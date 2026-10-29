@@ -82,6 +82,7 @@ typedef struct
 	float emu_ms;   /* Gambatte's CPU + PPU + APU, nothing else             */
 	float audio_ms; /* the 2 MHz -> 32 kHz decimator and the rate matcher   */
 	float push_ms;  /* the FIFO copy and the csndPlaySound() behind it      */
+	unsigned palette; /* CGB palette conversions per frame                  */
 	float draw_ms;  /* scaled transpose into the framebuffer (64k writes)   */
 	float blit_ms;  /* cache flush + buffer swap                            */
 	float post_ms;  /* once-a-second work done before that wait (free)      */
@@ -105,6 +106,7 @@ typedef struct
 	uint64_t emu;    /*   of which Gambatte                                 */
 	uint64_t audio;  /*   of which the decimator                            */
 	uint64_t push;   /*   of which handing the samples to CSND              */
+	unsigned palette;/* CGB palette conversions (a Game Boy Color cost)     */
 	uint64_t draw;   /*   of which the scaled transpose                     */
 	uint64_t blit;   /* video_end_frame(): cache flush + swap               */
 	uint64_t sync;   /* waiting for the panel to take the swap              */
