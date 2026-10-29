@@ -1059,3 +1059,107 @@ own arithmetic - for all three scale modes, three source pitches (160, 161, 256)
 and eight band heights (1, 2, 3, 7, 16, 17, 23, 64). It was checked by breaking
 the code three ways (rows in the wrong order inside a band, no clamp on the last
 band, one band short); every mutation fails it with hundreds of wrong pixels.
+
+## 17. The log answers the question: the front-end costs more than the emulator
+
+The 0.3.1 log from the console (230 s, Super Mario Land then Croc 2) is the first
+one that can be added up, because `core` is no longer a single opaque number.
+Every line now accounts for itself and the parts do sum to the whole.
+
+Steady state, frameskip=0, 48 one-second samples, take the medians:
+
+```
+frame  17.60 ms   ->  56.7 fps, and not one second of the run reached 58
+core   16.60 ms
+  emu   8.35 ms   Gambatte
+  dec   3.00 ms   audio decimator (plus the csndPlaySound() IPC inside it)
+  draw  1.00 ms   the scaled transpose, banded in §16
+  ???   4.30 ms   inside `core` and in none of the three
+blit    0.10 ms   cache flush + swap
+post    0.90 ms   log flush, HUD bands, audio stats
+```
+
+13.35 ms of work in a 16.74 ms budget. **The emulator would already be at 59.7
+fps if the front-end were not taking 4.3 ms of it.** That is the answer to "why
+does Gambatte in RetroArch run at full speed" - not because its core is faster
+(8.4 ms is 8.4 ms) but because its front-end adds almost nothing per frame, and
+ours was adding nine milliseconds.
+
+### The 4.3 ms is a blocking vblank wait, counted as emulation
+
+`main.c` calls `video_begin_frame()` before `emu_run_frame()`, and `core` is
+timed from before the first to after the second. `video_begin_frame()` ends with
+`video_present_sync()`, whose job is to guarantee the buffer about to be drawn
+into has been released. It does not ask first:
+
+```c
+if (!sync_pending)
+        return 0;
+...
+gspWaitForVBlank();          /* <- a whole panel period, every frame */
+```
+
+`video_swap_pending()`, a few lines below it, already knows how to answer
+"has the panel taken it yet" without blocking. The idle loop in `main.c` calls
+*that*, in the dead time before the next frame - which is exactly right, and is
+what the comment in `video_begin_frame()` claims happens ("main.c calls
+video_present_sync() itself, earlier"). It does not. There is no such call in
+`main.c`.
+
+So the design was: poll in the idle time, block only as a fallback. What
+actually happens: with 13.35 ms of work in a 16.74 ms budget the loop is late
+often enough that `frame_due()` is true the moment the previous frame ends, the
+idle branch never runs, `sync_pending` is never cleared, and every single frame
+pays a full blocking vblank in the fallback. The log says so twice over:
+
+* `wait=0.0` on every line - the loop never idles, so nothing polled the swap;
+* `pace_late=41..58` - the pacer counted ~58 late frames a second, out of ~57
+  frames. Every frame is late. It is late *because* it blocks, and it blocks
+  *because* it is late. That is the whole frame-rate problem in two numbers.
+
+A blocking wait for the next vblank when the swap has already landed is pure
+loss: on average half a panel period, which is the 4.3 ms.
+
+### The decimator is 3 ms for 548 output samples
+
+`dec` is 2.8-3.0 ms and has never been anything else. 35,112 stereo samples go
+in, 548 come out: 70,224 adds, plus one branch per input sample, plus a 35 KiB
+intermediate buffer written and read again (`sound_buf` -> `audio_mid` ->
+`audio_out`), plus two `csndPlaySound()` IPC round trips. On a 268 MHz core with
+no L2 that is 2-3 ms, and it is 22 % of the frame budget for the one thing
+RetroArch does on a separate DSP thread.
+
+### What the rest of the log says, which the frame rate hides
+
+* **Audio is not keeping up.** `under 176` underruns in 230 s, and
+  `late 2607` of `3750` blocks: the pump is late for 70 % of blocks. That is
+  audible, and it is the part that makes a 56 fps game feel worse than a 55 fps
+  one.
+* **The HUD costs 13.3 ms every second.** `hud: render 4.4 ms + present 13.3 ms
+  in 8 bands (worst band 1.8 ms)` - 141 times, once per second. Eight frames of
+  1.8 ms would fit in an idle window if there were one; with `wait=0.0` there
+  is not, so those 1.8 ms land on frames that had no room for them.
+* **The picture freezes for a third of a second at a time.** `post` is normally
+  0.9 ms, and on nine frames in the run it is 249, 242, 403, 503, 573, 571,
+  706, 783 and 789 ms. That is SD card I/O in the frame (`log_flush()` and the
+  30-second autosave) - 0.8 s where the console does nothing but wait for the
+  card, twice a minute.
+* **The default configuration is 30 fps.** `frameskip=1` in the shipped config
+  presents every other frame. The log shows the first 23 seconds at
+  `fps=29.9 frame=33.5 wait=23.5` until the setting was changed in the menu,
+  after which the same build ran at 57.8. A console that now has the budget for
+  60 should not ship presenting 30.
+
+### Where that leaves it
+
+`emu = 8.35 ms` is the floor on this hardware and it fits: 16.74 - 8.35 = 8.4 ms
+for everything else, and everything else is currently 5.0 ms of real work plus
+4.3 ms of waiting. The next work is not in Gambatte and not in the transpose. It
+is, in order of what the log proves:
+
+1. never block the emulator on the panel - poll, and give the present path a
+   buffer it can use without waiting (§17 above, ~4 ms/frame);
+2. decimate audio in one pass, 8 samples at a time, and get the CSND IPC out of
+   the frame (~2 ms/frame);
+3. only do the HUD when the frame has genuine idle time, which needs (1) first;
+4. keep SD writes out of the frame entirely.
