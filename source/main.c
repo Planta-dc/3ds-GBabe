@@ -250,6 +250,19 @@ int main(int argc, char **argv)
 
 			update_joypad();
 
+			/* Fast-forward is not listenable. The loop emulates two
+			 * frames per displayed one, so the sound arrives at twice
+			 * the rate the channel eats, and the FIFO then does one of
+			 * two things: overflows (samples dropped mid-stream, which
+			 * is a tearing noise) or gets squeezed to the 20 % clamp (a
+			 * chipmunk). Nothing plays while it is held, and the whole
+			 * audio path - decimator included - is skipped, which is
+			 * what makes it fast in the first place. */
+			const bool want_audio = g_cfg.audio_on &&
+						!g_cfg.fast_forward;
+			if (want_audio != audio_enabled())
+				audio_set_enabled(want_audio);
+
 			/* Idle until the next emulated frame is due - or until a
 			 * sound block has to be submitted, whichever comes first.
 			 * Submitting blocks only at frame boundaries leaves a gap

@@ -26,14 +26,19 @@ extern "C" {
  * underruns in 230 s.)
  *
  * The fix is to stop treating the sample rate as sacred. This resampler sits
- * between the decimator and the FIFO and is told, once per block, how fast to
- * consume its input: 1.0 when the FIFO is where it should be, below 1.0 when it
- * is draining (more output samples per emulated frame, i.e. the audio stretched
- * by up to 4 %), above 1.0 when it is filling up. A 4 % pitch shift is
- * inaudible in Game Boy sound; a hole every two seconds is not.
+ * between the decimator and the FIFO and is told how fast to consume its input:
+ * 1.0 on a console that keeps up, below 1.0 when the emulator is producing
+ * fewer samples per second than the channel eats (the audio is stretched, and
+ * its pitch drops with the game - which is what the hardware being imitated
+ * does when it is short of time), above 1.0 when the emulator is running ahead.
  *
- * The alternative - resampling against a fixed ratio - is what the port did
- * until now, and it is why the sound quality depended on the frame rate.
+ * How fast to run is measured, not guessed from the queue: the step follows the
+ * rate the emulator is actually producing samples at, and a slow trim removes
+ * the difference. Inferring it from the queue level instead does not work - the
+ * level sawtooths by a whole 1024-frame block every 31 ms, so a loop fast enough
+ * to track a real slowdown spends its life bouncing between its clamps, and the
+ * pitch wobbles by several percent at the block rate even on a console running
+ * at full speed.
  */
 typedef struct
 {
@@ -45,11 +50,18 @@ typedef struct
 
 #define RESAMP_UNITY 65536
 
-/* The control law, kept out of audio.c so it can be tested as arithmetic:
- * `fill` frames queued against `target`. Returns the step to feed
- * resamp_set_step(). 65536 on target, below it when the queue is low (stretch,
- * produce more), above it when the queue is high (compress), clamped to +-4 %. */
-int32_t resamp_control_step(int32_t fill, int32_t target);
+/* The control law, kept out of audio.c so it can be tested as arithmetic.
+ *
+ *   fill_ema  smoothed number of frames queued  (sawtooth removed by caller)
+ *   target    the level it should sit at
+ *   rate_q16  measured input frames per output frame, 16.16 (65536 = 1:1);
+ *             this is the feedforward term, and 0 means "not measured yet"
+ *
+ * Returns the step to feed resamp_set_step(): 65536 on a console that keeps up,
+ * below that when the emulator is producing less than the channel eats, above
+ * it when it is producing more. Snaps to exactly 1:1 near unity, and is clamped
+ * to +-20 %. */
+int32_t resamp_control_step(int32_t fill_ema, int32_t target, int32_t rate_q16);
 
 void resamp_reset(resamp *r);
 void resamp_set_step(resamp *r, int32_t step_q16);

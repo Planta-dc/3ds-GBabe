@@ -1435,3 +1435,108 @@ instead of 0 is a third option that costs six integer multiply-adds.
 What is *not* going to happen: turning colour correction off by default to win a
 number. It changes what every Game Boy Color game looks like, and this project
 has spent enough rounds confusing "faster" with "better".
+
+## 22. The rate matcher was the noise
+
+The console report after 0.3.3: monochrome games at full speed, Game Boy Color
+close to it, and the sound "pretty bad". Speed was fixed; the sound was not, and
+it had nothing to do with how fast the console was.
+
+`tools/host/audiospeed.c` runs the real `audio.c` and `resamp.c` at a chosen
+console speed in real time - the same 17 `runFor()` chunks per frame, the same
+`resamp_set_step()` before each one, the same block scheduler. What it measures
+is not whether the stream survived but how it gave: the step it settled on, how
+much the step moved (pitch wobble), and what the FIFO did.
+
+At full speed, on the old control law:
+
+```
+1.00x: step 0.9947 (pitch -0.53 %), wobble 5.07 % (min 0.9600 max 1.0107)
+0.95x: step 0.9601 (pitch -3.99 %), wobble 4.00 %, 2 underruns, worst hole 18 ms
+1.05x: step 1.0312 (pitch +3.12 %), wobble 8.00 %, 311 samples dropped
+```
+
+`0.9600` and `1.0107` are the clamps. The loop was not *tracking* anything, it
+was pinned against its limits and swinging between them - a 5 % pitch modulation
+at the block rate, on a console running at exactly the right speed. That is a
+warble, and a warble is "pretty bad" no matter how good everything else is. At
+95 % speed the correction needed was 4.8 %, the clamp was 4 %, so it could not
+get there and the FIFO drained: underruns, and an 18 ms hole in the sound.
+
+Three things were wrong, and only the first is the one that was expected.
+
+**The level is a sawtooth, and the law was fed the level.** A block is 1024
+frames and it is popped out of the FIFO all at once, so the level swings by
+1024 frames every 31 ms around whatever it is centred on. The old law used the
+level with a time constant of ~4 frames - a loop with as much gain at 32 Hz as
+at the error it was supposed to be chasing, so it chased the sawtooth.
+
+The fix is to stop inferring the rate and measure it. The FIFO knows exactly how
+many frames went through it and the tick counter knows when, so the production
+rate is a measurement, not a deduction: `step = produced / 32768`, feedforward,
+and the level only gets a slow trim (1/64 of the error, on a level smoothed over
+~15 frames) to remove bias between the two clocks. On target the step is then
+*exactly* 1:1, which means a console that keeps up gets bit-exact audio - a
+sample in is a sample out, no interpolation at all.
+
+**The correction range was set by a judgement instead of by arithmetic.** 4 %
+was chosen as "inaudible in Game Boy sound", which is true and beside the point:
+a console 5 % short of full speed needs 5 %, and refusing to give it does not
+preserve the pitch, it converts a slow game into a stream of holes. The range is
++-20 % now, with the reasoning written down: a game running at 92 % has its sound
+run at 92 % too, because that is what the hardware being imitated does when it is
+short of time.
+
+**The level target could never be reached.** The target was
+`PREFILL_BLOCKS * BLOCK_SAMPLES` - the level at the instant the stream starts,
+which is the *peak* of the sawtooth, not its mean. Asking for a mean equal to the
+peak leaves the trim on forever, pulling the rate about 1 % low: a permanent flat
+pitch on a console running perfectly. The target is the sawtooth's mean now,
+half a block below the prefill level.
+
+After:
+
+```
+1.00x: steady step 1.0008 (pitch +0.08 %), wobble 0.19 % rms, 0 underruns, 0 dropped
+0.97x: steady step 0.9700 (pitch -3.00 %), wobble 0.017 % rms
+0.95x: steady step 0.9486 (pitch -5.14 %), wobble 0.045 % rms, 0 underruns
+1.05x: steady step 1.0561 (pitch +5.61 %), wobble 0.105 % rms, 0 dropped
+```
+
+The pitch now equals the console's actual speed, to within 0.2 %, with no
+dropouts and no drops at any of them. Wobble is the standard deviation of the
+step over the second half of the run - a peak-to-peak figure is dominated by the
+one sample where the stream settles.
+
+Two more things came out of it:
+
+* **A truncation bug of my own, caught by the test.** Reconstructing the input
+  rate from the output rate means multiplying by the step; `(frames * step) >> 16`
+  on chunks of ~32 frames throws away up to a frame per chunk, which is 3 % when
+  there are 17 of them per frame. The loop then measures itself as slow, corrects
+  as slow, and settles at a permanent pitch error - measured at 0.987 instead of
+  1.000 before the remainder was carried. A measurement that feeds a control law
+  has to be unbiased, not merely close.
+* **`resyncs` was always zero.** The counter existed, was logged, and nothing
+  incremented it - so a log with underruns and a log without looked the same in
+  the one field that says "the stream restarted". It counts restarts after a drop
+  now.
+* **Fast-forward no longer plays audio.** It emulates two frames per displayed
+  one, so the sound arrives at twice the rate the channel eats: the FIFO
+  overflows (dropped samples mid-stream) or squeezes to the clamp (a chipmunk).
+  Nothing plays while it is held, and the decimator is skipped with it, which is
+  what makes fast-forward fast.
+
+The log line carries the two numbers that matter now - `produced` (the measured
+production rate against 32768) and `level` (the smoothed FIFO level against its
+target) - so the next report can say whether a console is keeping up without
+inferring it from the frame rate:
+
+```
+audio: ... underruns 0, resyncs 0, dropped 0, queue 40 ms, level 1500/1536,
+       produced 1.000, margin 0.56 ms, rate 1.000
+```
+
+`produced 1.000` and `rate 1.000` on a full-speed game is the target, and
+`produced 0.954` means 57 fps, measured from the sound rather than assumed from
+the frame.

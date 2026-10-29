@@ -5,11 +5,12 @@
  *
  * Two things are checked, and neither needs a console:
  *
- *   resamp_control_step()  turns "the FIFO is this full against this target"
- *                          into "run the resampler this fast". It has to be
- *                          1:1 on target, stretch when the queue is draining
- *                          (the slow-frame case that used to be a hole), and
- *                          never ask for more than the 5 % the ear tolerates.
+ *   resamp_control_step()  turns "the console is producing this fast, and the
+ *                          queue is this full against this target" into "run
+ *                          the resampler this fast". It has to follow a slow
+ *                          console exactly (that is the hole the old version
+ *                          could not close), ignore the block sawtooth, and be
+ *                          exactly 1:1 when the console keeps up.
  *   resamp_run()           does the resampling. At 1:1 it must be the identity
  *                          - a sample dropped or repeated per block would be a
  *                          31 ms periodic click - and at other rates it must
@@ -43,40 +44,69 @@ static void test_control(void)
 {
 	const int32_t target = 2048;
 
-	check("on target is 1:1", resamp_control_step(target, target) == RESAMP_UNITY);
-	check("a full queue compresses (eats input faster)",
-	      resamp_control_step(target * 2, target) > RESAMP_UNITY);
-	check("an empty queue stretches (produces more samples)",
-	      resamp_control_step(0, target) < RESAMP_UNITY);
+	/* On target with a console that keeps up: no resampling at all, so the
+	 * output is bit-exact. */
+	check("on target is 1:1",
+	      resamp_control_step(target, target, RESAMP_UNITY) == RESAMP_UNITY);
 
-	/* A queue that is a hair off target must not move the rate at all, or the
-	 * resampler would modulate the pitch of every sound for nothing. */
-	check("a small error is left alone",
-	      resamp_control_step(target + 20, target) == RESAMP_UNITY &&
-	      resamp_control_step(target - 20, target) == RESAMP_UNITY);
+	/* The old failure, as a unit test: the queue sawtooths by a whole block
+	 * (+-1024 frames around 2048) because blocks are submitted in 1024-frame
+	 * chunks, and that must not move the rate. It used to swing between the
+	 * clamps and modulate the pitch by several percent at 32 Hz. */
+	int32_t lo = RESAMP_UNITY, hi = RESAMP_UNITY;
+	for (int32_t fill = target - 1024; fill <= target + 1024; fill += 64)
+	{
+		const int32_t step = resamp_control_step(fill, target, RESAMP_UNITY);
+		if (step < lo) lo = step;
+		if (step > hi) hi = step;
+	}
+	printf("sawtooth: %.4f..%.4f\n", (double)lo / RESAMP_UNITY,
+	       (double)hi / RESAMP_UNITY);
+	check("a block sawtooth does not wobble the pitch",
+	      (hi - lo) <= RESAMP_UNITY / 50); /* under 2 % peak to peak */
 
-	/* Clamped: 5 % is the limit, whatever the error. */
-	const int32_t worst_low = resamp_control_step(-100000, target);
-	const int32_t worst_high = resamp_control_step(100000, target);
+	/* A console at 57 fps produces 31272 samples a second against 32768, so
+	 * the step has to be 0.954, and it has to get there from the measurement
+	 * rather than from the queue. */
+	const int32_t slow = (int32_t)((double)RESAMP_UNITY * 31272.0 / 32768.0);
+	const int32_t step_slow = resamp_control_step(target, target, slow);
+	printf("slow console: %.4f\n", (double)step_slow / RESAMP_UNITY);
+	check("a slow console is followed, not clamped",
+	      step_slow < RESAMP_UNITY - RESAMP_UNITY / 40 &&
+	      step_slow > RESAMP_UNITY - RESAMP_UNITY / 15);
+
+	/* ...and a fast one is squeezed by the same amount. */
+	const int32_t fast = (int32_t)((double)RESAMP_UNITY * 34000.0 / 32768.0);
+	check("a fast console is squeezed",
+	      resamp_control_step(target, target, fast) > RESAMP_UNITY);
+
+	/* The queue still has a vote: it removes bias, so a queue that is a whole
+	 * target too full asks for more input per output frame. */
+	check("a full queue trims upwards",
+	      resamp_control_step(target * 2, target, RESAMP_UNITY) > RESAMP_UNITY);
+	check("an empty queue trims downwards",
+	      resamp_control_step(0, target, RESAMP_UNITY) < RESAMP_UNITY);
+
+	/* Clamped at +-20 %: past that the emulator is not emulating. */
+	const int32_t worst_low = resamp_control_step(-100000, target, 1000);
+	const int32_t worst_high = resamp_control_step(100000, target, 200000);
 
 	printf("clamps: %d.%03d..%d.%03d\n", worst_low / 65536,
 	       (int)(((worst_low % 65536) * 1000) / 65536),
 	       worst_high / 65536,
 	       (int)(((worst_high % 65536) * 1000) / 65536));
+	check("the stretch is limited to 20 %",
+	      worst_low >= RESAMP_UNITY - RESAMP_UNITY / 5);
+	check("the squeeze is limited to 20 %",
+	      worst_high <= RESAMP_UNITY + RESAMP_UNITY / 5);
 
-	check("the stretch is limited to 5 %",
-	      worst_low >= RESAMP_UNITY - RESAMP_UNITY / 25);
-	check("the squeeze is limited to 5 %",
-	      worst_high <= RESAMP_UNITY + RESAMP_UNITY / 25);
-
-	/* Monotone: a fuller queue never asks for more stretching than an empty
-	 * one. This is the property that stops the loop oscillating. */
+	/* Monotone in the level, so the trim cannot oscillate. */
 	int monotone = 1;
-	int32_t prev = resamp_control_step(0, target);
+	int32_t prev = resamp_control_step(0, target, RESAMP_UNITY);
 
 	for (int32_t fill = 0; fill <= target * 2; fill += target / 32)
 	{
-		const int32_t step = resamp_control_step(fill, target);
+		const int32_t step = resamp_control_step(fill, target, RESAMP_UNITY);
 
 		if (step < prev)
 			monotone = 0;
@@ -85,8 +115,9 @@ static void test_control(void)
 	check("a fuller queue never stretches more", monotone);
 
 	/* And it must survive being asked nonsense. */
-	check("a zero target is 1:1", resamp_control_step(10, 0) == RESAMP_UNITY);
-	check("a negative target is 1:1", resamp_control_step(10, -5) == RESAMP_UNITY);
+	check("a zero target is 1:1", resamp_control_step(10, 0, RESAMP_UNITY) == RESAMP_UNITY);
+	check("a negative target is 1:1", resamp_control_step(10, -5, RESAMP_UNITY) == RESAMP_UNITY);
+	check("an unmeasured rate is 1:1", resamp_control_step(target, target, 0) == RESAMP_UNITY);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -224,28 +255,30 @@ int main(void)
 	test_rate(RESAMP_UNITY - RESAMP_UNITY / 25, "stretched 4 %", 1, 0, &worst);
 	test_rate(RESAMP_UNITY + RESAMP_UNITY / 25, "squeezed 4 %", 0, 1, &worst);
 
-	/* The buffer the backend gives it is 80 frames for 72 in; a step at the
-	 * clamp must not overflow it. */
+	/* The output buffer in emu_gambatte.cpp is 96 frames for at most 72 in,
+	 * and a step anywhere in the +-20 % clamp must fit in it. Overflowing it
+	 * would not crash - resamp_run() stops at out_cap - it would silently
+	 * drop samples and break the stream, which is worse. */
 	{
-		static int16_t in[BLOCK * 2], out[80 * 2];
+		static int16_t in[BLOCK * 2], out[96 * 2];
 		resamp r;
 		int next = 0;
 
 		resamp_reset(&r);
-		resamp_set_step(&r, RESAMP_UNITY - RESAMP_UNITY / 25);
+		resamp_set_step(&r, RESAMP_UNITY - RESAMP_UNITY / 5);
 
 		unsigned worst = 0;
 		for (int block = 0; block < 200; block++)
 		{
 			fill_ramp(in, BLOCK, &next);
 
-			const unsigned n = resamp_run(&r, in, BLOCK, out, 80);
+			const unsigned n = resamp_run(&r, in, BLOCK, out, 96);
 
 			if (n > worst)
 				worst = n;
 		}
-		printf("worst block at full stretch: %u frames\n", worst);
-		check("the backend's 80-frame buffer is big enough", worst <= 80);
+		printf("worst block at full stretch (20 %%): %u frames\n", worst);
+		check("the backend's 96-frame buffer is big enough", worst <= 96);
 	}
 
 	printf("resamp: %s\n", failures ? "FAIL" : "ok");

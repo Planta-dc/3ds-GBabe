@@ -24,6 +24,9 @@ tools/host/gbabe-presenttest
 tools/host/gbabe-bench
 tools/host/gbabe-drawtest
 tools/host/gbabe-logtest
+tools/host/gbabe-dectest
+tools/host/gbabe-resamptest
+tools/host/gbabe-audiospeed
 tools/host/logtest.log
 tools/host/*.ppm
 tools/host/*.png

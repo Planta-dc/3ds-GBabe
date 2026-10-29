@@ -121,8 +121,11 @@ gambatte::uint_least32_t sound_buf[SOUND_BUF];
  * at 32768 Hz; 72 leaves room for a block that overruns. */
 int16_t audio_out[72 * 2];
 
-/* And then the rate matcher: 72 frames stretched by up to 5 % is 76, so 80. */
-int16_t audio_play[80 * 2];
+/* And then the rate matcher. It stretches by up to 20 % when the console is
+ * short of time, so 72 frames can become 90: 96 is the round number above
+ * that, and resamp_run() is told the real capacity rather than trusting the
+ * clamp to keep inside it. */
+int16_t audio_play[96 * 2];
 resamp   shaper;
 
 /* ------------------------------------------------------------------------- */
@@ -602,10 +605,11 @@ extern "C" void emu_run_frame(void)
 
 			if (out > 0)
 			{
-				/* 548.6 samples a frame is only the right number
-				 * if the frame rate is right. It is not, always:
-				 * stretch or squeeze by up to 5 % so the FIFO
-				 * stays near its target instead of draining into
+				/* 548.6 samples a frame is only the right
+				 * number if the frame rate is right, and it is
+				 * not always: stretch or squeeze to follow the
+				 * rate the console is actually producing, so the
+				 * FIFO stays on target instead of draining into
 				 * an underrun (see include/resamp.h). */
 				resamp_set_step(&shaper, audio_rate_step());
 
