@@ -430,6 +430,8 @@ make -C tools/host pacetest            # does the frame loop keep time, and
 make -C tools/host presenttest         # wait for the panel, or present now?
 make -C tools/host drawtest            # the scaled transpose, every panel
                                        #   pixel, at every band height
+make -C tools/host resamptest          # the audio rate matcher: no dropped
+                                       #   samples, no clicks per block
 make -C libretro test                  # the libretro core, against the same
                                        #   reference frame
 ./tools/host/gbabe-host game.gb 300 out.ppm 0

@@ -11,6 +11,7 @@
 #   make pacertest             check the frame pacing arithmetic
 #   make presenttest           check the present path's wait-or-tear trade
 #   make drawtest              check the scaled transpose against a reference
+#   make resamptest            check the audio rate matcher's arithmetic
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -39,6 +40,7 @@ CSTD    := -std=gnu11
 CXXSTD  := -std=gnu++11 -fno-exceptions -fno-rtti
 
 FRONT_C := $(ROOT)/source/video.c $(ROOT)/source/audio.c \
+           $(ROOT)/source/resamp.c \
            $(ROOT)/source/palette.c $(ROOT)/source/config.c \
            $(ROOT)/source/log.c \
            $(ROOT)/source/ui.c $(ROOT)/source/ui_gfx.c \
@@ -94,10 +96,11 @@ acid2: $(BIN)
 # The sound path is real-time, so this takes two seconds of wall clock. The
 # stand-in CSND is only enabled for this run.
 audiotest: $(OBJDIR)/audio.o $(OBJDIR)/stub.o $(OBJDIR)/log.o \
-	   $(OBJDIR)/config.o $(OBJDIR)/palette.o $(OBJDIR)/audiotest.o
+	   $(OBJDIR)/config.o $(OBJDIR)/palette.o $(OBJDIR)/audiotest.o \
+	   $(OBJDIR)/resamp.o
 	$(CC) $(CFLAGS) -o gbabe-audiotest $(OBJDIR)/audio.o $(OBJDIR)/stub.o \
 		$(OBJDIR)/log.o $(OBJDIR)/config.o $(OBJDIR)/palette.o \
-		$(OBJDIR)/audiotest.o -lm
+		$(OBJDIR)/resamp.o $(OBJDIR)/audiotest.o -lm
 	GBABE_HOST_AUDIO=1 ./gbabe-audiotest
 	@echo
 	@echo "audiotest: again with only two CSND channels (the mono fallback)"
@@ -110,6 +113,13 @@ presenttest: $(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c \
 	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-presenttest \
 		$(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c
 	./gbabe-presenttest
+
+# The audio rate matcher, as arithmetic: the control law and the resampler on
+# their own, with no console, no DSP and no timing in the way.
+resamptest: $(ROOT)/source/resamp.c $(ROOT)/include/resamp.h resamptest.c
+	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-resamptest \
+		$(ROOT)/source/resamp.c resamptest.c -lm
+	./gbabe-resamptest
 
 # The transpose, one panel pixel at a time, against a reference built from the
 # documented geometry - at every band height, every scale and an odd pitch.

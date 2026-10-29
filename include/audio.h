@@ -65,6 +65,12 @@ bool audio_enabled(void);
 /* Number of frames the sound FIFO is behind, for the HUD. */
 unsigned audio_queue_ms(void);
 
+/* How fast the decimator's output should be fed to the FIFO to keep it near its
+ * target level, in 16.16 (RESAMP_UNITY is 1:1). 1:1 when the queue is where it
+ * should be, below it when the queue is draining, above it when it is filling -
+ * see include/resamp.h for why the sample rate cannot be taken as fixed. */
+int32_t audio_rate_step(void);
+
 #ifdef __cplusplus
 }
 #endif

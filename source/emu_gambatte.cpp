@@ -46,6 +46,7 @@
 #include "palette.h"
 
 #include "gambatte.h"
+#include "resamp.h"
 
 /* ------------------------------------------------------------------------- */
 /* State                                                                     */
@@ -147,6 +148,10 @@ gambatte::uint_least32_t sound_buf[SOUND_BUF];
  * stage 2 by another 8, so 520 and 72 frames are those bounds with slack. */
 int16_t audio_mid[520 * 2];
 int16_t audio_out[72 * 2];
+
+/* And then the rate matcher: 72 frames stretched by up to 5 % is 76, so 80. */
+int16_t audio_play[80 * 2];
+resamp   shaper;
 
 /* ------------------------------------------------------------------------- */
 /* Save files                                                                */
@@ -404,6 +409,10 @@ extern "C" void emu_unload(void)
 	sram_dirty = false;
 	error_pending = false;
 	memset(&info, 0, sizeof info);
+
+	/* A new game is new audio: the rate matcher must not carry a fractional
+	 * position from the old one. */
+	resamp_reset(&shaper);
 }
 
 extern "C" const char *emu_load(const char *path)
@@ -604,7 +613,21 @@ extern "C" void emu_run_frame(void)
 						  samples, audio_mid);
 			unsigned out = stage2.run(audio_mid, mid, audio_out);
 			if (out > 0)
-				audio_push_frames(audio_out, out);
+			{
+				/* 548.6 samples a frame is only the right number
+				 * if the frame rate is right. It is not, always:
+				 * stretch or squeeze by up to 5 % so the FIFO
+				 * stays near its target instead of draining into
+				 * an underrun (see include/resamp.h). */
+				resamp_set_step(&shaper, audio_rate_step());
+
+				unsigned n = resamp_run(&shaper, audio_out, out,
+							audio_play,
+							sizeof audio_play /
+							(2 * sizeof audio_play[0]));
+				if (n > 0)
+					audio_push_frames(audio_play, n);
+			}
 		}
 
 		audio_ticks_ += svcGetSystemTick() - t_done;

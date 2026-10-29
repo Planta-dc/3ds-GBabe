@@ -1249,3 +1249,83 @@ which is what `under 176` underruns and a queue swinging between 15 and 70 ms
 look like. 13.35 ms of work in a 16.74 ms budget is a full-speed console; the
 frame rate was low because it was *waiting*, and the sound was paying for it.
 If the next log still crackles, the next change is a resize in the resampler.
+
+## 19. The sound has to be elastic, because the frame rate is not
+
+Section 18 ended with a warning: fixing the frame loop stops the FIFO draining,
+but only while the console is keeping up. This is the part that makes the sound
+survive the times it is not.
+
+### The arithmetic that made the crackle
+
+Gambatte emits a fixed 35112 samples per emulated frame. The decimator turns
+that into 548.6 samples at 32768 Hz - a rate that is correct at exactly 59.7275
+fps and nowhere else:
+
+```
+fps    produced/s   consumed/s   missing
+59.73    32,768       32,768         0
+57.00    31,283       32,768     -1,485   (-91 ms of buffer a minute)
+53.20    29,198       32,768     -3,570   (-214 ms a minute)
+```
+
+The FIFO holds 4096 frames (125 ms). At 56.7 fps it is empty about every 2.5
+seconds, and every time it empties `audio_pump()` says so and restarts the
+stream: a hole, a count in `underruns`, and the click that comes with both. The
+0.3.1 log has 176 of those in 230 seconds, which is one every 1.3 s - the
+console was never at full speed, so the holes never stopped.
+
+### What a real audio path does
+
+RetroArch's audio drivers resample against a rate the frontend can nudge
+("dynamic rate control"), and that is what this now does too:
+
+```
+decimator -> resampler (0.96x .. 1.04x) -> FIFO -> CSND
+                   ^                         |
+                   +----- queue level --------+
+```
+
+* `resamp_control_step()` reads the FIFO level against its target (2 blocks,
+  2048 frames) and returns a step: 1.0 on target, below 1.0 when the queue is
+  draining (produce *more* samples per emulated frame, i.e. stretch the audio),
+  above 1.0 when it is filling. Clamped to +-5 %.
+* `resamp_run()` is a linear interpolator with one frame of carry, so block
+  boundaries do not click. At 1:1 it is the identity - every input sample comes
+  out once, in order, which the host test checks over 20 blocks.
+* The step is only changed when the queue is off target by more than 2 ms, so a
+  console that is keeping up resamples *nothing*. It is a safety net, not a
+  mixer.
+
+A 5 % pitch shift is roughly a twentieth of a semitone; a Game Boy's square
+waves at that shift are indistinguishable. A hole every two seconds is not.
+
+### What the log will say
+
+The audio line grew a rate and lost a lie:
+
+```
+audio: 3750 blocks, late 2607 (worst 4.20 ms), stalled 3, underruns 0, ...,
+       queue 41 ms, margin 5.00 ms, rate 0.997
+```
+
+* `rate` is the resampler's current step. `1.000` is a console at full speed.
+  On a slow frame it dips - `0.96` means the audio is being stretched by 4 % to
+  keep the queue fed, and that is the port working as intended.
+* `stalled` counts blocks more than half a second late, which is what the old
+  `worst 56344.07 ms` really was: the application having been somewhere else (an
+  SD write, a menu). It is reported apart from `worst`, which now means
+  scheduling again.
+* `underruns` is the number to watch. It should be 0.
+
+### Tested
+
+`make -C tools/host resamptest`, in CI: the control law (1:1 on target, stretch
+when low, squeeze when full, monotone, clamped at 5 %, safe on nonsense), the
+identity at 1:1, the output count at both clamps, the worst block (75 frames for
+an 80-frame buffer) and the absence of a discontinuity at block boundaries on a
+200 Hz sine. `audiotest` still runs the whole audio path in real time and still
+reports a continuous stream.
+
+Not verified on hardware yet - the same caveat as every other claim in this
+file. `rate` in the next log is what will settle it.
