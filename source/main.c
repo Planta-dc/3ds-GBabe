@@ -258,25 +258,17 @@ int main(int argc, char **argv)
 			if (!frame_due())
 			{
 				u64 now = svcGetSystemTick();
-				u64 wake = pace.next ? pace.next : now;
 
-				const u64 audio_at = audio_next_deadline();
-				if (audio_at != 0 && audio_at < wake)
-					wake = audio_at;
-
-				/* The panel still has the last frame: check back on
-				 * it. This is the vblank wait, moved out of the
-				 * frame and into the idle time the loop would have
-				 * slept through - which is the difference between
-				 * 57.8 and 59.7 fps (see video.h). Slices rather
-				 * than a tight loop, so it costs a handful of
-				 * wakeups and not a busy spin. */
-				if (video_swap_pending())
-				{
-					const u64 slice = FRAME_TICKS / 64;
-					if (now + slice < wake)
-						wake = now + slice;
-				}
+				/* Everything worth waking for, and the swap
+				 * poll that stands in for the vblank wait - the
+				 * arithmetic is in pace.h, where the host tests
+				 * it (a deadline in the past must not spin the
+				 * loop, and a pending swap must not delay a
+				 * frame). */
+				const u64 wake = pace_wake(now, pace.next,
+							   audio_next_deadline(),
+							   video_swap_pending(),
+							   FRAME_TICKS);
 
 				if (wake > now)
 					svcSleepThread(TICKS_TO_NS(wake - now));

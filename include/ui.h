@@ -31,9 +31,6 @@ bool ui_browse_rom(char *out, size_t out_len);
  * application. */
 bool ui_in_game_menu(void);
 
-/* Redraw the bottom screen status lines (title, fps, palette, controls). */
-void ui_draw_hud(void);
-
 /* Per-frame bookkeeping for the HUD: account the ticks spent emulating,
  * blitting, doing the once-a-second work and waiting for the panel, and refresh
  * the profile once a second. A tick is 1/SYSCLOCK_ARM11 s.
@@ -51,7 +48,8 @@ void ui_note_frame(uint64_t core_ticks, uint64_t blit_ticks,
 		   unsigned late_frames, unsigned resyncs);
 
 /* Do the once-a-second work that is too expensive for a frame boundary: redraw
- * the bottom-screen status readout if it is due. Call it between
- * video_end_frame() and video_present_sync(), where the wait for the panel
- * absorbs it - after that wait there is no time left and it costs a frame. */
+ * the bottom-screen status readout if it is due, and spend one band of its
+ * present. Call it in the idle time between frames, where the loop would
+ * otherwise be asleep - it is ~16 ms of work in 8 slices of ~2 ms, and in one
+ * go it costs a whole frame (docs/PORT-NOTES.md §13). */
 void ui_idle_work(void);

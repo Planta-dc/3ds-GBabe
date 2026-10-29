@@ -792,12 +792,6 @@ static void hud_render(void)
 	scr_hud(&h);
 }
 
-void ui_draw_hud(void)
-{
-	hud_render();
-	ui_present();
-}
-
 void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 		   u64 post_ticks, u64 wait_ticks, u64 frame_ticks,
 		   unsigned late_frames, unsigned resyncs)

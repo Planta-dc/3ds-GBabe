@@ -452,9 +452,12 @@ nothing at all once switched off. `make -C tools/host logtest` checks the
 format, because the file is the interface: a report is read from it by hand.
 
 That is also why the numbers it prints are defined precisely. `core` is the
-emulator core (CPU + PPU + APU), `blit` is the scaled copy, `sync` is waiting
-for the panel to take the finished frame, `wait` is pacing, and `other` is the
-rest of the loop - which is where a blocking service call would show up. A frame
+emulator core (CPU + PPU + APU), `blit` is the scaled copy, `post` is the
+once-a-second work (status readout, log, cartridge save), `sync` is waiting for
+the panel to take the finished frame and `wait` is pacing - since §14 both of
+those happen in the same idle window, so `sync` is reported as part of `wait`
+rather than as frame time. `other` is the rest of the frame, which is where a
+blocking service call would show up. A frame
 that is slow with a large `other` is the port's fault; a large `core` is the
 ARM11 and needs a dynarec, not tuning.
 
@@ -481,11 +484,12 @@ appeared wherever the scanout happened to be. And because the Game Boy runs at
 59.7275 Hz against a 60 Hz panel, the position of that race drifts by 0.45 % of
 a frame every frame - the tear line slides.
 
-The fix is one wait: after asking for the swap, wait for the vblank that takes
-it, and re-check `gspIsPresentPending()` in case the request missed that vblank
-by a hair. The wait costs nothing, because it happens in the idle part of the
-frame anyway. It is kept out of the `blit` figure in the log (`sync`), or it
-would look as if the copy had got 12 ms slower.
+The fix is one wait: the panel has to take the swap before the buffer it
+released is written to again, and `gspIsPresentPending()` says whether it has.
+Where that wait happens moved in §14 - it belongs in the idle time before the
+next frame, not inside the frame - but the reasoning here is unchanged: it is
+kept out of the `blit` figure in the log (`sync`), or it would look as if the
+copy had got 12 ms slower.
 
 The wait is skipped when the frame has already overrun its own 16.74 ms period
 (`video_end_frame()` compares against `video_begin_frame()`). Waiting then would
@@ -598,7 +602,7 @@ first measurement of this port that was not taken on a PC:
 |---|---|---|
 | `core` | 8.6 - 16.5 ms | the interpreter, scene dependent. Inside the 16.74 ms budget, but not by much in heavy scenes |
 | `blit` | 0.1 ms | the whole-frame column-major blit is free. The PC said 0.05 ms; the console agrees |
-| `sync` | 3 - 8 ms, occasionally 16.6 | the vblank wait, as designed |
+| `sync` | 3 - 8 ms, occasionally 16.6 | the vblank wait. In 0.2.0 it was taken out of the frame; §14 moved it into the idle window, so it is part of `wait` in the log now, not extra frame time |
 | `fps` | 57.8 - 58.8 | **not** 59.7275, which is the one number that explains the rest |
 | a 26 ms frame | about once a second | 10 ms of core plus a whole 16.7 ms panel period: the swap landed just after a vblank |
 | `sync_skip` | 0 in light scenes, 1 - 8/s when `core` >= 14 | frames that had to be presented without the wait: the tearing that is left |
@@ -934,6 +938,15 @@ panel period (16.7 ms) rather than wall time, because a frame can no longer be
 made slow by waiting.
 
 ### The simulation, and its honest limit
+
+The decision itself - what the loop is willing to wake for - is in
+`include/pace.h` as `pace_wake()`, because it is the third piece of loop
+arithmetic in this file and the first two both had bugs. Writing the tests found
+one in the new code with no hardware involved: a deadline already in the past
+returned a wake time *behind* the clock, which the caller turns into a 0.2 ms
+sleep - a spin, polluting the very idle time the change exists to use. It now
+returns `now` at worst, and `pacetest` holds it to that along with "a pending
+swap cannot delay a frame" and "a zero-length frame cannot divide by zero".
 
 Modelling the loop against a 60 Hz panel grid (`/tmp` scratch, not committed):
 late starts go from 11 % to 0 % with identical throughput when the wait fits in

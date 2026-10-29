@@ -108,3 +108,48 @@ static inline bool pace_due(pace_state *p, uint64_t now, uint64_t frame_ticks)
 
 	return true;
 }
+
+/* When the loop should wake from its idle wait.
+ *
+ * Between frames the loop is asleep until one of three things is worth waking
+ * for, whichever comes first:
+ *
+ *   frame_at   the next emulated frame is due (pace_wait() above);
+ *   audio_at   a sound block has to be submitted, or the FIFO runs dry;
+ *   swap_pending  the panel has not taken the finished frame yet, in which case
+ *              it is checked every `frame_ticks / 64` (~0.26 ms) rather than
+ *              waited for. That is the vblank wait, spent out of the idle time
+ *              instead of out of the next frame (docs/PORT-NOTES.md §14).
+ *
+ * The result may already have passed (`now` is returned in that case), which the
+ * caller has to handle with a short sleep - waking is never deferred past
+ * `frame_at`, so a pending swap cannot delay a frame, and a deadline in the past
+ * cannot spin the loop on a zero sleep.
+ *
+ * `audio_at` 0 means "no deadline". `frame_ticks` is one Game Boy frame.
+ * Pure arithmetic, so tools/host/pacing_test.c can hold it to the cases that
+ * cannot be provoked on demand in a live loop.
+ */
+static inline uint64_t pace_wake(uint64_t now, uint64_t frame_at,
+				 uint64_t audio_at, bool swap_pending,
+				 uint64_t frame_ticks)
+{
+	uint64_t wake = (frame_at > now) ? frame_at : now;
+
+	if (audio_at != 0 && audio_at < wake)
+		wake = audio_at;
+
+	if (swap_pending && frame_ticks > 0)
+	{
+		const uint64_t slice = frame_ticks / 64;
+
+		if (slice > 0 && now + slice < wake)
+			wake = now + slice;
+	}
+
+	/* A deadline that has already passed returns `now`, never something
+	 * earlier: the caller turns that into a short sleep, and a wake time
+	 * behind the clock would turn every iteration into one - a spin, which
+	 * on a handheld is heat and battery for nothing. */
+	return (wake > now) ? wake : now;
+}
