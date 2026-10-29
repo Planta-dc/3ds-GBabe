@@ -22,6 +22,7 @@ tools/host/gbabe-audiotest
 tools/host/gbabe-pacetest
 tools/host/gbabe-presenttest
 tools/host/gbabe-bench
+tools/host/gbabe-drawtest
 tools/host/gbabe-logtest
 tools/host/logtest.log
 tools/host/*.ppm

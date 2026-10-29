@@ -47,7 +47,7 @@ TARGET      :=  gbabe
 #---------------------------------------------------------------------------------
 VERSION_MAJOR   :=  0
 VERSION_MINOR   :=  3
-VERSION_MICRO   :=  0
+VERSION_MICRO   :=  1
 
 APP_PRODUCT_CODE :=  CTR-H-GBABE
 APP_UNIQUE_ID    :=  0xEABE1
@@ -66,7 +66,14 @@ BANNERTOOL  ?=  bannertool
 #---------------------------------------------------------------------------------
 # code generation
 #---------------------------------------------------------------------------------
-ARCH    :=  -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+# -marm and -mfpu=vfp are named rather than implied. RetroArch's 3DS build
+# passes both explicitly, and the emulator is a big switch over opcodes: if the
+# toolchain were configured --with-mode=thumb this would be Thumb-1 code (ARMv6K
+# has no Thumb-2), which is the last place anyone would look for a frame that
+# does not fit. Naming the state costs nothing and makes the binary's instruction
+# set a property of this file rather than of the toolchain build.
+ARCH    :=  -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft \
+            -marm -mfpu=vfp
 
 # -O3 -flto. Measured on the host build (`make -C tools/host bench`), the
 # difference from -O2 is only a couple of percent there; LTO is kept because the
@@ -79,8 +86,8 @@ CFLAGS  :=  -g -Wall -Wextra $(OPT) -ffunction-sections -fdata-sections \
             -fno-strict-aliasing -fomit-frame-pointer \
             -std=gnu11 $(ARCH)
 
-# Which build this is: the version says 0.3.0 for everything that lands while
-# 0.3.0 is current, so the log identifies its own binary by date + revision
+# Which build this is: the version says 0.3.1 for everything that lands while
+# 0.3.1 is current, so the log identifies its own binary by date + revision
 # instead. `date` is used rather than only the revision because a build from a
 # dirty tree is exactly the one worth identifying. Git is absent when the tree
 # was unpacked from an archive, hence the fallback.

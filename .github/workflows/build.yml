@@ -98,6 +98,14 @@ jobs:
       - name: Present path
         run: make -C tools/host presenttest
 
+      # The scaled transpose, pixel by pixel, against a reference built from the
+      # documented geometry - at every band height (1, 2, 3, 7, 16, 17, 23, 64),
+      # every scale mode and an odd source pitch. Banding is an optimisation
+      # that can produce a picture which is *almost* right, which is the kind of
+      # fault a screenshot of dmg-acid2 would not catch.
+      - name: Scaled transpose
+        run: make -C tools/host drawtest
+
       # The libretro core: the same Gambatte behind the libretro API, so the
       # emulation can run under a mature frontend (docs/RETROARCH-3DS.md). It
       # has to draw dmg-acid2 exactly like the 3DS path does, or the

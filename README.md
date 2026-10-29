@@ -231,6 +231,12 @@ sdmc:/3ds/gbabe/debug.log
   `post` (the once-a-second work - status redraw, log flush, cartridge save -
   done in the gap between handing the frame to the panel and waiting for it,
   where it is free) and `sync` (that wait);
+* the `perf` line sample above is from a build before the split, which is why
+  it has no `emu`/`dec`/`draw`: the current line reads
+  `core=… emu=… dec=… draw=… blit=…`, where `core` is still the whole of
+  `emu_run_frame()` and the three after it are its parts - Gambatte, the audio
+  decimator and the scaled transpose into the panel. `blit` is the cache flush
+  and the buffer swap, and never was the scaled copy (docs/PORT-NOTES.md §16);
 * four counters that say *why* the frame rate is not 59.7: `sync_skip` (frames
   presented without waiting for the panel, because their own work overran a
   frame period - the only way a picture can still tear), `sync_late` (swaps the
@@ -422,6 +428,8 @@ make -C tools/host audiotest           # is the sound stream continuous?
 make -C tools/host pacetest            # does the frame loop keep time, and
                                        #   does it know when to wake?
 make -C tools/host presenttest         # wait for the panel, or present now?
+make -C tools/host drawtest            # the scaled transpose, every panel
+                                       #   pixel, at every band height
 make -C libretro test                  # the libretro core, against the same
                                        #   reference frame
 ./tools/host/gbabe-host game.gb 300 out.ppm 0

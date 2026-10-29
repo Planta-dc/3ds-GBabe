@@ -218,7 +218,7 @@ frame.
 
 ```
 $ make -C libretro test
-core: GBabe 0.3.0 (gb|gbc)
+core: GBabe 0.3.1 (gb|gbc)
 av: 160x144, 59.7275 fps, 32768 Hz
 ran 300 frames: 300 video callbacks, ...
 audio: 548.7 samples per frame (548.6 expected)

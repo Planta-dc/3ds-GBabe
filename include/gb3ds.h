@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define GBABE_VERSION       "0.3.0"
+#define GBABE_VERSION       "0.3.1"
 
 /* Which build this is, stamped in by the Makefile (date + git revision).
  *
@@ -78,14 +78,40 @@ typedef struct
 	float fps;      /* presented frames per second                          */
 	float frame_ms; /* wall time per presented frame (all of it)            */
 	float worst_ms; /* the slowest single frame in the last second           */
-	float core_ms;  /* emulation: CPU + PPU + APU                           */
-	float blit_ms;  /* scaled copy into the framebuffer                     */
+	float core_ms;  /* everything emu_run_frame() did: emu + audio + draw   */
+	float emu_ms;   /* Gambatte's CPU + PPU + APU, nothing else             */
+	float audio_ms; /* the 2 MHz -> 32 kHz decimator                        */
+	float draw_ms;  /* scaled transpose into the framebuffer (64k writes)   */
+	float blit_ms;  /* cache flush + buffer swap                            */
 	float post_ms;  /* once-a-second work done before that wait (free)      */
 	float sync_ms;  /* waiting for the panel to take the finished frame     */
 	float wait_ms;  /* paced off waiting for the next Game Boy frame        */
 } gbabe_perf;
 
 extern gbabe_perf g_perf;
+
+/* One frame's cost, in ARM11 ticks, split far enough to blame one part.
+ *
+ *   core  = emu + audio + draw + whatever emu_run_frame() spent elsewhere
+ *   frame = core + blit + post (+ the idle wait, which `wait` reports)
+ *
+ * They are passed as a struct rather than as nine arguments because the
+ * interesting question is always which of them is the big one, and a call with
+ * nine unnamed uint64_ts cannot be read at the call site. */
+typedef struct
+{
+	uint64_t core;   /* emu_run_frame() in full                              */
+	uint64_t emu;    /*   of which Gambatte                                 */
+	uint64_t audio;  /*   of which the decimator                            */
+	uint64_t draw;   /*   of which the scaled transpose                     */
+	uint64_t blit;   /* video_end_frame(): cache flush + swap               */
+	uint64_t sync;   /* waiting for the panel to take the swap              */
+	uint64_t post;   /* ui_idle_work(): once-a-second work, before the wait */
+	uint64_t wait;   /* slept, waiting for the next frame to be due         */
+	uint64_t frame;  /* the whole frame, start to start                     */
+	unsigned late;   /* frames that started after their slot                */
+	unsigned resyncs;/* backlogs thrown away                                */
+} gbabe_frame_cost;
 
 /* ------------------------------------------------------------------------- */
 

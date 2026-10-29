@@ -70,6 +70,7 @@ make -C tools/host acid2
 make -C tools/host logtest
 make -C tools/host pacetest
 make -C tools/host presenttest
+make -C tools/host drawtest
 
 # Real-time: two seconds for the stereo run, two for the mono fallback.
 echo "=== sound path keeps CSND fed ==="

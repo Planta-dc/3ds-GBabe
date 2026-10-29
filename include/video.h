@@ -20,12 +20,27 @@ void video_begin_frame(void);
 /* Draw a whole 160x144 RGB565 frame, `pitch` pixels per line.
  *
  * The top LCD is a rotated panel, so the picture is stored column by column.
- * The frame is scaled down a destination column at a time, which makes every
- * write a contiguous run of dst_h halfwords instead of one halfword every 480
- * bytes - the difference between touching each cache line once and touching it
- * 240 times per frame. The source is read column by column too, and stays in
- * cache while it is being read. */
+ * The frame is scaled a band of destination rows at a time: every write is
+ * still a contiguous run of halfwords down a column, and the band is small
+ * enough that the handful of source rows it needs stay in L1 while all dst_w
+ * columns of the band are written. See the comment there for why the banding
+ * is what makes the gather affordable. */
 void video_draw_frame(const uint16_t *frame565, int pitch);
+
+/* Ticks spent inside video_draw_frame() since the last call, and reset it.
+ *
+ * Worth its own figure: the scaled transpose is the only part of the frame
+ * whose cost is not obvious from the code - it is 267x240 = 64,080 writes for
+ * a 23,040-pixel picture in the default scale, gathered from the source with a
+ * stride, on a CPU with a 16 KiB L1 and no L2. */
+uint64_t video_draw_take(void);
+
+#ifdef GBABE_HOST_TESTS
+/* Host builds only: choose the height of the destination band. video_draw_frame
+ * walks the picture in bands of VIDEO_BAND rows; the host test walks that number
+ * past every awkward remainder to prove the banding cannot change the picture. */
+void video_test_set_band(int rows);
+#endif
 
 /* Flush the back buffer and hand it to the panel.
  *

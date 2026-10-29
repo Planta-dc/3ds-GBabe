@@ -10,6 +10,7 @@
 #   make audiotest             check that the sound path keeps CSND fed
 #   make pacertest             check the frame pacing arithmetic
 #   make presenttest           check the present path's wait-or-tear trade
+#   make drawtest              check the scaled transpose against a reference
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -110,6 +111,20 @@ presenttest: $(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c \
 		$(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c
 	./gbabe-presenttest
 
+# The transpose, one panel pixel at a time, against a reference built from the
+# documented geometry - at every band height, every scale and an odd pitch.
+# video.o is compiled with GBABE_HOST_TESTS so the test can choose the band.
+drawtest: $(OBJDIR)/video-test.o $(OBJDIR)/stub.o drawtest.c \
+	  $(ROOT)/include/video.h $(ROOT)/include/gb3ds.h
+	$(CC) $(CFLAGS) $(CSTD) $(DEFS) -DGBABE_HOST_TESTS $(INCLUDE) \
+		-o gbabe-drawtest $(OBJDIR)/video-test.o $(OBJDIR)/stub.o \
+		drawtest.c
+	./gbabe-drawtest
+
+$(OBJDIR)/video-test.o: $(ROOT)/source/video.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) $(CSTD) $(DEFS) -DGBABE_HOST_TESTS $(INCLUDE) -c $< -o $@
+
 run: $(BIN)
 	./$(BIN) $(ROM) $(or $(FRAMES),300) $(or $(OUT),screen.ppm)
 
@@ -146,4 +161,4 @@ clean:
 	rm -rf $(OBJDIR) $(BIN) gbabe-bench gbabe-logtest gbabe-audiotest \
 		gbabe-pacetest gbabe-presenttest *.ppm
 
-.PHONY: all check acid2 audiotest run bench logtest pacertest clean
+.PHONY: all check acid2 audiotest run bench logtest pacertest drawtest clean

@@ -54,6 +54,7 @@ static bool     hud_due;         /* the status readout needs a redraw */
 static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
                 hud_sum_wait, hud_sum_frame;
+static u64      hud_sum_emu, hud_sum_audio, hud_sum_draw;
 static u64      hud_worst; /* slowest single frame in the window */
 static unsigned hud_late;    /* frames that started after their slot      */
 static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
@@ -792,21 +793,22 @@ static void hud_render(void)
 	scr_hud(&h);
 }
 
-void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
-		   u64 post_ticks, u64 wait_ticks, u64 frame_ticks,
-		   unsigned late_frames, unsigned resyncs)
+void ui_note_frame(const gbabe_frame_cost *c)
 {
-	hud_late += late_frames;
-	hud_resyncs += resyncs;
+	hud_late += c->late;
+	hud_resyncs += c->resyncs;
 	hud_frames++;
-	hud_sum_core += core_ticks;
-	hud_sum_blit += blit_ticks;
-	hud_sum_sync += sync_ticks;
-	hud_sum_post += post_ticks;
-	hud_sum_wait += wait_ticks;
-	hud_sum_frame += frame_ticks;
-	if (frame_ticks > hud_worst)
-		hud_worst = frame_ticks;
+	hud_sum_core += c->core;
+	hud_sum_emu += c->emu;
+	hud_sum_audio += c->audio;
+	hud_sum_draw += c->draw;
+	hud_sum_blit += c->blit;
+	hud_sum_sync += c->sync;
+	hud_sum_post += c->post;
+	hud_sum_wait += c->wait;
+	hud_sum_frame += c->frame;
+	if (c->frame > hud_worst)
+		hud_worst = c->frame;
 
 	u64 now = svcGetSystemTick();
 	if (hud_last_tick == 0)
@@ -826,6 +828,9 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 	const double n = (hud_frames > 0) ? (double)hud_frames : 1.0;
 	g_perf.fps = hud_fps;
 	g_perf.core_ms = (float)((double)hud_sum_core * ticks_to_ms / n);
+	g_perf.emu_ms = (float)((double)hud_sum_emu * ticks_to_ms / n);
+	g_perf.audio_ms = (float)((double)hud_sum_audio * ticks_to_ms / n);
+	g_perf.draw_ms = (float)((double)hud_sum_draw * ticks_to_ms / n);
 	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
 	g_perf.sync_ms = (float)((double)hud_sum_sync * ticks_to_ms / n);
 	g_perf.post_ms = (float)((double)hud_sum_post * ticks_to_ms / n);
@@ -844,10 +849,18 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 
 	video_sync_take(&sync_skip, &sync_late);
 
-	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
+	/* `core` is kept as it always was - the whole of emu_run_frame() - and
+	 * the three figures after it are its parts, so a new log still compares
+	 * with the old ones: emu+audio+draw is Gambatte, the decimator and the
+	 * scaled transpose, and what is left over is the loop's own bookkeeping.
+	 * Until now the transpose was invisible, counted in `core` while the
+	 * figure named `blit` measured only the flush and the swap. */
+	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f emu=%.1f "
+		 "dec=%.1f draw=%.1f blit=%.1f "
 		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums "
 		 "sync_skip=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
-		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms,
+		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms,
+		 g_perf.emu_ms, g_perf.audio_ms, g_perf.draw_ms, g_perf.blit_ms,
 		 g_perf.post_ms, g_perf.sync_ms, g_perf.wait_ms,
 		 /* `sync` is a part of `wait` now, not extra: the panel
 		  * wait happens in the same idle window, so subtracting both
@@ -860,6 +873,7 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 	hud_late = hud_resyncs = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
 		hud_sum_wait = hud_sum_frame = 0;
+	hud_sum_emu = hud_sum_audio = hud_sum_draw = 0;
 	hud_worst = 0;
 	hud_last_tick = now;
 

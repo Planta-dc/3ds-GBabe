@@ -7,6 +7,15 @@
  */
 #pragma once
 
+/* libctru's own headers are C++-safe; this stand-in was written for the C
+ * front-end, and the Gambatte backend is C++ and calls into some of it (a tick
+ * counter, a sleep). Without these guards those calls fail to link as
+ * "undefined reference to svcGetSystemTick()" - with a C signature mangled at
+ * the call site and a plain one at the definition. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -197,3 +206,7 @@ Result csndPlaySound(int chn, u32 flags, u32 sampleRate, float vol, float pan,
 
 void *linearAlloc(size_t size);
 void  linearFree(void *mem);
+
+#ifdef __cplusplus
+}
+#endif
