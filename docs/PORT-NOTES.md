@@ -956,3 +956,30 @@ makes it 17.3. What the simulation cannot prove is the size of the slack on
 ARM11, because it cannot model cache or `emu_run_frame()`'s real distribution.
 The next log answers it: `wait` should rise to ~6 ms, `frame` should fall to
 ~10.7, `pace_late` should collapse toward 0, and `fps` should be 59.7.
+
+---
+
+## 15. The next question is not a front-end question
+
+§14 moved the panel wait out of the frame, and the third log says it worked -
+`sync` 5.7 → 0.0 ms, `sync_skip` 0, `sync_late` 0 - while the frame rate got
+*worse* (57.8 → 56.8) because the time freed did not stay free: it reappeared in
+`core`, 13.2 → 16.6 ms on the same ROM, and `wait` is 0.0 ms, i.e. the loop
+never sleeps. The emulator now runs while the previous frame's GPU transfer and
+cache flush are still in flight and pays for the contention.
+
+With `core` at 16.6 ms of a 16.74 ms budget there is nothing left to schedule
+around. Before reworking the presentation a fourth time, the question worth
+answering is whether *any* frontend on this hardware runs Gambatte faster - so
+`docs/RETROARCH-3DS.md` reads RetroArch's own 3DS drivers and `libretro/`
+provides this project's emulation behind the libretro API to test it:
+
+```
+make -C libretro test      # passes the same dmg-acid2 reference as tools/host
+make -C libretro ctr       # archive for RetroArch's 3DS build
+```
+
+If Gambatte under RetroArch 3DS is smooth where GBabe is not, the front-end is
+the answer and its video path is worth copying (legally: ideas, not code - it is
+GPL-3.0). If it stutters the same way, the core is the wall and the work moves
+to making Gambatte faster.

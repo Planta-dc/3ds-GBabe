@@ -98,6 +98,13 @@ jobs:
       - name: Present path
         run: make -C tools/host presenttest
 
+      # The libretro core: the same Gambatte behind the libretro API, so the
+      # emulation can run under a mature frontend (docs/RETROARCH-3DS.md). It
+      # has to draw dmg-acid2 exactly like the 3DS path does, or the
+      # comparison it exists for would be meaningless.
+      - name: libretro core
+        run: make -C libretro test
+
       - name: Version numbers agree
         run: sh .github/scripts/check-version.sh
 

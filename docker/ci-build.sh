@@ -78,6 +78,14 @@ make -C tools/host audiotest
 echo "=== ui stress test ==="
 make -C tools/uipreview asan
 
+# The libretro core, host build and render check (same reference frame as
+# `make acid2`), and then the 3DS archive - the only part of this repository's
+# 3DS code that is compiled with the real toolchain from sources that do not
+# need libctru.
+echo "=== libretro core ==="
+make -C libretro test
+make -C libretro ctr
+
 echo "=== ui preview ==="
 make -C tools/uipreview -j"$jobs"
 mkdir -p "$ROOT/build/ui-preview"
