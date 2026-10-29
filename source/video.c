@@ -45,6 +45,12 @@ static u64 present_wait;     /* ticks spent waiting for the panel last frame */
 static u8 *cleared_fb[2];
 static int cleared_scale = -1;
 
+/* Ticks spent in video_draw_frame() since the last video_draw_take(). This is
+ * the scaled transpose, and it used to be invisible: it happens inside
+ * emu_run_frame(), so the log's `core` figure silently contained it while the
+ * figure called `blit` measured only the cache flush and the swap. */
+static u64 draw_ticks;
+
 static u64 frame_start;      /* when video_begin_frame() was called          */
 static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
 
@@ -271,29 +277,88 @@ void video_clear(void)
 	}
 }
 
-/* The panel address of a pixel grows as y shrinks, so a column is written from
- * its bottom row upwards, which makes the writes sequential. See video.h. */
+/* Destination rows written per pass, see video_draw_frame(). Sixteen rows is
+ * exactly one 32-byte cache line of a destination column (16 halfwords), so a
+ * band writes every line it touches once and completely, and the source rows a
+ * band needs - a twentieth of the frame - stay in the 16 KiB L1 while all
+ * dst_w columns of that band are written. */
+#ifndef VIDEO_BAND
+#define VIDEO_BAND 16
+#endif
+
+/* The band size is a constant on the 3DS, and a variable in the host tests,
+ * which walk it past every remainder (1, 3, 7, 16, 17, 23 ...) and compare the
+ * result against a straight per-pixel reference. A wrong band would show up as
+ * a striped picture only in the last rows of the screen, which is exactly the
+ * kind of thing a still screenshot of dmg-acid2 can miss. */
+#ifdef GBABE_HOST_TESTS
+#define VIDEO_BAND_MAX 64
+static int band_rows = VIDEO_BAND;
+void video_test_set_band(int rows)
+{
+	band_rows = (rows > 0 && rows <= VIDEO_BAND_MAX) ? rows : VIDEO_BAND;
+}
+#else
+#define VIDEO_BAND_MAX VIDEO_BAND
+#define band_rows VIDEO_BAND
+#endif
+
 void video_draw_frame(const uint16_t *frame565, int pitch)
 {
 	if (!fb_ready || frame565 == NULL)
 		return;
 
-	for (int dx = 0; dx < dst_w; dx++)
+	const u64 t0 = svcGetSystemTick();
+
+	/* Banded, and the order matters. Writing one destination column at a time
+	 * from top to bottom (as this did until now) reads the 46 KiB source with a
+	 * 320-byte stride between reads, 144 cache lines per column and 267
+	 * columns: the source never fits in L1, so every column re-fetches all of
+	 * it - ~38,000 line fetches where the frame has 1,440. Going down 16 rows
+	 * at a time instead reads ten source rows (3 KiB) per pass, and those are
+	 * still in cache when the next of the 267 columns asks for them: ~1,500
+	 * line fetches for the whole frame, and the destination is unchanged -
+	 * still one contiguous run per column, still every line written once. */
+	for (int y0 = 0; y0 < dst_h; y0 += band_rows)
 	{
-		const int x = dst_x0 + dx;
-		const uint16_t *src = frame565 + map_x[dx];
+		const int n = (dst_h - y0 < band_rows) ? dst_h - y0 : band_rows;
+
+		/* Addresses inside a column grow as the destination row number
+		 * falls (the panel is rotated), and VIDEO_FLIP_Y turns that
+		 * around, so the band is built in address order rather than in
+		 * row order. */
+		const uint16_t *row[VIDEO_BAND_MAX];
+		int first_dy;
 
 #if VIDEO_FLIP_Y
-		/* Mirrored vertically: the address still grows with y. */
-		u16 *dst = fb_pixel(x, dst_y0);
-		for (int dy = 0; dy < dst_h; dy++)
-			*dst++ = src[map_y[dy] * pitch];
+		first_dy = dst_y0 + y0;
+		for (int k = 0; k < n; k++)
+			row[k] = frame565 + map_y[y0 + k] * pitch;
 #else
-		u16 *dst = fb_pixel(x, dst_y0 + dst_h - 1);
-		for (int dy = dst_h - 1; dy >= 0; dy--)
-			*dst++ = src[map_y[dy] * pitch];
+		first_dy = dst_y0 + y0 + n - 1;
+		for (int k = 0; k < n; k++)
+			row[k] = frame565 + map_y[y0 + n - 1 - k] * pitch;
 #endif
+
+		for (int dx = 0; dx < dst_w; dx++)
+		{
+			const int sx = map_x[dx];
+			u16 *dst = fb_pixel(dst_x0 + dx, first_dy);
+
+			for (int k = 0; k < n; k++)
+				*dst++ = row[k][sx];
+		}
 	}
+
+	draw_ticks += svcGetSystemTick() - t0;
+}
+
+uint64_t video_draw_take(void)
+{
+	const u64 t = draw_ticks;
+
+	draw_ticks = 0;
+	return t;
 }
 
 void video_end_frame(void)

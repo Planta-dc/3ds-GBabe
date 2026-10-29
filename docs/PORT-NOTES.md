@@ -956,3 +956,106 @@ makes it 17.3. What the simulation cannot prove is the size of the slack on
 ARM11, because it cannot model cache or `emu_run_frame()`'s real distribution.
 The next log answers it: `wait` should rise to ~6 ms, `frame` should fall to
 ~10.7, `pace_late` should collapse toward 0, and `fps` should be 59.7.
+
+---
+
+## 15. The next question is not a front-end question
+
+§14 moved the panel wait out of the frame, and the third log says it worked -
+`sync` 5.7 → 0.0 ms, `sync_skip` 0, `sync_late` 0 - while the frame rate got
+*worse* (57.8 → 56.8) because the time freed did not stay free: it reappeared in
+`core`, 13.2 → 16.6 ms on the same ROM, and `wait` is 0.0 ms, i.e. the loop
+never sleeps. The emulator now runs while the previous frame's GPU transfer and
+cache flush are still in flight and pays for the contention.
+
+With `core` at 16.6 ms of a 16.74 ms budget there is nothing left to schedule
+around. Before reworking the presentation a fourth time, the question worth
+answering is whether *any* frontend on this hardware runs Gambatte faster - so
+`docs/RETROARCH-3DS.md` reads RetroArch's own 3DS drivers and `libretro/`
+provides this project's emulation behind the libretro API to test it:
+
+```
+make -C libretro test      # passes the same dmg-acid2 reference as tools/host
+make -C libretro ctr       # archive for RetroArch's 3DS build
+```
+
+If Gambatte under RetroArch 3DS is smooth where GBabe is not, the front-end is
+the answer and its video path is worth copying (legally: ideas, not code - it is
+GPL-3.0). If it stutters the same way, the core is the wall and the work moves
+to making Gambatte faster.
+
+---
+
+## 16. `core` was hiding the blit
+
+RetroArch's Gambatte core runs at full speed on the same hardware (§15), so
+something in this project is spending time that it does not. Six rounds of work
+went into the frame loop - the vblank wait (§10-§14), the pacing, the once-a-
+second work - and the frame rate did not move. The reason is visible in the log
+line once it is read carefully:
+
+```
+perf fps=55.8 frame=17.9 worst=32.4 core=16.7 blit=0.1 post=1.0 sync=0.0 ...
+```
+
+`blit` is 0.1 ms because `blit` is `video_end_frame()`: the cache flush and the
+buffer swap. It is **not** the scaled copy into the framebuffer - that happens
+inside `emu_run_frame()`, and it has been counted in `core` since 0.2.0. So the
+one number the whole optimisation effort was aimed at contained, unannounced,
+the most expensive thing the front-end does. `include/gb3ds.h` even said so in
+the wrong direction (`blit_ms  /* scaled copy into the framebuffer */`).
+
+What the blit costs, by the numbers:
+
+| | pixels written |
+|---|---|
+| Gambatte-libretro's own front-end path | 23,040 (160x144, linear, pitch 256) and the GPU scales it |
+| GBabe, `SCALE_FIT` | 64,080 (267x240) written by the CPU, gathered from the source with a stride |
+
+and the gather was the expensive half: the 0.3.0 loop walked one destination
+column at a time, reading the source down a 320-byte stride, 144 cache lines per
+column, 267 columns. The source is 46 KiB; the L1 is 16 KiB and there is no L2,
+so it was re-fetched 26 times per frame - roughly 38,000 line fetches where the
+frame has 1,440. The project had already measured what that costs elsewhere: the
+bottom-screen status readout, which transposes 76,800 pixels the same way, was
+timed at ~16 ms (source/ui.c), i.e. ~0.2 µs per missing pixel.
+
+### What changed
+
+* **`core` is split in the log**: `emu` (Gambatte), `dec` (the audio
+  decimator), `draw` (the scaled transpose), with `core` kept as their sum so old
+  and new logs still compare. `emu_run_frame()` and `video_draw_frame()` count
+  their own ticks - three `svcGetSystemTick()` calls per frame, which is
+  nothing next to a 16.7 ms budget.
+* **The transpose is banded**: sixteen destination rows at a time, which is
+  exactly one 32-byte cache line of a destination column and about ten source
+  rows (3 KiB) - small enough that they stay in L1 while all 267 columns of the
+  band are written. ~1,500 line fetches per frame instead of ~38,000. The
+  destination is written the same way as before: one contiguous run per column,
+  every line written once and completely.
+* **`-marm -mfpu=vfp` are named** in `ARCH`. RetroArch's 3DS build passes both;
+  ARMv6K's Thumb is Thumb-1 and this is switch-heavy code. If a toolchain update
+  ever changed the default, nothing else would have caught it.
+
+Measured on the host, same ROM, same build, 20,000 frames:
+
+```
+before  blit  0.038 / 0.041 ms/frame
+after   blit  0.015 / 0.014 ms/frame
+```
+
+That is a PC with megabytes of cache, where the gather was mostly free anyway;
+the point of the change is the memory traffic, so **it will not be believed on
+the 3DS until the log says so** - and that is exactly what the new `draw=`
+field is for. If `draw` comes back at 3-4 ms, the banding should take most of it
+and the frame rate should move; if `emu` comes back at 15 ms instead, the core
+is the wall and the front-end is not the problem.
+
+### The test that keeps the picture honest
+
+`make -C tools/host drawtest` compares every one of the 400x240 panel pixels
+against a reference computed from the documented geometry - not from video.c's
+own arithmetic - for all three scale modes, three source pitches (160, 161, 256)
+and eight band heights (1, 2, 3, 7, 16, 17, 23, 64). It was checked by breaking
+the code three ways (rows in the wrong order inside a band, no clamp on the last
+band, one band short); every mutation fails it with hundreds of wrong pixels.

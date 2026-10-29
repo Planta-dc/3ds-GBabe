@@ -44,6 +44,11 @@ void emu_reset(void);
 void emu_run_frame(void);
 void emu_set_rendering(bool on);
 
+/* How emu_run_frame() spent its time since the last call, in ARM11 ticks:
+ * emulation (Gambatte's CPU+PPU+APU) and the audio decimator, separately.
+ * Zero when nothing is loaded. */
+void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks);
+
 /* The DMG palette selection changed: re-apply the colours to the core. It is
  * handed the colour values directly, so this has to be pushed rather than
  * looked up per pixel. Safe to call when nothing is loaded. */

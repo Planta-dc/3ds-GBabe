@@ -35,17 +35,13 @@ bool ui_in_game_menu(void);
  * blitting, doing the once-a-second work and waiting for the panel, and refresh
  * the profile once a second. A tick is 1/SYSCLOCK_ARM11 s.
  *
- * post_ticks is the time spent in ui_idle_work() - work that costs nothing when
- * it happens before the wait for the vblank, and a dropped frame when it
- * happens after it.
- *
- * late_frames is how many frames in this window started after their own slot
- * (the previous frame overran), resyncs how many times more than four frames of
- * backlog were thrown away. Both are owed to the caller, which resets them. */
-void ui_note_frame(uint64_t core_ticks, uint64_t blit_ticks,
-		   uint64_t sync_ticks, uint64_t post_ticks,
-		   uint64_t wait_ticks, uint64_t frame_ticks,
-		   unsigned late_frames, unsigned resyncs);
+ * The split it is given (see gbabe_frame_cost) stops where blame starts:
+ * `core` for the whole of emu_run_frame(), then `emu`/`audio`/`draw` for the
+ * parts of it worth telling apart, `blit` for the flush and swap, `post` for
+ * ui_idle_work() - work that costs nothing when it happens before the wait for
+ * the vblank, and a dropped frame when it happens after it - and `wait` for
+ * time asleep. `late`/`resyncs` belong to the caller, which resets them. */
+void ui_note_frame(const gbabe_frame_cost *cost);
 
 /* Do the once-a-second work that is too expensive for a frame boundary: redraw
  * the bottom-screen status readout if it is due, and spend one band of its

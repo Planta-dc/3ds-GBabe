@@ -566,6 +566,13 @@ extern "C" void emu_flush_save(void)
 	}
 }
 
+/* Ticks spent inside runFor() and in the decimator since the last
+ * emu_timing_take(), i.e. the emulator split from the audio work. Both happen
+ * inside emu_run_frame(), so they are part of what the log calls `core`; the
+ * point of splitting them is that they are the two things a slow frame can be
+ * blamed on, and until they are counted separately neither can be. */
+static u64 emu_ticks_, audio_ticks_;
+
 extern "C" void emu_run_frame(void)
 {
 	if (!loaded || core == NULL)
@@ -577,9 +584,13 @@ extern "C" void emu_run_frame(void)
 	for (;;)
 	{
 		unsigned samples = RUN_SAMPLES;
+		const u64 t_core = svcGetSystemTick();
 
 		long ret = core->runFor(rendering ? vbuf : NULL, 160,
 					sound_buf, SOUND_BUF, samples);
+		const u64 t_done = svcGetSystemTick();
+
+		emu_ticks_ += t_done - t_core;
 
 		if (samples > SOUND_BUF)
 			samples = SOUND_BUF; /* documented to overshoot by 2064 */
@@ -595,6 +606,8 @@ extern "C" void emu_run_frame(void)
 				audio_push_frames(audio_out, out);
 		}
 
+		audio_ticks_ += svcGetSystemTick() - t_done;
+
 		if (ret >= 0)
 			break;
 	}
@@ -606,4 +619,14 @@ extern "C" void emu_run_frame(void)
 	 * this path writes it down a column at a time and every write is
 	 * sequential in memory (see video.h). */
 	video_draw_frame(vbuf, 160);
+}
+
+extern "C" void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks)
+{
+	if (emu_ticks != NULL)
+		*emu_ticks = emu_ticks_;
+	if (audio_ticks != NULL)
+		*audio_ticks = audio_ticks_;
+
+	emu_ticks_ = audio_ticks_ = 0;
 }

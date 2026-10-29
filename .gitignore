@@ -13,6 +13,8 @@ third_party/gambatte/build/
 third_party/gambatte/build-host/
 third_party/gambatte/libgambatte.a
 third_party/gambatte/libgambatte-host.a
+third_party/gambatte/libgambatte-host-pic.a
+third_party/gambatte/build-host-pic/
 
 # Host harness
 tools/host/gbabe-host
@@ -20,6 +22,7 @@ tools/host/gbabe-audiotest
 tools/host/gbabe-pacetest
 tools/host/gbabe-presenttest
 tools/host/gbabe-bench
+tools/host/gbabe-drawtest
 tools/host/gbabe-logtest
 tools/host/logtest.log
 tools/host/*.ppm
@@ -43,3 +46,10 @@ build.log
 
 # Host build objects
 tools/host/obj/
+
+# libretro core build outputs
+libretro/obj/
+libretro/obj-ctr/
+libretro/gbabe-coretest
+libretro/libgbabe_libretro.so
+libretro/libgbabe_libretro_ctr.a

@@ -311,6 +311,15 @@ int main(int argc, char **argv)
 
 			const u64 after_core = svcGetSystemTick();
 
+			/* Where that time went: Gambatte, the decimator, the scaled
+			 * transpose. Counted inside the callees, so they are taken
+			 * here too - an emulated frame with no drawing still decodes
+			 * audio, and a skipped frame still runs the emulator. */
+			u64 emu_ticks, audio_ticks, draw_ticks;
+
+			emu_timing_take(&emu_ticks, &audio_ticks);
+			draw_ticks = video_draw_take();
+
 			if (draw)
 				video_end_frame();
 
@@ -357,11 +366,21 @@ int main(int argc, char **argv)
 				unsigned late, resyncs;
 				pace_take_counters(&pace, &late, &resyncs);
 
-				ui_note_frame(after_core - frame_start,
-					      after_swap - after_core, sync,
-					      after_post - after_swap, waited,
-					      after_sync - (prev_end ? prev_end : frame_start),
-					      late, resyncs);
+				const gbabe_frame_cost cost = {
+					.core = after_core - frame_start,
+					.emu = emu_ticks,
+					.audio = audio_ticks,
+					.draw = draw_ticks,
+					.blit = after_swap - after_core,
+					.sync = sync,
+					.post = after_post - after_swap,
+					.wait = waited,
+					.frame = after_sync - (prev_end ? prev_end : frame_start),
+					.late = late,
+					.resyncs = resyncs,
+				};
+
+				ui_note_frame(&cost);
 				last_frame_end = after_sync;
 			}
 
