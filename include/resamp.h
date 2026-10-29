@@ -22,7 +22,8 @@ extern "C" {
  *
  * and an empty FIFO is a hole in the sound. That is what the console log calls
  * `underruns`, and it is what crackling is. (docs/PORT-NOTES.md 18 has the
- * arithmetic from the 0.3.1 log: 176 underruns in 230 s.)
+ * arithmetic from the first console log that split the frame: 176
+ * underruns in 230 s.)
  *
  * The fix is to stop treating the sample rate as sacred. This resampler sits
  * between the decimator and the FIFO and is told, once per block, how fast to

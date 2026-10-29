@@ -78,8 +78,6 @@ int main(int argc, char **argv)
 		/* The frame loop's order: emulate, then present. Presenting
 		 * first is what used to make video_begin_frame() block on a
 		 * vblank nobody was waiting for yet. */
-		const uint64_t t0 = svcGetSystemTick();
-
 		emu_run_frame();
 
 		video_begin_frame();
