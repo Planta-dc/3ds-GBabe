@@ -50,9 +50,10 @@ static bool      last_scan_ok;
 /* HUD statistics, accumulated over a one second window. */
 static unsigned hud_frames;
 static u64      hud_last_tick;
+static bool     hud_due;         /* the status readout needs a redraw */
 static float    hud_fps;
-static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_wait,
-                hud_sum_frame;
+static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
+                hud_sum_wait, hud_sum_frame;
 static u64      hud_worst; /* slowest single frame in the window */
 static unsigned hud_late;    /* frames that started after their slot      */
 static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
@@ -791,8 +792,8 @@ void ui_draw_hud(void)
 }
 
 void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
-		   u64 wait_ticks, u64 frame_ticks, unsigned late_frames,
-		   unsigned resyncs)
+		   u64 post_ticks, u64 wait_ticks, u64 frame_ticks,
+		   unsigned late_frames, unsigned resyncs)
 {
 	hud_late += late_frames;
 	hud_resyncs += resyncs;
@@ -800,6 +801,7 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 	hud_sum_core += core_ticks;
 	hud_sum_blit += blit_ticks;
 	hud_sum_sync += sync_ticks;
+	hud_sum_post += post_ticks;
 	hud_sum_wait += wait_ticks;
 	hud_sum_frame += frame_ticks;
 	if (frame_ticks > hud_worst)
@@ -825,6 +827,7 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 	g_perf.core_ms = (float)((double)hud_sum_core * ticks_to_ms / n);
 	g_perf.blit_ms = (float)((double)hud_sum_blit * ticks_to_ms / n);
 	g_perf.sync_ms = (float)((double)hud_sum_sync * ticks_to_ms / n);
+	g_perf.post_ms = (float)((double)hud_sum_post * ticks_to_ms / n);
 	g_perf.wait_ms = (float)((double)hud_sum_wait * ticks_to_ms / n);
 	g_perf.frame_ms = (float)((double)hud_sum_frame * ticks_to_ms / n);
 	g_perf.worst_ms = (float)((double)hud_worst * ticks_to_ms);
@@ -851,13 +854,30 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 
 	hud_frames = 0;
 	hud_late = hud_resyncs = 0;
-	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_wait =
-		hud_sum_frame = 0;
+	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
+		hud_sum_wait = hud_sum_frame = 0;
 	hud_worst = 0;
 	hud_last_tick = now;
 
 	/* The status readout is on the bottom screen, so it costs a redraw once
-	 * a second - nothing during the frames in between. */
+	 * a second - nothing during the frames in between. Not drawn here: this
+	 * runs after the frame has already been handed to the panel, in the
+	 * 0.1 ms of slack the loop has left, and a 1-second redraw there cost a
+	 * dropped frame every second ("worst=33.4" once a second in the log).
+	 * ui_idle_work() draws it instead, in the dead time before the vblank
+	 * wait. */
+	if (g_cfg.show_hud && emu_loaded())
+		hud_due = true;
+}
+
+/* Everything worth doing exactly once a second, done where it is free. */
+void ui_idle_work(void)
+{
+	if (!hud_due)
+		return;
+
+	hud_due = false;
+
 	if (g_cfg.show_hud && emu_loaded())
 		ui_draw_hud();
 }

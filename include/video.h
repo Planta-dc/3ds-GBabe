@@ -27,27 +27,34 @@ void video_begin_frame(void);
  * cache while it is being read. */
 void video_draw_frame(const uint16_t *frame565, int pitch);
 
-/* Flush the back buffer and hand it to the panel, then wait for the panel to
- * take it.
+/* Flush the back buffer and hand it to the panel.
  *
- * The wait is what keeps the picture from tearing. libctru's buffers are a
- * two-deep swap chain: gfxGetFramebuffer() returns the buffer that is *not*
- * displayed, and gfxScreenSwapBuffers() flips the caller's idea of which one
- * that is immediately - while the panel only switches at the next vblank. Draw
- * into the new "back" buffer straight away and, for the 10-15 ms until that
- * vblank arrives, you are writing into the buffer that is still being scanned
- * out. A tear line appears wherever the scanout happens to be, and because the
- * Game Boy's 59.7275 Hz does not divide 60 Hz it *drifts* down the screen.
+ * The buffer is not safe to write again until the panel has taken the swap.
+ * libctru's buffers are a two-deep swap chain: gfxGetFramebuffer() returns the
+ * buffer that is *not* displayed, and gfxScreenSwapBuffers() flips the caller's
+ * idea of which one that is immediately - while the panel only switches at the
+ * next vblank. Draw into the new "back" buffer straight away and, for the
+ * 10-15 ms until that vblank arrives, you are writing into the buffer that is
+ * still being scanned out. A tear line appears wherever the scanout happens to
+ * be, and because the Game Boy's 59.7275 Hz does not divide 60 Hz it *drifts*
+ * down the screen.
  *
- * Waiting here costs nothing: the frame loop is idle at this point anyway.
- * video_present_wait() reports how long the wait took, so the HUD can show it
- * apart from the blit and from the emulator's own pacing.
+ * So the swap and the wait for it are two calls: video_present_sync() does the
+ * waiting. Everything the loop does once a frame but not per frame - the status
+ * redraw, the log flush, the cartridge save - belongs between them, where the
+ * wait absorbs it instead of delaying the next frame.
  *
- * If the frame's own work already overran a frame period, the wait is skipped
- * and the frame is presented at once. Waiting would take until the *following*
- * vblank and halve the frame rate at exactly the moment the console is
- * struggling - one torn frame is the lesser evil. */
+ * If the frame's own work already overran a frame period, video_present_sync()
+ * returns 0 and the frame is presented at once. Waiting would take until the
+ * *following* vblank and halve the frame rate at exactly the moment the console
+ * is struggling - one torn frame is the lesser evil. */
 void video_end_frame(void);
+
+/* Wait for the panel to take the swap made by video_end_frame(), and return the
+ * ARM11 ticks spent waiting (0 if there was nothing to wait for, or if the wait
+ * was skipped). video_begin_frame() calls this too, so a caller that forgets
+ * cannot tear; calling it first is how the frame loop gets the wait for free. */
+uint64_t video_present_sync(void);
 
 /* Forget which framebuffers already have a black letterbox.
  *
@@ -57,7 +64,7 @@ void video_end_frame(void);
  * path that fills the screen with video_clear(). */
 void video_letterbox_unknown(void);
 
-/* ARM11 ticks spent waiting for the panel in the last video_end_frame(). */
+/* ARM11 ticks spent waiting for the panel in the last video_present_sync(). */
 uint64_t video_present_wait(void);
 
 /* Present-path diagnostics since the previous call, for the log:

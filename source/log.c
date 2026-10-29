@@ -61,7 +61,10 @@ static bool open_file(const char *path)
 
 	/* The absolute time is only useful if the console's clock is set; the
 	 * relative stamps are what the numbers below are read against. */
-	fprintf(file, "# GBabe " GBABE_VERSION " debug log\n");
+	/* The build stamp, not just the version: a log has to identify the
+	 * binary that wrote it, and one version number covers a lot of builds. */
+	fprintf(file, "# GBabe " GBABE_VERSION " build " GBABE_BUILD
+		       " debug log\n");
 	fprintf(file, "# os time: %llu\n", (unsigned long long)osGetTime());
 	written = 0;
 	truncated = false;
