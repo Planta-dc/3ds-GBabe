@@ -64,6 +64,19 @@
  * also latency, so it is kept small - 62 ms at BLOCK_SAMPLES = 1024. */
 #define PREFILL_BLOCKS  2
 
+/* The level the control law holds the queue at, in frames.
+ *
+ * Not PREFILL_BLOCKS * BLOCK_SAMPLES: that is the level at the instant the
+ * stream starts, and it is the *peak* of the sawtooth, not its average. Each
+ * submission takes a whole block out of the FIFO, which then refills over the
+ * next 31 ms, so the level swings between (peak - BLOCK) and peak and its mean
+ * sits half a block below the peak. Asking for the peak as a mean is a request
+ * the scheduler can never satisfy: the trim stays on, pulling the rate about
+ * 1 % low forever - a permanent flat pitch on a console running at exactly the
+ * right speed. (Measured on the host: step 0.994 where it should be 1.000.) */
+#define LEVEL_TARGET   ((int32_t)(PREFILL_BLOCKS * BLOCK_SAMPLES) - \
+			(int32_t)(BLOCK_SAMPLES / 2))
+
 /* A block lasts this long, in ARM11 ticks. */
 #define BLOCK_TICKS     ((u64)((double)BLOCK_SAMPLES * SYSCLOCK_ARM11 / OUT_RATE))
 /* How early a block is submitted, relative to the end of the one playing.
@@ -75,9 +88,26 @@
  * a hole every 31 ms is a buzz. So the margin is deliberately biased early and
  * grown to cover the worst wake-up seen recently, which is measured margin-free
  * from the interval between submissions. */
+/* The margin is not free, and the comment above is only half the story: CSND
+ * has no scheduled start, so submitting a block early does not queue it, it
+ * *plays it* - the two blocks are mixed for `margin` worth of audio. That is a
+ * comb filter at the block rate, and at the 5 ms this used to grow to it was
+ * 16 % of every block doubled, 32 times a second. The console log shows
+ * the margin pinned at exactly that ceiling for a whole session: every seam,
+ * every time.
+ *
+ * So the ceiling is 2 ms - 6 % of a block, against 16 % before. Being later
+ * than the margin is a hole instead, which is what the poll-and-pump in main.c's
+ * present exists to prevent: the block is submitted from inside the panel wait
+ * as well as from the emulator, so the deadline is hit within a poll (0.2 ms)
+ * rather than within a frame. 1 ms was tried and is too tight: at 95 % speed the
+ * stream cannot stay ahead and the rate control starts hunting (measured wobble
+ * went from 0.03 % to 3.9 % rms), so the margin is not only an overlap budget -
+ * it is the slack that lets a submission land after a poll without becoming a
+ * hole. */
 #define MARGIN_MIN      (SYSCLOCK_ARM11 / 10000) /* 0.1 ms */
-#define MARGIN_MAX      (SYSCLOCK_ARM11 / 200)   /* 5 ms   */
-#define MARGIN_BIAS     (SYSCLOCK_ARM11 / 2000)  /* 0.5 ms */
+#define MARGIN_MAX      (SYSCLOCK_ARM11 / 500)   /* 2 ms   */
+#define MARGIN_BIAS     (SYSCLOCK_ARM11 / 4000)  /* 0.25 ms */
 
 static s16 *fifo;          /* ring buffer, FIFO_SAMPLES stereo frames */
 static unsigned fifo_head, fifo_tail;
@@ -106,6 +136,21 @@ static u64 margin;      /* cmd_ticks + late_max + MARGIN_BIAS     */
 static u64 last_submit;
 static bool have_last;
 
+/* Production-rate measurement: how many frames the emulator is actually ready
+ * to hand over per wall-clock second. 32768 is the answer on a console running
+ * at 59.7275 fps; anything else is a console that cannot quite keep up, and the
+ * resampler has to follow the game rather than the nominal rate. Counted in
+ * input frames (the caller's frames are stretched by `last_step`, so they are
+ * converted back before being counted), and smoothed over a couple of windows
+ * with the same 7/8 filter as the service call timing. */
+#define RATE_WINDOW (SYSCLOCK_ARM11 / 4) /* 0.25 s */
+static u64      rate_start;
+static unsigned rate_frames;
+static int64_t  rate_frac;   /* 16.16 leftover from the conversion below */
+static int32_t  rate_q16 = RESAMP_UNITY;
+static int32_t  last_step = RESAMP_UNITY;
+static bool     stream_dropped;
+
 /* Staging area for the frame that comes out of the FIFO, interleaved. */
 static s16 staged[BLOCK_SAMPLES * 2];
 
@@ -116,6 +161,11 @@ static unsigned stat_underruns;
 static unsigned stat_resyncs;
 static unsigned stat_dropped;
 static unsigned stat_late_blocks;
+static unsigned stat_holes;        /* blocks that started after their turn */
+static u64      stat_hole_ticks;   /* the silence they left, in total      */
+static u64      stat_worst_hole;   /* the worst of it                      */
+static unsigned stat_overlaps;     /* blocks that started before it        */
+static u64      stat_overlap_ticks;/* the doubling that cost              */
 static unsigned stat_stalled;      /* blocks over half a second late      */
 static s64      stat_worst_late;   /* ticks, negative = early */
 
@@ -281,6 +331,15 @@ static void start_block(void)
 	stat_blocks++;
 	if (stereo)
 		stat_pairs++;
+
+	/* A stream that was dropped by the underrun path and is starting again
+	 * is a resync, not a continuation: that is what the counter is for, and
+	 * until now nothing ever incremented it. */
+	if (stream_dropped)
+	{
+		stat_resyncs++;
+		stream_dropped = false;
+	}
 }
 
 /* Frames that have to be queued before a block can go out: one block to play
@@ -312,6 +371,7 @@ void audio_pump(void)
 			 * be done about the hole, so restart cleanly from the
 			 * prefill level instead of limping. */
 			stat_underruns++;
+			stream_dropped = true;
 			scheduled = false;
 		}
 		return;
@@ -328,6 +388,7 @@ void audio_pump(void)
 		if (drift > 0)
 		{
 			stat_late_blocks++;
+
 
 			/* A gap longer than half a second is not a late block,
 			 * it is the application having been somewhere else (an
@@ -353,6 +414,37 @@ void audio_pump(void)
 
 	if (!scheduled)
 		next_start = now; /* starts as soon as it is given to CSND */
+	else
+	{
+		/* The seam, which is what the ear hears. `next_start` is when
+		 * this block should begin, i.e. when the one before it ends;
+		 * CSND has no scheduled start, so submitting before that
+		 * moment plays the two blocks on top of each other and
+		 * submitting after it leaves silence. Both are single figures
+		 * here rather than something to be inferred from `late`,
+		 * which is the *difference* between consecutive overshoots and
+		 * cancels itself out: a block 8 ms late followed by one 8 ms
+		 * early is one hole, not two late blocks.
+		 *
+		 * A centisecond either way is a stopwatch artefact (a stalled
+		 * kernel thread, the app being suspended), not a seam. */
+		const s64 seam = (s64)now - (s64)next_start;
+		if (seam > 0)
+		{
+			if ((u64)seam < SYSCLOCK_ARM11 / 100)
+			{
+				stat_holes++;
+				stat_hole_ticks += (u64)seam;
+				if ((u64)seam > stat_worst_hole)
+					stat_worst_hole = (u64)seam;
+			}
+		}
+		else if ((u64)-seam < SYSCLOCK_ARM11 / 100)
+		{
+			stat_overlaps++;
+			stat_overlap_ticks += (u64)-seam;
+		}
+	}
 
 	start_block();
 	last_submit = now;
@@ -399,6 +491,19 @@ bool audio_init(void)
 	cmd_ticks = late_max = margin = 0;
 	last_submit = 0;
 	have_last = false;
+	stat_blocks = stat_pairs = stat_underruns = 0;
+	stat_resyncs = stat_dropped = stat_late_blocks = 0;
+	stat_holes = stat_overlaps = 0;
+	stat_hole_ticks = stat_overlap_ticks = stat_worst_hole = 0;
+	stat_stalled = 0;
+	stat_worst_late = 0;
+
+	rate_start = 0;
+	rate_frames = 0;
+	rate_frac = 0;
+	rate_q16 = RESAMP_UNITY;
+	last_step = RESAMP_UNITY;
+	stream_dropped = false;
 
 	/* Sound is a nice-to-have: if CSND will not start, keep emulating. */
 	Result rc = csndInit();
@@ -500,27 +605,90 @@ unsigned audio_queue_ms(void)
 	return (fifo_used() * 1000u) / OUT_RATE;
 }
 
-/* See include/audio.h and include/resamp.h. The queue sawtooths by a whole
- * block - it drains for 31 ms and is then topped up with 1024 frames - so the
- * control law is given a slow average of the level, not the instant one.
- * 1/64 per call, and the emulator pushes 17 times a frame, is a time constant
- * of about four frames. */
+/* Frames per second the emulator is producing, in 16.16 - the feedforward term
+ * of the control law. One window is 0.25 s, which is 15 emulated frames and
+ * about eight sound blocks: long enough that the per-frame push pattern (548
+ * and 549 samples alternately) is averaged out, short enough that a game which
+ * starts to struggle is corrected within a fraction of a second. */
+static void measure_rate(u64 now)
+{
+	if (rate_start == 0)
+	{
+		rate_start = now;
+		rate_frames = 0;
+		return;
+	}
+
+	const u64 span = now - rate_start;
+	if (span < RATE_WINDOW)
+		return;
+
+	/* A window holds at most a second of samples, so the 16.16 product fits
+	 * in 64 bits with room to spare. */
+	const int64_t hz_q16 = ((int64_t)rate_frames << 16) *
+			       (int64_t)SYSCLOCK_ARM11 / (int64_t)span;
+
+	/* step = produced rate / OUT_RATE, in 16.16 - the units resamp_run()
+	 * wants (input frames per output frame). */
+	/* One window of 0.25 s holds ~8200 frames, so the measurement itself
+	 * is good to a few parts in ten thousand: the smoothing only has to
+	 * take the edge off the frame pattern, not average out noise. Half-and-
+	 * half is a time constant of about 0.35 s, which is quick enough that a
+	 * game dropping from full speed to 57 fps is corrected before the
+	 * player notices, and slow enough not to chase anything. */
+	rate_q16 = (rate_q16 + (int32_t)(hz_q16 / (int64_t)OUT_RATE)) / 2;
+	rate_start = now;
+	rate_frames = 0;
+}
+
+/* See include/audio.h and include/resamp.h. Two different signals, on purpose:
+ *
+ *   feedforward  the measured production rate, so a console at 57 fps runs the
+ *                resampler at 0.954 straight away instead of hunting for it;
+ *   feedback     a heavily smoothed queue level, 1/256 per call, which at 17
+ *                calls a frame is a time constant of ~15 frames - long enough
+ *                that the block sawtooth is 2 % of what it is in the level.
+ *
+ * The old version fed the *level* to the law with a constant of 1/64 per call
+ * and got the sawtooth straight through: the closed loop had as much gain at the
+ * block rate as the rate error it was chasing, so it sat on its clamps and
+ * wobbled the pitch by up to 5 % on a console that was running perfectly. */
+/* Smoothed queue level, in frames. File scope so the log can print it. */
+static int32_t fill_ema = -1;
+
+static int32_t fill_ema_level(void)
+{
+	return (fill_ema < 0) ? 0 : fill_ema;
+}
+
 int32_t audio_rate_step(void)
 {
-	static int32_t fill_ema = -1;
-
 	if (!enabled || !csnd_ok || fifo == NULL)
 	{
 		fill_ema = -1;
+		rate_start = 0;
+		rate_frames = 0;
+		rate_frac = 0;
+		rate_q16 = RESAMP_UNITY;
+		last_step = RESAMP_UNITY;
 		return RESAMP_UNITY;
 	}
 
+	measure_rate(svcGetSystemTick());
+
 	const int32_t fill = (int32_t)fifo_used();
 
-	fill_ema = (fill_ema < 0) ? fill : (fill_ema * 63 + fill) / 64;
+	fill_ema = (fill_ema < 0) ? fill : fill_ema + (fill - fill_ema) / 256;
 
-	return resamp_control_step(fill_ema,
-				   (int32_t)(BLOCK_SAMPLES * PREFILL_BLOCKS));
+	last_step = resamp_control_step(fill_ema, LEVEL_TARGET, rate_q16);
+	return last_step;
+}
+
+/* The step currently in force, for the log: reading it must not advance any of
+ * the filters above. */
+int32_t audio_rate_current(void)
+{
+	return last_step;
 }
 
 /* Hand the APU's output to the hardware. `frames` stereo frames at OUT_RATE,
@@ -530,6 +698,18 @@ void audio_push_frames(const int16_t *stereo_frames, unsigned frames)
 {
 	if (!enabled || fifo == NULL || stereo_frames == NULL || frames == 0)
 		return;
+
+	/* The rate that matters is the emulator's, not the FIFO's: these frames
+	 * have already been stretched by `last_step`, so undo that to count what
+	 * the decimator produced. The remainder is carried, deliberately: a chunk
+	 * is ~32 frames, so truncating each conversion throws away up to a whole
+	 * frame per chunk, and thirty of those are 3 % - the loop then measures
+	 * itself as slow, corrects itself as slow, and settles at a permanent
+	 * pitch error. (Measured on the host before this was fixed: a console at
+	 * exactly 59.7275 fps held a step of 0.987 and a 2 % wobble.) */
+	rate_frac += (int64_t)frames * last_step;
+	rate_frames += (unsigned)(rate_frac >> 16);
+	rate_frac &= 0xFFFF;
 
 	fifo_push((const s16 *)stereo_frames, frames);
 	audio_pump();
@@ -546,10 +726,20 @@ void audio_get_stats(audio_stats *out)
 	out->resyncs = stat_resyncs;
 	out->dropped = stat_dropped;
 	out->late_blocks = stat_late_blocks;
+	out->holes = stat_holes;
+	out->hole_ms = (int)(stat_hole_ticks * 1000ull / (u64)SYSCLOCK_ARM11);
+	out->worst_hole_ms =
+		(int)(stat_worst_hole * 1000ull / (u64)SYSCLOCK_ARM11);
+	out->overlap_us = (int)(stat_overlap_ticks /
+				(stat_overlaps ? stat_overlaps : 1) *
+				1000000ull / (u64)SYSCLOCK_ARM11);
 	out->margin_us = (int)(margin * 1000000ull / (u64)SYSCLOCK_ARM11);
 	out->worst_late_us = (stat_worst_late == 0) ? 0 :
 		(int)(stat_worst_late * 1000000ll / (s64)SYSCLOCK_ARM11);
 	out->queue_ms = audio_queue_ms();
+	out->rate_meas_q16 = rate_q16;
+	out->fill_frames = (int)fill_ema_level();
+	out->fill_target = LEVEL_TARGET;
 }
 
 /* Logged every few seconds rather than every second: it is diagnostic, and it
@@ -558,6 +748,7 @@ void audio_log_stats(void)
 {
 	static u64 last_log;
 	static unsigned last_blocks, last_underruns, last_resyncs, last_dropped;
+	static unsigned last_holes;
 
 	if (!csnd_ok)
 		return;
@@ -567,7 +758,7 @@ void audio_log_stats(void)
 		return;
 	if (last_log != 0 && stat_blocks == last_blocks &&
 	    stat_underruns == last_underruns && stat_resyncs == last_resyncs &&
-	    stat_dropped == last_dropped)
+	    stat_dropped == last_dropped && stat_holes == last_holes)
 		return; /* nothing happened */
 
 	last_log = now;
@@ -575,20 +766,33 @@ void audio_log_stats(void)
 	last_underruns = stat_underruns;
 	last_resyncs = stat_resyncs;
 	last_dropped = stat_dropped;
+	last_holes = stat_holes;
 
 	audio_stats st;
 	audio_get_stats(&st);
 
-	/* Once, not twice: the step carries the smoothed queue level, so asking
-	 * it twice in one expression advances it twice. */
-	const int32_t step = audio_rate_step();
+	/* Read, do not ask: audio_rate_step() advances the rate window and the
+	 * level filter, and a log line must not be part of the control loop. */
+	const int32_t step = audio_rate_current();
 
-	log_line("audio: %u blocks, late %u (worst %.2f ms), stalled %u, "
+	/* `produced` is the number to read first: it is the emulator's own
+	 * production rate, measured, against the 32768 Hz the channel is opened
+	 * at. 1.000 means the console is keeping up exactly and nothing is being
+	 * resampled; 0.954 means a console running at 57 fps, and the sound being
+	 * stretched to match. The two go together with `rate`: `rate` should
+	 * equal `produced`, and either one away from 1.000 on a full-speed game
+	 * is a measurement to disbelieve rather than a fault. */
+	log_line("audio: %u blocks, holes %u (worst %.2f ms), overlap %.2f ms, "
+		 "late %u (worst %.2f ms), stalled %u, "
 		 "underruns %u, resyncs %u, dropped %u, queue %u ms, "
-		 "margin %.2f ms, rate %u.%03u",
-		 st.blocks, st.late_blocks, st.worst_late_us / 1000.0,
+		 "level %d/%d, produced %.3f, margin %.2f ms, rate %u.%03u",
+		 st.blocks, st.holes, st.worst_hole_ms / 1000.0,
+		 st.overlap_us / 1000.0,
+		 st.late_blocks, st.worst_late_us / 1000.0,
 		 stat_stalled, st.underruns, st.resyncs, st.dropped,
-		 st.queue_ms, st.margin_us / 1000.0,
+		 st.queue_ms, st.fill_frames, st.fill_target,
+		 (double)st.rate_meas_q16 / RESAMP_UNITY,
+		 st.margin_us / 1000.0,
 		 (unsigned)(step / 65536),
 		 (unsigned)(((step % 65536) * 1000) / 65536));
 }

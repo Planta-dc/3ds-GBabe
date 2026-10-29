@@ -8,6 +8,7 @@
 #   make bench ROM=game.gb     per-frame cost of the core and the blit
 #   make logtest               check the debug log's format
 #   make audiotest             check that the sound path keeps CSND fed
+#   make audiospeed            measure it at a console speed that is not full
 #   make pacertest             check the frame pacing arithmetic
 #   make presenttest           check the present path's wait-or-tear trade
 #   make drawtest              check the scaled transpose against a reference
@@ -106,6 +107,18 @@ audiotest: $(OBJDIR)/audio.o $(OBJDIR)/stub.o $(OBJDIR)/log.o \
 	@echo
 	@echo "audiotest: again with only two CSND channels (the mono fallback)"
 	GBABE_HOST_AUDIO=2 ./gbabe-audiotest
+
+# The other half of the sound path: the rate matcher, driven at a console speed
+# other than 59.7275 fps, in real time. A console that is 3 % slow has to be
+# corrected by 3 % or the FIFO drains into an underrun - and the correction must
+# not wobble. Forty seconds of wall clock, so not part of the default run.
+audiospeed: $(OBJDIR)/audio.o $(OBJDIR)/stub.o $(OBJDIR)/log.o \
+	    $(OBJDIR)/config.o $(OBJDIR)/palette.o $(OBJDIR)/audiospeed.o \
+	    $(OBJDIR)/resamp.o $(OBJDIR)/decimator.o
+	$(CC) $(CFLAGS) -o gbabe-audiospeed $(OBJDIR)/audio.o $(OBJDIR)/stub.o \
+		$(OBJDIR)/log.o $(OBJDIR)/config.o $(OBJDIR)/palette.o \
+		$(OBJDIR)/resamp.o $(OBJDIR)/decimator.o $(OBJDIR)/audiospeed.o -lm
+	GBABE_HOST_AUDIO=1 ./gbabe-audiospeed
 
 # video.c on its own, plus the libctru stand-in: two frames that fit in a panel
 # period must wait for the vblank, and one that does not must present at once.

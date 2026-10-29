@@ -78,8 +78,22 @@ make -C tools/host dectest
 echo "=== sound path keeps CSND fed ==="
 make -C tools/host audiotest
 
+# Not `make asan` directly: a container that cannot turn address randomisation
+# off makes AddressSanitizer die before main(), which is not a result. The
+# script says which of the two happened; 77 means "no sanitizer result here",
+# and only that is tolerated. The host job runs the same test with
+# GBABE_ASAN_REQUIRED=1, so the check is not lost by this.
 echo "=== ui stress test ==="
-make -C tools/uipreview asan
+make -C tools/uipreview uistress
+tools/uipreview/run-sanitized.sh || {
+  rc=$?
+  [ "$rc" -eq 77 ] || exit "$rc"
+  # ::warning:: rather than plain text: a log line is invisible unless someone
+  # opens the log, and a failed job's log is not downloadable from every
+  # environment. This becomes an annotation on the job, which the API hands out.
+  echo "::warning::ui stress: skipped - this container cannot start AddressSanitizer, so the UI bounds check did not run here (tools/uipreview/run-sanitized.sh)"
+  echo "ui stress: skipped - the sanitizer could not start in this container"
+}
 
 # The libretro core, host build and render check (same reference frame as
 # `make acid2`), and then the 3DS archive - the only part of this repository's

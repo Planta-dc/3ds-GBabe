@@ -156,7 +156,13 @@ jobs:
       # optionals, counts past what the layout holds, negative rectangles. On
       # the 3DS an out-of-bounds write there is a crash with no debugger
       # attached, so it is checked here instead.
+      # GBABE_ASAN_REQUIRED=1: on this runner setarch -R works, so there is no
+      # excuse for a skip, and a missing result has to be an error rather than
+      # a quiet pass. The container build in the 3DS job runs the same test,
+      # but tolerates a skip there - see tools/uipreview/run-sanitized.sh.
       - name: UI stress test (sanitizers)
+        env:
+          GBABE_ASAN_REQUIRED: '1'
         run: make -C tools/uipreview asan
 
       # Renders browser/menu/HUD/message screens with the same ui_gfx.c and
@@ -281,7 +287,16 @@ jobs:
         run: |
           # pipefail so tee cannot hide the build's exit status.
           set -o pipefail
+          # seccomp=unconfined: Docker's default profile blocks
+          # personality(ADDR_NO_RANDOMIZE), so `setarch -R` fails inside the
+          # build image and the UI stress test's AddressSanitizer dies in its
+          # own startup (the 0.3.6 run: 20x "AddressSanitizer:DEADLYSIGNAL",
+          # then "Segmentation fault", and a red build for a runner quirk).
+          # Allowing that one call lets the test disable ASLR and run. The
+          # profile is only loosened for this build container, which is already
+          # running this repository's own makefiles.
           docker run --rm \
+            --security-opt seccomp=unconfined \
             -v "$PWD:/workspace" -w /workspace \
             -e GBABE_TARGET \
             "$BUILD_IMAGE" \

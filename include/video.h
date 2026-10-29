@@ -34,6 +34,16 @@ void video_set_scale(int mode);
  */
 void video_begin_frame(void);
 
+/* The same, without ever waiting: false means the panel has not released the
+ * last buffer yet, so this frame's picture is dropped rather than delayed.
+ *
+ * The frame loop uses this one. Blocking here measured 5.6-6.3 ms a frame on
+ * the console - a third of the budget - and gated the emulator on the panel:
+ * 58.8 fps measured with the emulation itself at 9.6 ms. Asking one Game Boy
+ * frame after the swap is posted instead of 10.6 ms after it makes the answer
+ * "yes" because a full panel period has passed by then. */
+bool video_begin_frame_try(void);
+
 /* Draw a whole 160x144 RGB565 frame, `pitch` pixels per line.
  *
  * The top LCD is a rotated panel, so the picture is stored column by column.

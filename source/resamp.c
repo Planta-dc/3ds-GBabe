@@ -6,39 +6,50 @@
  */
 #include "resamp.h"
 
-/* +-4 %: enough to cover a console running at 57 fps, small enough that no
- * Game Boy sound effect audibly changes pitch. */
-#define STEP_MIN  (RESAMP_UNITY - RESAMP_UNITY / 25)
-#define STEP_MAX  (RESAMP_UNITY + RESAMP_UNITY / 25)
+/* +-20 %: the range is set by which mistake is worse. A console running a Game
+ * Boy Color game at 55 fps is a game running at 92 %, and its sound should slow
+ * down with it - that is what the hardware being imitated does when it is short
+ * of time. Refusing to correct past 4 % (which is what this did) does not keep
+ * the pitch right, it drains the queue and turns a slightly slow game into a
+ * stream of holes, which is exactly what the console log was showing. */
+#define STEP_MIN  (RESAMP_UNITY - RESAMP_UNITY / 5)
+#define STEP_MAX  (RESAMP_UNITY + RESAMP_UNITY / 5)
 
-/* Proportional gain: the queue has to be off target by an eighth of its own
- * size before the resampler runs at its limit. A 2 KiB queue and a 125 ms FIFO
- * means the correction is spread over seconds, which is what keeps it
- * inaudible. */
-#define CONTROL_GAIN 8
+/* Level trim: a queue a whole target too full asks for 1/64 (1.6 %) on top of
+ * the measured rate. Deliberately slow - the rate is measured, not inferred
+ * from the level, and the level sawtooths by a whole block as blocks are
+ * submitted, so this exists only to remove bias between the two clocks. */
+#define TRIM_GAIN 64
 
-/* Below this the queue is "where it should be" and the step is exactly 1:1, so
- * a console that is keeping up never resamples anything. ~64 frames = 2 ms. */
-#define CONTROL_DEADBAND(target) ((target) / 32)
+/* Inside this band the rate is exactly 1:1 and nothing is resampled at all, so
+ * a console that is keeping up gets bit-exact audio through here: a sample in is
+ * a sample out, no interpolation, no rounding. Half a percent is invisible in
+ * pitch terms and wide enough to swallow the small permanent offset the level
+ * trim settles at (the queue's natural mean is not exactly its target, because
+ * when a block is submitted is a deadline and not a tick). */
+#define SNAP (RESAMP_UNITY / 200)
 
-int32_t resamp_control_step(int32_t fill, int32_t target)
+int32_t resamp_control_step(int32_t fill_ema, int32_t target, int32_t rate_q16)
 {
 	if (target <= 0)
 		return RESAMP_UNITY;
 
-	int32_t err = fill - target;
-	if (err < CONTROL_DEADBAND(target) && err > -CONTROL_DEADBAND(target))
-		return RESAMP_UNITY;
+	/* Feedforward: the rate the emulator is actually producing samples at,
+	 * already in the units resamp_run() wants. This used to be inferred from
+	 * the queue level instead, and the queue level is a sawtooth - it drops a
+	 * whole 1024-frame block every 31 ms - so the loop spent its life pinned
+	 * against the clamps, modulating the pitch by several percent at the
+	 * block rate. Measured on the host, a full-speed console was being
+	 * stretched 0.5 % on average with a 5 % peak-to-peak wobble. */
+	int64_t step = (rate_q16 > 0) ? rate_q16 : RESAMP_UNITY;
 
-	/* err > 0 means the queue is too full: eat more input per output frame
-	 * (step > 1) so fewer output frames are produced.
-	 *
-	 * 64-bit on purpose: the product is 2^21 at most with a real queue, but
-	 * this function is also the one thing in the audio path that is worth
-	 * being able to test at silly values without it wrapping. */
-	int64_t step = RESAMP_UNITY +
-		       ((int64_t)err * RESAMP_UNITY) / ((int64_t)target * CONTROL_GAIN);
+	/* Feedback: the slow bias, from a level that has been smoothed far
+	 * longer than the block period (see audio_rate_step()). */
+	step += ((int64_t)(fill_ema - target) * RESAMP_UNITY) /
+		((int64_t)target * TRIM_GAIN);
 
+	if (step > RESAMP_UNITY - SNAP && step < RESAMP_UNITY + SNAP)
+		step = RESAMP_UNITY;
 	if (step < STEP_MIN)
 		step = STEP_MIN;
 	if (step > STEP_MAX)

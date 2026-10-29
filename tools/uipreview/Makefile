@@ -39,16 +39,12 @@ uistress: $(UI_SRC) stress.c $(ROOT)/include/gb3ds.h $(ROOT)/include/ui_gfx.h \
 # ASan needs a shadow mapping it can fit in the address space, and a kernel with
 # high ASLR entropy (vm.mmap_rnd_bits=32, the default on newer Ubuntu) hands out
 # addresses it cannot: the binary dies with "AddressSanitizer:DEADLYSIGNAL"
-# before it runs a line. That is the runner, not the test, so turn address
-# randomisation off for this process when the platform lets us.
-ASAN_RUN = if setarch $$(uname -m) -R true >/dev/null 2>&1; then \
-		   setarch $$(uname -m) -R ./uistress; \
-	   else \
-		   ./uistress; \
-	   fi
-
+# before it runs a line. That is the runner, not the test, so address
+# randomisation is turned off for this process where the platform lets us -
+# run-sanitized.sh explains the rest, and sorts "the sanitizer could not start"
+# (exit 77, skipped) from "the test failed" (exit 1).
 asan: uistress
-	@$(ASAN_RUN)
+	@./run-sanitized.sh
 
 run: $(BIN)
 	@mkdir -p out

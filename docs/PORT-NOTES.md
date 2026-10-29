@@ -1435,3 +1435,309 @@ instead of 0 is a third option that costs six integer multiply-adds.
 What is *not* going to happen: turning colour correction off by default to win a
 number. It changes what every Game Boy Color game looks like, and this project
 has spent enough rounds confusing "faster" with "better".
+
+## 22. The rate matcher was the noise
+
+The console report after 0.3.3: monochrome games at full speed, Game Boy Color
+close to it, and the sound "pretty bad". Speed was fixed; the sound was not, and
+it had nothing to do with how fast the console was.
+
+`tools/host/audiospeed.c` runs the real `audio.c` and `resamp.c` at a chosen
+console speed in real time - the same 17 `runFor()` chunks per frame, the same
+`resamp_set_step()` before each one, the same block scheduler. What it measures
+is not whether the stream survived but how it gave: the step it settled on, how
+much the step moved (pitch wobble), and what the FIFO did.
+
+At full speed, on the old control law:
+
+```
+1.00x: step 0.9947 (pitch -0.53 %), wobble 5.07 % (min 0.9600 max 1.0107)
+0.95x: step 0.9601 (pitch -3.99 %), wobble 4.00 %, 2 underruns, worst hole 18 ms
+1.05x: step 1.0312 (pitch +3.12 %), wobble 8.00 %, 311 samples dropped
+```
+
+`0.9600` and `1.0107` are the clamps. The loop was not *tracking* anything, it
+was pinned against its limits and swinging between them - a 5 % pitch modulation
+at the block rate, on a console running at exactly the right speed. That is a
+warble, and a warble is "pretty bad" no matter how good everything else is. At
+95 % speed the correction needed was 4.8 %, the clamp was 4 %, so it could not
+get there and the FIFO drained: underruns, and an 18 ms hole in the sound.
+
+Three things were wrong, and only the first is the one that was expected.
+
+**The level is a sawtooth, and the law was fed the level.** A block is 1024
+frames and it is popped out of the FIFO all at once, so the level swings by
+1024 frames every 31 ms around whatever it is centred on. The old law used the
+level with a time constant of ~4 frames - a loop with as much gain at 32 Hz as
+at the error it was supposed to be chasing, so it chased the sawtooth.
+
+The fix is to stop inferring the rate and measure it. The FIFO knows exactly how
+many frames went through it and the tick counter knows when, so the production
+rate is a measurement, not a deduction: `step = produced / 32768`, feedforward,
+and the level only gets a slow trim (1/64 of the error, on a level smoothed over
+~15 frames) to remove bias between the two clocks. On target the step is then
+*exactly* 1:1, which means a console that keeps up gets bit-exact audio - a
+sample in is a sample out, no interpolation at all.
+
+**The correction range was set by a judgement instead of by arithmetic.** 4 %
+was chosen as "inaudible in Game Boy sound", which is true and beside the point:
+a console 5 % short of full speed needs 5 %, and refusing to give it does not
+preserve the pitch, it converts a slow game into a stream of holes. The range is
++-20 % now, with the reasoning written down: a game running at 92 % has its sound
+run at 92 % too, because that is what the hardware being imitated does when it is
+short of time.
+
+**The level target could never be reached.** The target was
+`PREFILL_BLOCKS * BLOCK_SAMPLES` - the level at the instant the stream starts,
+which is the *peak* of the sawtooth, not its mean. Asking for a mean equal to the
+peak leaves the trim on forever, pulling the rate about 1 % low: a permanent flat
+pitch on a console running perfectly. The target is the sawtooth's mean now,
+half a block below the prefill level.
+
+After:
+
+```
+1.00x: steady step 1.0008 (pitch +0.08 %), wobble 0.19 % rms, 0 underruns, 0 dropped
+0.97x: steady step 0.9700 (pitch -3.00 %), wobble 0.017 % rms
+0.95x: steady step 0.9486 (pitch -5.14 %), wobble 0.045 % rms, 0 underruns
+1.05x: steady step 1.0561 (pitch +5.61 %), wobble 0.105 % rms, 0 dropped
+```
+
+The pitch now equals the console's actual speed, to within 0.2 %, with no
+dropouts and no drops at any of them. Wobble is the standard deviation of the
+step over the second half of the run - a peak-to-peak figure is dominated by the
+one sample where the stream settles.
+
+Two more things came out of it:
+
+* **A truncation bug of my own, caught by the test.** Reconstructing the input
+  rate from the output rate means multiplying by the step; `(frames * step) >> 16`
+  on chunks of ~32 frames throws away up to a frame per chunk, which is 3 % when
+  there are 17 of them per frame. The loop then measures itself as slow, corrects
+  as slow, and settles at a permanent pitch error - measured at 0.987 instead of
+  1.000 before the remainder was carried. A measurement that feeds a control law
+  has to be unbiased, not merely close.
+* **`resyncs` was always zero.** The counter existed, was logged, and nothing
+  incremented it - so a log with underruns and a log without looked the same in
+  the one field that says "the stream restarted". It counts restarts after a drop
+  now.
+* **Fast-forward no longer plays audio.** It emulates two frames per displayed
+  one, so the sound arrives at twice the rate the channel eats: the FIFO
+  overflows (dropped samples mid-stream) or squeezes to the clamp (a chipmunk).
+  Nothing plays while it is held, and the decimator is skipped with it, which is
+  what makes fast-forward fast.
+
+The log line carries the two numbers that matter now - `produced` (the measured
+production rate against 32768) and `level` (the smoothed FIFO level against its
+target) - so the next report can say whether a console is keeping up without
+inferring it from the frame rate:
+
+```
+audio: ... underruns 0, resyncs 0, dropped 0, queue 40 ms, level 1500/1536,
+       produced 1.000, margin 0.56 ms, rate 1.000
+```
+
+`produced 1.000` and `rate 1.000` on a full-speed game is the target, and
+`produced 0.954` means 57 fps, measured from the sound rather than assumed from
+the frame.
+
+## 23. What the Croc 2 log says: the sound was doubled, not starved
+
+The first log from the version that was actually on the console - Game Boy
+Color, Croc 2, 210 s, `debug-2.log` - and it settles two things and finds one
+more fault.
+
+**The performance is real.** 143 one-second windows, three of them stalls
+(browser, save):
+
+```
+fps    median 59.80   min 52.9 (steady)   max 61.0
+frame  median 16.70   core median 9.50 = emu 6.00 + dec 1.80 + push 0.70 + draw 1.00
+blit   median  6.80   of which sync (waiting for the panel) 5.60
+```
+
+`core` is 65 % emulation and 1.8 ms of decimation, and the frame sits inside
+the 16.74 ms a Game Boy frame has. That is full speed, for a Color game, on an
+Old 3DS - which is what the report said, and the numbers agree.
+
+**Colour correction is not the Color cost.** `pal=` has median 0, maximum 58,
+and is non-zero in 36 seconds out of 143. Tens of conversions per frame, never
+thousands: the gamma round trip is a rounding error next to a 6.0 ms emulated
+frame, and a Color game is not paying for being Color here. `emu` at 6.0 ms is
+in fact *lower* than the 8.4 ms a monochrome game measured in the earlier log.
+The CGB question that §21 opened is answered, and the answer is "nothing to do".
+
+**The sound was doubled.** `margin 5.00 ms` - the ceiling - in every audio line
+from the fifth second to the end. The margin is how early a block is submitted,
+and CSND has no scheduled start: submitting a block early does not queue it, it
+*plays* it, on top of the block that is still running. Two adjacent blocks of the
+stream, mixed for 5 ms, 32 times a second, 16 % of every block. That is a comb
+filter at the block rate, and it is a steady harshness rather than a stutter -
+which is what "pretty bad" describes.
+
+The comment that put it there had the reasoning backwards, and it is worth
+quoting because it sounds sensible:
+
+> being a little early is deliberate, because a short overlap of the same audio
+> is far less audible than a gap
+
+It is not the same audio. It is the next block, so the overlap doubles the first
+5 ms of it against the last 5 ms of the one before. A gap is a click; this was a
+permanent filter.
+
+Why the margin reached its ceiling: the frame loop never idles. `wait=0.0` in the
+steady windows, because a frame's work (9.5 ms) plus the panel wait (5.6 ms) plus
+the once-a-second work fills all 16.7 ms; `pace_late` counts 53 of 60 frames per
+second as having started late. The scheduler only ran from inside the emulator -
+`audio_push_frames()` pumps it - so every block whose deadline fell inside the
+5.6 ms `gspWaitForVBlank()` in `video_begin_frame()`, or inside the log write,
+was submitted late. Late blocks grew `late_max`, `late_max` grew the margin, and
+the margin was paid for in doubled audio.
+
+Three changes, then:
+
+* **The panel wait pumps the sound.** It is spent polling `video_swap_pending()`
+  with `audio_pump()` every 0.2 ms, and the same pump brackets the log write.
+  The wait is still the wait; it is now also a place the sound can be fed.
+* **The margin ceiling is 2 ms, not 5.** It is not only a safety net - it is an
+  overlap budget, and 2 ms is 6 % of a block against 16 %. 1 ms was tried and is
+  too tight: at 95 % speed the rate control starts hunting (wobble 0.03 % to
+  3.9 % rms), because the margin is also the slack that lets a submission land
+  one poll late without becoming a hole.
+* **The seam is measured.** `audio:` now reports `holes` (blocks that started
+  after their turn: silence), the worst of them, and `overlap` (the mean amount
+  a block starts early: doubling). The old `late` counter measures the
+  *difference* between consecutive overshoots, which cancels itself out - a
+  block 8 ms late followed by one 8 ms early reads as two late blocks and is in
+  fact one hole. It is still printed, because it is what the previous logs were
+  read against, but it is not the number to look at.
+
+On the host, with a 6 ms panel stall per frame - the console's 5.6 ms - the pump
+turns 61 holes into 13, with the same audio and the same schedule. The overlap
+itself is the thing to watch in the next log: it should read about 1 ms where it
+was 5.
+
+One more, found while reading the accounting: `other` in the perf line was
+computed as `frame - (core + blit + post + wait + sync)` while `frame` already
+contained `sync` and `blit` contained it too, so it printed exactly `-sync` in
+every line of this log (`other=-6.9` next to `sync=6.3`). It is zero now when
+everything is accounted for, which makes it a check instead of noise.
+
+## 24. The panel was gating the emulator, and the HUD was the 31 ms frame
+
+The first log from the build that was on the console, read properly this time.
+The median hid it: `fps` is 58.8 in the steady windows, not 59.8, **65 seconds of
+143 are below 59.5**, `pace_late` counts 58-60 of 60 frames per second as started
+late, and **142 of 143 seconds contain a frame over 25 ms**. So the report -
+"still not full speed, still drops framerate" - was exactly right and the
+average was lying.
+
+Two causes, both visible in the same line.
+
+**1. 6.3 ms of every frame was the CPU waiting for the panel.**
+
+```
+frame 17.0 = core 9.6 + blit 7.5 + post 0.8     (blit: 6.3 of it is `sync`)
+```
+
+`video_begin_frame()` called `video_present_sync()` when the previous swap had
+not been taken, and that is a blocking `gspWaitForVBlank()`. It ran at the end of
+the frame - 10.6 ms after the swap was posted - and the panel takes a swap at the
+*next* vblank, so by construction the answer there is "not yet" and the wait is
+whatever is left of a panel period. The wait was written down as "the frame's
+own slack", and that was true when the frame's work was 13 ms; at 9.6 ms it is
+not slack, it is the loop synchronising to the panel instead of the Game Boy.
+The result is a 17.0 ms frame against a 16.744 ms budget, forever.
+
+The fix is to ask at a point where the answer is yes. A frame is now emulated in
+one slot and presented at the **top of the next**, one Game Boy frame (16.74 ms)
+after its swap was posted - longer than a panel period (16.72 ms) - so the panel
+has released the buffer and `video_begin_frame_try()` costs two registers. It
+never blocks: if the panel is still busy the frame is *dropped* and the emulator
+carries on. `sync` is therefore 0 by construction now, and `skip` counts the
+drops.
+
+One frame of presentation latency is the price, and it is worth it: 6.3 ms of a
+16.7 ms budget is 38 % of the console's time.
+
+**2. The status readout cost one 31 ms frame every second.**
+
+```
+hud: render 4.2 ms + present 13.1 ms in 8 bands (worst band 1.7 ms)   x146
+```
+
+The 13.1 ms present was already spread over eight frames. The **render** was not:
+4.2 ms in one go, once a second, inside a 16.7 ms slot - which is precisely the
+`worst=31.x` that every single second of the log carries. It now only starts
+when the last frame actually had 5 ms of slack, and postpones (up to ten
+seconds) when it did not. A diagnostic must not cost frames; the `perf` line and
+the `session` summary carry the same numbers for free.
+
+Both are why `other` in the old log was a constant `-sync`: the accounting
+subtracted the panel wait twice. With the wait gone the term is zero and `other`
+reads ~0, which makes it a check again.
+
+**What this does and does not buy.** Work per slot is now the present (~2.2 ms:
+transpose + flush + swap) plus the emulation (9.6) plus the once-a-second work:
+about 12.6 ms against 16.744, so the loop has ~4 ms of real slack and can hold
+the schedule instead of being dragged by the panel. It does not make the
+emulator faster - `emu` is untouched - and if the console turns out to be
+work-bound rather than sync-bound the next `core` figure will say so, because
+`blit` no longer contains a wait.
+
+Next, in order, if the log still shows 58.8: **GPU present** (`blit` 2.2 → ~0.1 ms
+and no transposition at all) and **the decimator on core 2** (`emu` 9.6 → ~7.8).
+
+## 25. A dropped present has to be countable, or it looks like a bog
+
+The frame loop no longer waits for the panel (§24): it offers the swap and, if
+the panel still holds the buffer, drops the presentation and emulates on. That
+is the right trade - a repeat never costs the emulator any time - but it is
+invisible in a log where everything else is a *duration*. A session can read
+`fps 59.7`, `late 0`, `worst 16.9` and still have looked wrong, because the
+number that says so is a count.
+
+`skip` existed, but only inside `slow frame ...` lines, and those are printed
+when a frame overruns 16.7 ms. A build that works never prints one, so the
+counter that matters most was in the lines that only appear when it does not.
+Now:
+
+* `perf ... drop=N` - presentations the panel was too busy for, in that second;
+* `session: N of M presentations dropped (x.xx %), worst frame ...` - the
+  session's own line, written when the game is unloaded.
+
+The margin here is small and that is the reason to measure it. A swap is asked
+for 16.744 ms after the previous one and the panel's period is 16.72 ms, so the
+answer is "free" by about 24 µs. Thread wake-up jitter is larger than that, so
+some drops are expected in any build; what matters is the size of the count. If
+`drop` is a handful per session, the loop is holding 59.73 fps with a few
+repeats - acceptable. If it is a fraction of the frames, then the non-blocking
+ask is being refused often enough to see, and the next step is *not* to go back
+to a blocking present (that is the 58.8 fps of §23/§24) but to wait a bounded
+amount for the panel when - and only when - the slot has the slack: the present
+happens at the top of the slot, the emulation needs 9.6 ms of 16.744, so ~4 ms
+is available to spend before the frame is late. Drop only after that.
+
+Two other things changed in the same pass, both about being able to trust the
+evidence:
+
+* `log_line()` now carries `__attribute__((format(printf, 1, 2)))`. A `%u`
+  against a `double` used to compile without a word; the log is the only
+  evidence a slow-console report has, so the compiler checks every call to it
+  (it found none broken, including the new ones).
+* The UI stress test under AddressSanitizer died in its *own startup* in CI -
+  twenty `AddressSanitizer:DEADLYSIGNAL` lines, `Segmentation fault`, and not
+  one line of the test's output - and took the build with it. ASan needs to map
+  its shadow at fixed addresses, which a kernel with `vm.mmap_rnd_bits=32` does
+  not always allow; the Makefile's `setarch -R` workaround fixed it on the
+  runner and silently did nothing inside the build container, because Docker's
+  default seccomp profile refuses `personality(ADDR_NO_RANDOMIZE)`. A guard
+  that cannot tell "not supported here" from "did not help" turns a runner
+  quirk into a red build, so the test is now run by a script that probes
+  `setarch` once and keys on the test's own first line, `ui stress: start`: a
+  run that never printed it is a skip, anything that printed it and then
+  complained is a failure. The container is allowed to disable ASLR again
+  (`--security-opt seccomp=unconfined`), the host job sets
+  `GBABE_ASAN_REQUIRED=1` so a skip cannot pass there, and a skip in the
+  container shows up as a job annotation rather than as one line in a log
+  nobody can download.

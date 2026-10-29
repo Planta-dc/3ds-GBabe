@@ -218,6 +218,15 @@ int main(int argc, char **argv)
 		}
 
 		/* ---- play ---------------------------------------------------- */
+		/* The picture is one slot behind the emulator: a frame is
+		 * emulated in one slot and presented at the top of the next,
+		 * which is the only point in the loop where the panel has had a
+		 * full period to release the buffer. `emu_frame_buffer()` still
+		 * holds it until the next emulation overwrites it, so this costs
+		 * one buffer, not two. */
+		static bool frame_ready, draw_pending;
+		static unsigned frame_skipped;
+
 		while (aptMainLoop() && emu_loaded())
 		{
 			hidScanInput();
@@ -249,6 +258,19 @@ int main(int argc, char **argv)
 			}
 
 			update_joypad();
+
+			/* Fast-forward is not listenable. The loop emulates two
+			 * frames per displayed one, so the sound arrives at twice
+			 * the rate the channel eats, and the FIFO then does one of
+			 * two things: overflows (samples dropped mid-stream, which
+			 * is a tearing noise) or gets squeezed to the 20 % clamp (a
+			 * chipmunk). Nothing plays while it is held, and the whole
+			 * audio path - decimator included - is skipped, which is
+			 * what makes it fast in the first place. */
+			const bool want_audio = g_cfg.audio_on &&
+						!g_cfg.fast_forward;
+			if (want_audio != audio_enabled())
+				audio_set_enabled(want_audio);
 
 			/* Idle until the next emulated frame is due - or until a
 			 * sound block has to be submitted, whichever comes first.
@@ -288,6 +310,49 @@ int main(int argc, char **argv)
 			const bool draw = (g_cfg.frameskip == 0) || ((frame_no & 1) == 0);
 			frame_no++;
 
+			/* ---- present the frame emulated in the previous slot --- */
+			/* One Game Boy frame (16.74 ms) has passed since that swap
+			 * was posted, which is longer than a panel period (16.72
+			 * ms), so the panel has released the buffer by now: asking
+			 * costs two registers and the answer is yes.
+			 *
+			 * This used to happen at the *end* of the frame instead,
+			 * 10.6 ms after the swap, where the panel is still busy by
+			 * construction - and there it waited, 5.6-6.3 ms of every
+			 * frame, measured. That wait is the whole reason the
+			 * console sat at 58.8 fps with only 9.6 ms of emulation in
+			 * a 16.74 ms budget. When the answer here is no, the frame
+			 * is dropped and the emulator keeps going: the loop must
+			 * never be gated by the panel. */
+			u64 draw_ticks = 0;
+			const u64 t_present = svcGetSystemTick();
+
+			if (frame_ready)
+			{
+				frame_ready = false;
+
+				if (draw_pending)
+				{
+					if (video_begin_frame_try())
+					{
+						const uint16_t *px = emu_frame_buffer();
+
+						if (px != NULL)
+							video_draw_frame(px, 160);
+
+						draw_ticks = video_draw_take();
+						video_end_frame();
+					}
+					else
+					{
+						frame_skipped++;
+					}
+				}
+			}
+
+			const u64 after_swap = svcGetSystemTick();
+			const u64 present = after_swap - t_present;
+
 			/* Turbo: one extra emulated frame per displayed frame. */
 			if (g_cfg.fast_forward)
 			{
@@ -306,51 +371,20 @@ int main(int argc, char **argv)
 				ui_message("Emulation error", core_err,
 					   "The game may keep running.");
 
+			frame_ready = true;
+			draw_pending = draw;
+
 			const u64 after_core = svcGetSystemTick();
 
 			/* Where that time went: Gambatte, the decimator, the scaled
 			 * transpose. Counted inside the callees, so they are taken
 			 * here too - an emulated frame with no drawing still decodes
 			 * audio, and a skipped frame still runs the emulator. */
-			u64 emu_ticks, audio_ticks, push_ticks, draw_ticks;
+			u64 emu_ticks, audio_ticks, push_ticks;
 			const unsigned palette = emu_palette_take();
 
 			emu_timing_take(&emu_ticks, &audio_ticks, &push_ticks);
 
-			/* The picture goes to the panel *now*, after the emulation,
-			 * and not before it. video_begin_frame() hands back the
-			 * buffer the panel has finished with; asked at the top of
-			 * the frame, 1 ms after the previous swap was posted, that
-			 * answer is always "not yet", and the wait for it was a
-			 * blocking vblank on every single frame - 4.3 ms, counted
-			 * inside `core`, which is most of the reason this port ran
-			 * at 56 fps when the emulator alone fits in 8.4 ms. */
-			const u64 t_present = svcGetSystemTick();
-
-			if (draw)
-			{
-				video_begin_frame();
-
-				const uint16_t *px = emu_frame_buffer();
-				if (px != NULL)
-					video_draw_frame(px, 160);
-			}
-
-			draw_ticks = video_draw_take();
-			const u64 t_drawn = svcGetSystemTick();
-
-			/* What video_begin_frame() spent handing back a buffer the
-			 * panel had not finished with. It is affordable now because
-			 * the emulation has already run: the wait is the frame's
-			 * slack, not an addition to it - the buffer the panel
-			 * releases at the next vblank is the one this frame needs,
-			 * and by then the frame is ready to use it. */
-			const u64 sync = draw ? (t_drawn - t_present) - draw_ticks : 0;
-
-			if (draw)
-				video_end_frame();
-
-			const u64 after_swap = svcGetSystemTick();
 
 			/* ---- the window between the swap and the vblank ----------- */
 			/* The frame is handed over; the panel takes it at the next
@@ -365,6 +399,13 @@ int main(int argc, char **argv)
 				ui_idle_work();
 				log_flush();
 				audio_log_stats();
+
+				/* The log write above is an SD card operation, and
+				 * on a slow card it is milliseconds - a dead window
+				 * for the sound in the middle of every frame that
+				 * had something to write. One pump before and one
+				 * after is enough to keep the deadline inside it. */
+				audio_pump();
 
 				if (svcGetSystemTick() - autosave_tick > AUTOSAVE_TICKS)
 				{
@@ -391,6 +432,16 @@ int main(int argc, char **argv)
 				unsigned late, resyncs;
 				pace_take_counters(&pace, &late, &resyncs);
 
+				/* The presents this window had to drop, as a
+				 * window figure: frame_skipped is the running
+				 * total the slow-frame line reports. Only draw
+				 * frames can drop one, and only draw frames
+				 * get here, so the difference is exact. */
+				static unsigned skipped_seen;
+				const unsigned dropped =
+					frame_skipped - skipped_seen;
+				skipped_seen = frame_skipped;
+
 				const gbabe_frame_cost cost = {
 					/* The work: Gambatte, the decimator, the
 					 * transpose. It used to be timed from the
@@ -405,13 +456,20 @@ int main(int argc, char **argv)
 					.push = push_ticks,
 					.palette = palette,
 					.draw = draw_ticks,
-					.blit = after_swap - after_core,
-					.sync = sync,
+					/* The present block: the buffer handover,
+					 * the transpose and the swap. It no longer
+					 * contains a wait - video_begin_frame_try()
+					 * never blocks - so `sync` is zero by
+					 * construction and kept only so old logs
+					 * still line up with new ones. */
+					.blit = present,
+					.sync = 0,
 					.post = after_post - after_swap,
 					.wait = waited,
 					.frame = after_post - (prev_end ? prev_end : frame_start),
 					.late = late,
 					.resyncs = resyncs,
+					.dropped = dropped,
 				};
 
 				ui_note_frame(&cost);
@@ -423,43 +481,43 @@ int main(int argc, char **argv)
 			 * with the split, so a stutter can be traced to one part. */
 			static u64 last_slow_log;
 			const u64 now = svcGetSystemTick();
-			/* The work, not the wall period: the panel wait is not
-			 * work. A frame that syncs to the vblank spends up to a
-			 * whole panel period inside video_begin_frame() and is
-			 * still perfectly on time, so it is subtracted here and
-			 * reported as `sync`. What can make the loop miss a frame
-			 * is emulation + transpose + the once-a-second work. */
+			/* The whole slot, from its start to the end of the
+			 * once-a-second work: nothing in it waits for the panel
+			 * any more, so there is no longer a term to subtract. */
 			const double frame_ms =
-				(double)(after_post - frame_start - sync) *
+				(double)(after_post - frame_start) *
 				1000.0 / SYSCLOCK_ARM11;
 			if (draw && frame_ms > 16.7 &&
 			    now - last_slow_log > SYSCLOCK_ARM11)
 			{
 				last_slow_log = now;
 
-				/* The wait for the panel is not the blit. On
-				 * hardware the panel's own frame is 16.67 ms and
-				 * the Game Boy's is 16.74, so a frame that
-				 * arrives just after a vblank waits a whole panel
-				 * period - which reads as "blit 16.8" in this
-				 * line while the copy itself is 0.1 ms. Split it:
-				 * a 26 ms frame is core 10 + vblank 16, and the
-				 * line should say so. */
-				log_line("slow frame %.1f ms: core %.1f blit %.1f "
-					 "post %.1f panel %.1f audio %u ms", frame_ms,
-					 (double)(after_core - frame_start) * 1000.0 /
-						 SYSCLOCK_ARM11,
-					 (double)(after_swap - after_core) * 1000.0 /
+				/* Nothing here waits for the panel any more, so
+				 * a frame that overruns is work: the present
+				 * block, the emulation, or the once-a-second
+				 * work. If `present` itself is large, the panel
+				 * was busy and video_begin_frame_try() should
+				 * have said so - `skip` says how often it
+				 * did. */
+				log_line("slow frame %.1f ms: present %.1f core %.1f "
+					 "post %.1f skip %u audio %u ms", frame_ms,
+					 (double)present * 1000.0 / SYSCLOCK_ARM11,
+					 (double)(after_core - after_swap) * 1000.0 /
 						 SYSCLOCK_ARM11,
 					 (double)(after_post - after_swap) * 1000.0 /
 						 SYSCLOCK_ARM11,
-					 (double)sync * 1000.0 / SYSCLOCK_ARM11,
-					 audio_queue_ms());
+					 frame_skipped, audio_queue_ms());
 			}
 		}
+
+		/* The game has been unloaded - quit to the browser, or the menu
+		 * reset it: either way this session is over, and its one-line
+		 * summary belongs in the log before the next one starts. */
+		ui_log_session();
 	}
 
 done:
+	ui_log_session();
 	emu_unload();
 	platform_exit();
 	return 0;

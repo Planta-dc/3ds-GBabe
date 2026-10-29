@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define GBABE_VERSION       "0.3.3"
+#define GBABE_VERSION       "0.3.7"
 
 /* Which build this is, stamped in by the Makefile (date + git revision).
  *
@@ -115,6 +115,13 @@ typedef struct
 	uint64_t frame;  /* the whole frame, start to start                     */
 	unsigned late;   /* frames that started after their slot                */
 	unsigned resyncs;/* backlogs thrown away                                */
+	/* Frames whose picture was not shown: the panel still held the buffer
+	 * when the loop offered the swap (video_begin_frame_try() said no), so
+	 * the previous picture stayed up for one more panel period. It costs no
+	 * time - the emulator runs on regardless - but it is the difference
+	 * between "59.7 frames a second" and "59.7 frames a second, 3 of them
+	 * repeats", and a rate with repeats is what a hitch looks like. */
+	unsigned dropped;/* presentations the panel was too busy for            */
 } gbabe_frame_cost;
 
 /* ------------------------------------------------------------------------- */

@@ -48,9 +48,21 @@ typedef struct
 	unsigned resyncs;     /* stream dropped and restarted                 */
 	unsigned dropped;     /* samples discarded because the FIFO was full  */
 	unsigned late_blocks; /* blocks whose deadline had already passed     */
+	unsigned holes;       /* blocks that started after they were due, so  *
+	                       * the one before had run out: silence          */
+	int hole_ms;          /* total silence those holes left, in ms        */
+	int worst_hole_ms;    /* the worst single one                         */
+	int overlap_us;       /* mean amount a block starts early, in us - the *
+	                       * two blocks play on top of each other for that *
+	                       * long, which is a comb filter at the block    *
+	                       * rate, so it is worth keeping small           */
 	int margin_us;        /* submit margin currently in use               */
 	int worst_late_us;    /* worst lateness seen since audio_init()       */
 	unsigned queue_ms;    /* audio buffered ahead of the hardware         */
+	int rate_meas_q16;    /* measured production rate, 16.16 (65536 = the
+	                       * 32768 Hz the channel is opened at)           */
+	int fill_frames;      /* smoothed queue level, in frames              */
+	int fill_target;      /* the level it is being held at, in frames     */
 } audio_stats;
 
 void audio_get_stats(audio_stats *out);
@@ -65,11 +77,18 @@ bool audio_enabled(void);
 /* Number of frames the sound FIFO is behind, for the HUD. */
 unsigned audio_queue_ms(void);
 
-/* How fast the decimator's output should be fed to the FIFO to keep it near its
- * target level, in 16.16 (RESAMP_UNITY is 1:1). 1:1 when the queue is where it
- * should be, below it when the queue is draining, above it when it is filling -
- * see include/resamp.h for why the sample rate cannot be taken as fixed. */
+/* How fast the decimator's output should be fed to the FIFO, in 16.16
+ * (RESAMP_UNITY is 1:1). Below 1:1 when the console is producing fewer samples
+ * per second than CSND is eating (the audio is stretched, and its pitch falls
+ * with the game - see include/resamp.h), above it when the console is running
+ * ahead, and exactly 1:1 on a console that keeps up.
+ *
+ * Advances the measurement; call it once per chunk, as emu_gambatte.cpp does,
+ * not from a log line. */
 int32_t audio_rate_step(void);
+
+/* The step currently in force, without advancing anything. For the log. */
+int32_t audio_rate_current(void);
 
 #ifdef __cplusplus
 }

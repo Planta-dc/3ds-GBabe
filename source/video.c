@@ -224,6 +224,43 @@ static void clear_letterbox(void)
 	}
 }
 
+/* Ask for the back buffer without waiting for the panel.
+ *
+ * This is what the frame loop uses. The blocking version below is still right
+ * for the menus, which have nothing else to do, but in the frame loop a wait is
+ * time the emulator cannot spend: the console log measured 5.6-6.3 ms of it in
+ * every frame, a third of the frame's 16.74 ms budget, and it is the reason the
+ * loop sat at 58.8 fps instead of 59.73 with the emulation itself only taking
+ * 9.6 ms.
+ *
+ * The answer is a question, not a wait: a swap posted a whole Game Boy frame
+ * ago has had longer than a panel period to be taken, so this returns true
+ * almost always. When it returns false the caller drops the frame - the panel
+ * is still scanning out the previous one - and keeps emulating. A dropped
+ * presentation costs nothing: the next frame supersedes it.
+ */
+bool video_begin_frame_try(void)
+{
+	if (sync_pending)
+	{
+		if (video_swap_pending())
+			return false; /* the panel has not released the last buffer */
+		sync_free++;      /* it has, and nothing had to be waited for */
+		sync_pending = false;
+	}
+
+	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+	fb_ready = (fb != NULL);
+
+	if (fb_ready && !letterbox_black(fb))
+	{
+		clear_letterbox();
+		letterbox_remember(fb);
+	}
+
+	return fb_ready;
+}
+
 void video_begin_frame(void)
 {
 	/* The buffer this hands back is the one the panel has finished with, and

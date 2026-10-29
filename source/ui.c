@@ -51,14 +51,34 @@ static bool      last_scan_ok;
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static bool     hud_due;         /* the status readout needs a redraw */
+/* Slack the loop had in the last frame, and how long a redraw has been
+ * postponed. See ui_idle_work(): the readout must never cost a frame while the
+ * console is busy, and it must not freeze either. */
+static u64      last_idle;
+static unsigned hud_postponed;
 static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
                 hud_sum_wait, hud_sum_frame;
 static u64      hud_sum_emu, hud_sum_audio, hud_sum_push, hud_sum_draw;
 static u64      hud_sum_palette;
 static u64      hud_worst; /* slowest single frame in the window */
+
+/* The whole session, accumulated one window at a time. Reading a log for
+ * "how did that Game Boy Color game do" should not mean scrolling a second at
+ * a time and averaging in your head, so the totals are kept and written once,
+ * as one line, when the game goes away. */
+static unsigned sess_windows;
+static unsigned sess_frames;
+static unsigned sess_late;
+static unsigned sess_dropped;
+static double   sess_fps_sum;
+static double   sess_fps_min;   /* the worst whole-second average */
+static u64      sess_frame_ticks, sess_core_ticks, sess_emu_ticks;
+static u64      sess_palette;
+static u64      sess_worst;     /* slowest frame of the session, in ticks */
 static unsigned hud_late;    /* frames that started after their slot      */
 static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
+static unsigned hud_dropped; /* presents the panel was too busy for       */
 
 /* ------------------------------------------------------------------------- */
 /* Input                                                                     */
@@ -751,8 +771,13 @@ static void hud_render(void)
 	 * kinds apart, because "waiting for the panel" and "pacing to 59.7275
 	 * Hz" are different problems even though both are time spent asleep. */
 	const float idle_ms = g_perf.sync_ms + g_perf.wait_ms;
+	/* `blit` already contains `sync` - it is the whole stretch from the end
+	 * of the emulation to the swap, and the wait for the panel is inside
+	 * it. Subtracting `sync` a second time here made `other` come out at
+	 * exactly -sync every frame, which is how a console log ended up
+	 * printing other=-6.9 on a frame where everything was accounted for. */
 	const float other = g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-					       idle_ms);
+					       g_perf.post_ms + g_perf.wait_ms);
 
 	snprintf(fps, sizeof fps, "%.1f", g_perf.fps);
 	snprintf(frame, sizeof frame, "%.1f ms/frame", g_perf.frame_ms);
@@ -796,8 +821,10 @@ static void hud_render(void)
 
 void ui_note_frame(const gbabe_frame_cost *c)
 {
+	last_idle = c->wait;
 	hud_late += c->late;
 	hud_resyncs += c->resyncs;
+	hud_dropped += c->dropped;
 	hud_frames++;
 	hud_sum_core += c->core;
 	hud_sum_emu += c->emu;
@@ -867,25 +894,36 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f emu=%.1f "
 		 "dec=%.1f push=%.1f draw=%.1f blit=%.1f "
 		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums pal=%u "
-		 "sync_free=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
+		 "sync_free=%u sync_late=%u pace_late=%u resync=%u drop=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms,
 		 g_perf.emu_ms, g_perf.audio_ms, g_perf.push_ms,
 		 g_perf.draw_ms, g_perf.blit_ms,
 		 g_perf.post_ms, g_perf.sync_ms, g_perf.wait_ms,
-		/* `sync` and `wait` are different waits and neither is
-		 * extra: `wait` is the idle at the top of the loop before the
-		 * frame was due, `sync` is the panel handing back the buffer
-		 * this frame draws into. Both are inside the frame's period
-		 * and neither is work, so both are subtracted along with the
-		 * work to leave `other`. */
+		/* `wait` is the idle at the top of the loop before the frame
+		 * was due. `sync` is *not* subtracted here: it is already
+		 * inside `blit`. What is left should be zero; it was -sync
+		 * for every frame until this was fixed. */
 		g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-				   g_perf.post_ms + g_perf.wait_ms +
-				   g_perf.sync_ms),
+				   g_perf.post_ms + g_perf.wait_ms),
 		 audio_queue_ms(), g_perf.palette, sync_free, sync_late,
-		 hud_late, hud_resyncs);
+		 hud_late, hud_resyncs, hud_dropped);
+
+	sess_windows++;
+	sess_frames += hud_frames;
+	sess_late += hud_late;
+	sess_dropped += hud_dropped;
+	sess_fps_sum += hud_fps;
+	if (sess_windows == 1 || hud_fps < sess_fps_min)
+		sess_fps_min = hud_fps;
+	sess_frame_ticks += hud_sum_frame;
+	sess_core_ticks += hud_sum_core;
+	sess_emu_ticks += hud_sum_emu;
+	sess_palette += hud_sum_palette;
+	if (hud_worst > sess_worst)
+		sess_worst = hud_worst;
 
 	hud_frames = 0;
-	hud_late = hud_resyncs = 0;
+	hud_late = hud_resyncs = hud_dropped = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
 		hud_sum_wait = hud_sum_frame = 0;
 	hud_sum_emu = hud_sum_audio = hud_sum_push = hud_sum_draw = 0;
@@ -902,6 +940,51 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	 * wait. */
 	if (g_cfg.show_hud && emu_loaded())
 		hud_due = true;
+}
+
+/* One line for the whole session, written when the game is unloaded or the app
+ * is quit: the answer to "how did it run" without reading a second at a time.
+ *
+ * `fps min` is the worst whole-second average, not the worst frame - a single
+ * 20 ms frame in a minute of perfect emulation is not a problem, and a minute
+ * of 57 fps is. `late` is frames that started after their own slot, which is
+ * the number to read for "did it ever miss", as opposed to how far off it was.
+ * `pal` is CGB palette conversions per frame: ~0 on a monochrome game, and the
+ * thing that tells a colour-correction cost from a core cost (see
+ * docs/PORT-NOTES.md 21). */
+void ui_log_session(void)
+{
+	if (sess_windows == 0)
+		return;
+
+	const double n = sess_frames ? (double)sess_frames : 1.0;
+	const double ticks_to_ms = 1000.0 / SYSCLOCK_ARM11;
+
+	log_line("session: %u s, %u frames, fps avg %.1f min %.1f, "
+		 "frame avg %.1f ms worst %.1f, core avg %.1f (emu %.1f), "
+		 "pal avg %u, late %u (%.1f %%)",
+		 sess_windows, sess_frames,
+		 sess_fps_sum / (double)sess_windows, sess_fps_min,
+		 (double)sess_frame_ticks * ticks_to_ms / n,
+		 (double)sess_worst * ticks_to_ms,
+		 (double)sess_core_ticks * ticks_to_ms / n,
+		 (double)sess_emu_ticks * ticks_to_ms / n,
+		 (unsigned)((double)sess_palette / n + 0.5),
+		 sess_late, (double)sess_late * 100.0 / n);
+
+	/* Separate line, so the sentence above keeps its shape for anything
+	 * that reads it: a session that dropped presents ran at full speed and
+	 * still looked wrong, and no average of the other numbers says so. */
+	log_line("session: %u of %u presentations dropped (%.2f %%), "
+		 "worst frame %.1f ms", sess_dropped, sess_frames,
+		 (double)sess_dropped * 100.0 / n,
+		 (double)sess_worst * ticks_to_ms);
+
+	sess_windows = sess_frames = sess_late = 0;
+	sess_fps_sum = sess_fps_min = 0.0;
+	sess_frame_ticks = sess_core_ticks = sess_emu_ticks = 0;
+	sess_palette = sess_worst = 0;
+	sess_dropped = 0;
 }
 
 /* Everything worth doing exactly once a second, done where it is free.
@@ -925,6 +1008,25 @@ void ui_idle_work(void)
 
 		if (!g_cfg.show_hud || !emu_loaded())
 			return;
+
+		/* Rendering the readout is 4.2 ms in one go, measured on the
+		 * console, and it lands inside a frame like any other work: the
+		 * log showed one frame every single second over 25 ms, which is
+		 * a visible hitch, and it was this. Only start it when the last
+		 * frame actually had that much slack; if the console is too busy
+		 * to ever have it, redraw anyway every ten seconds or so rather
+		 * than leaving a readout that looks frozen. Turning the readout
+		 * off is the way to never pay for it at all - the once-a-second
+		 * `perf` line and the `session` summary carry the same numbers. */
+		if (last_idle < SYSCLOCK_ARM11 / 200 /* 5 ms */ &&
+		    hud_postponed < 10)
+		{
+			hud_postponed++;
+			hud_due = true;
+			return;
+		}
+
+		hud_postponed = 0;
 
 		const u64 t0 = svcGetSystemTick();
 		hud_render();

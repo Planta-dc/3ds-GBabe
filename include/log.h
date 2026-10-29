@@ -37,7 +37,15 @@ bool log_init(const char *path, bool enabled);
 void log_set_enabled(bool on);
 bool log_enabled(void);
 
-/* One formatted line. `urgent` lines are flushed right away. */
+/* One formatted line. `urgent` lines are flushed right away.
+ *
+ * The format string is checked by the compiler. Without that, a %u where a
+ * double was passed - or an argument added to the list and left out of the
+ * format - compiles without a word and prints nonsense, and this log is the
+ * only evidence a slow-console report has. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
 void log_line(const char *fmt, ...);
 
 /* Write what is buffered and close the file (call before exiting). */
