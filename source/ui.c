@@ -840,34 +840,42 @@ void ui_note_frame(const gbabe_frame_cost *c)
 
 	/* The same numbers the status readout shows, in the log: this is the
 	 * measurement a slow-console report needs, and a screenshot of the bottom
-	 * screen is a lot to ask of someone. sync_skip/sync_late are the present
-	 * path's own counters: a frame that could not afford the vblank wait
-	 * (and may tear), and a swap the panel was a vblank late in taking.
-	 * pace_late/pace_resync are the frame loop's: a frame that started after
-	 * its own slot, and a thrown-away backlog. */
-	unsigned sync_skip, sync_late;
+	 * screen is a lot to ask of someone. sync_free/sync_late are the present
+	 * path's own counters: a frame that got its buffer back without waiting
+	 * (it arrived at the present with time to spare), and a swap the panel
+	 * was a vblank late in taking. pace_late/pace_resync are the frame
+	 * loop's: a frame that started after its own slot, and a thrown-away
+	 * backlog. */
+	unsigned sync_free, sync_late;
 
-	video_sync_take(&sync_skip, &sync_late);
+	video_sync_take(&sync_free, &sync_late);
 
-	/* `core` is kept as it always was - the whole of emu_run_frame() - and
-	 * the three figures after it are its parts, so a new log still compares
-	 * with the old ones: emu+audio+draw is Gambatte, the decimator and the
-	 * scaled transpose, and what is left over is the loop's own bookkeeping.
-	 * Until now the transpose was invisible, counted in `core` while the
-	 * figure named `blit` measured only the flush and the swap. */
+	/* `core` is the work: emu+audio+draw, i.e. Gambatte, the decimator and
+	 * the scaled transpose, and it is the sum of those three by definition.
+	 * (It is also no longer a wall-clock window, which it was until the
+	 * panel wait stopped landing inside it - see docs/PORT-NOTES.md
+	 * section 17. A log from before that fix has `core` inflated by a
+	 * blocking vblank of up to 16 ms.) `sync` is the panel
+	 * handing back the buffer the frame draws into, and it is slack, not
+	 * work: it is the same period the frame would otherwise have spent
+	 * idle waiting for its own next slot. */
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f emu=%.1f "
 		 "dec=%.1f draw=%.1f blit=%.1f "
 		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums "
-		 "sync_skip=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
+		 "sync_free=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms,
 		 g_perf.emu_ms, g_perf.audio_ms, g_perf.draw_ms, g_perf.blit_ms,
 		 g_perf.post_ms, g_perf.sync_ms, g_perf.wait_ms,
-		 /* `sync` is a part of `wait` now, not extra: the panel
-		  * wait happens in the same idle window, so subtracting both
-		  * would count it twice. */
-		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-				    g_perf.post_ms + g_perf.wait_ms),
-		 audio_queue_ms(), sync_skip, sync_late, hud_late, hud_resyncs);
+		/* `sync` and `wait` are different waits and neither is
+		 * extra: `wait` is the idle at the top of the loop before the
+		 * frame was due, `sync` is the panel handing back the buffer
+		 * this frame draws into. Both are inside the frame's period
+		 * and neither is work, so both are subtracted along with the
+		 * work to leave `other`. */
+		g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
+				   g_perf.post_ms + g_perf.wait_ms +
+				   g_perf.sync_ms),
+		 audio_queue_ms(), sync_free, sync_late, hud_late, hud_resyncs);
 
 	hud_frames = 0;
 	hud_late = hud_resyncs = 0;

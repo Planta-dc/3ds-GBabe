@@ -38,11 +38,20 @@ void emu_set_joypad(uint8_t pressed);
 /* Re-run the power-on sequence without reloading the ROM. */
 void emu_reset(void);
 
-/* Run exactly one Game Boy frame (~70224 cycles). Rendering to the top screen
- * only happens while rendering is enabled; disabling it implements frame skip
- * without leaving half-updated buffers behind. */
+/* Run exactly one Game Boy frame (~70224 cycles). Rendering happens while
+ * rendering is enabled; disabling it implements frame skip without leaving
+ * half-updated buffers behind. The finished 160x144 RGB565 picture is left in
+ * emu_frame_buffer(); *presenting* it is the caller's job, and deliberately so:
+ * the scaled transpose into the panel is the last thing a frame does, so that
+ * video_begin_frame() can hand back a framebuffer the panel has really finished
+ * with instead of waiting for one (docs/PORT-NOTES.md section 17). */
 void emu_run_frame(void);
 void emu_set_rendering(bool on);
+
+/* The 160x144 RGB565 picture from the last emu_run_frame(), `pitch` pixels per
+ * line, or NULL when the last frame ran with rendering disabled. Owned by the
+ * backend; valid until the next emu_run_frame(). */
+const uint16_t *emu_frame_buffer(void);
 
 /* How emu_run_frame() spent its time since the last call, in ARM11 ticks:
  * emulation (Gambatte's CPU+PPU+APU) and the audio decimator, separately.

@@ -51,11 +51,9 @@ static int cleared_scale = -1;
  * figure called `blit` measured only the cache flush and the swap. */
 static u64 draw_ticks;
 
-static u64 frame_start;      /* when video_begin_frame() was called          */
-static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
 
 /* Diagnostics for the present path, see video_sync_take(). */
-static unsigned sync_skips;  /* frames presented without waiting for the panel */
+static unsigned sync_free;   /* frames whose panel wait cost nothing        */
 static bool sync_pending;    /* the last swap has not been waited for yet    */
 static u64  swap_tick;       /* when that swap was posted                    */
 static unsigned sync_late;   /* swaps the panel did not take at the next vblank */
@@ -228,15 +226,38 @@ static void clear_letterbox(void)
 
 void video_begin_frame(void)
 {
-	/* Safety net for every caller that draws without asking: a swap the
-	 * panel has not taken yet must land before the buffer it released is
-	 * written to. main.c calls video_present_sync() itself, earlier, so
-	 * that its once-a-second work rides the wait; this only catches the
-	 * callers that do not (the host tools, the UI). */
-	video_present_sync();
+	/* The buffer this hands back is the one the panel has finished with, and
+	 * it has finished with it exactly when the previous swap has been taken
+	 * at a vblank. Ask before waiting: the frame loop presents *after* the
+	 * emulation, so by now that swap landed milliseconds ago and the
+	 * question costs two registers.
+	 *
+	 * This call used to block unconditionally, and the loop called it at
+	 * the *top* of the frame - 1 ms after the previous swap was posted,
+	 * when the answer is always "not yet". Every frame therefore paid a
+	 * blocking vblank on the way into the emulation: 4.3 ms measured, and
+	 * it was counted inside `core` in the log (docs/PORT-NOTES.md 17).
+	 *
+	 * Waiting here is not wasted, because a frame that has to wait is a
+	 * frame that arrived early: the emulation is already done, the picture
+	 * is ready in vbuf, and the only thing left to do with the frame is
+	 * put it on the panel. If the loop is genuinely late the swap has long
+	 * been taken and this costs nothing.
+	 *
+	 * No tear can come of this either, because drawing is what needs the
+	 * buffer: video_draw_frame() is called straight after, by which point
+	 * the buffer really has been released. (The old code kept a
+	 * "present it anyway and maybe tear" path for frames that overran a
+	 * panel period; that path is gone, because a frame that overran reaches
+	 * this call with nothing to wait for.) */
+	if (sync_pending)
+	{
+		if (video_swap_pending())
+			video_present_sync();
+		else
+			sync_free++;
+	}
 
-	frame_start = svcGetSystemTick();
-	frame_timed = true;
 	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
 	fb_ready = (fb != NULL);
 
@@ -376,26 +397,14 @@ void video_end_frame(void)
 	GSPGPU_FlushDataCache(fb, LCD_TOP_W * FB_STRIDE * sizeof(u16));
 	gfxScreenSwapBuffers(GFX_TOP, true);
 
-	/* Whether the wait is affordable is decided here, from the frame's own
-	 * work - not later, from video_present_sync(), because by then the
-	 * caller has had time to do its bookkeeping and the frame would look
-	 * slow when it was not. A frame that has already overrun a frame period
-	 * is presented at once and may tear: waiting would push it to the
-	 * *following* vblank and halve the frame rate at exactly the moment the
-	 * console is struggling. */
-	const u64 now = svcGetSystemTick();
-	const bool slack = frame_timed && now - frame_start < FRAME_TICKS;
-
-	if (slack)
-	{
-		sync_pending = true;
-		swap_tick = now;
-	}
-	else
-		sync_skips++;
+	/* The swap is pending until a vblank takes it, and the buffer it
+	 * releases is the one the next frame draws into: video_begin_frame()
+	 * is what waits for it, at a point in the frame where waiting is
+	 * free. */
+	sync_pending = true;
+	swap_tick = svcGetSystemTick();
 
 	fb_ready = false;
-	frame_timed = false;
 }
 
 /* Has the panel taken the swap yet? Answering this is what lets the frame loop
@@ -457,12 +466,12 @@ uint64_t video_present_wait(void)
 	return present_wait;
 }
 
-void video_sync_take(unsigned *skipped, unsigned *late_applies)
+void video_sync_take(unsigned *free_waits, unsigned *late_applies)
 {
-	if (skipped != NULL)
-		*skipped = sync_skips;
+	if (free_waits != NULL)
+		*free_waits = sync_free;
 	if (late_applies != NULL)
 		*late_applies = sync_late;
 
-	sync_skips = sync_late = 0;
+	sync_free = sync_late = 0;
 }

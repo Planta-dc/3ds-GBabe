@@ -16,8 +16,10 @@
  * What this file owns, and the front-end does not:
  *
  *   video   Gambatte renders RGB565 straight into `vbuf` (46 KiB), one full
- *           frame at a time, and the frame is handed to video_draw_frame(), so
- *           scaling and presentation stay in video.c.
+ *           frame at a time, and emu_frame_buffer() hands it to the front-end,
+ *           so scaling and presentation stay in video.c and happen after the
+ *           emulation - not before it, which is where the panel wait used to
+ *           hide (docs/PORT-NOTES.md section 17).
  *   audio   Gambatte's APU produces 35112 stereo samples per frame at
  *           2097152 Hz. Two 8:1 box-average stages bring that to 32768 Hz
  *           (a second-order CIC decimator: nothing above 16 kHz folds back
@@ -42,7 +44,6 @@
 #include "emu.h"
 #include "log.h"
 #include "palette.h"
-#include "video.h"
 
 #include "gambatte.h"
 
@@ -612,13 +613,18 @@ extern "C" void emu_run_frame(void)
 			break;
 	}
 
-	if (!rendering)
-		return;
+	/* The picture stays here. Putting it on the panel is the front-end's last
+	 * act of the frame (see emu.h): it needs the back framebuffer, and asking
+	 * for that 1 ms after the previous swap meant waiting for a vblank that
+	 * had not arrived yet - on every frame. */
+}
 
-	/* One call for the whole frame: the picture lives in a rotated panel, so
-	 * this path writes it down a column at a time and every write is
-	 * sequential in memory (see video.h). */
-	video_draw_frame(vbuf, 160);
+extern "C" const uint16_t *emu_frame_buffer(void)
+{
+	if (!loaded || !rendering)
+		return NULL;
+
+	return (const uint16_t *)vbuf;
 }
 
 extern "C" void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks)

@@ -1163,3 +1163,89 @@ is, in order of what the log proves:
    the frame (~2 ms/frame);
 3. only do the HUD when the frame has genuine idle time, which needs (1) first;
 4. keep SD writes out of the frame entirely.
+
+## 18. Present at the end of the frame, not the start of it
+
+Section 17 found 4.3 ms of "emulation" that was a blocking vblank. This is the
+fix, and it is not "call the wait differently" - it is where in the frame the
+panel is touched at all.
+
+### What the frame used to do
+
+```
+frame N   begin_frame()      <- takes the back buffer
+          emu_run_frame()    <- emulates, then transposes into that buffer
+          end_frame()        <- flush + swap
+          once-a-second work
+```
+
+`begin_frame()` has to hand back a buffer the panel has finished with, and it
+cannot know: the swap made at the end of frame N-1 is 1 ms old and the panel
+takes a whole vblank to get to it. So it waited. Every frame. That wait is the
+4.3 ms, and because it sat before `emu_run_frame()` it was counted as emulation.
+
+The comment in the old `begin_frame()` even claimed `main.c` did the wait
+"itself, earlier", so this was only a safety net for the other callers. There
+was no such call in `main.c`. The net was the only path.
+
+### What it does now
+
+```
+frame N   emu_run_frame()    <- emulates into the backend's own buffer
+          begin_frame()      <- asks: has the panel taken the swap? usually yes
+          draw_frame()       <- transposes into a buffer the panel has released
+          end_frame()        <- flush + swap
+```
+
+Two changes make it work:
+
+* **The picture is produced before the panel is touched.** `emu_run_frame()` no
+  longer draws; it leaves the 160x144 RGB565 frame in `emu_frame_buffer()` and
+  `main.c` presents it. Everything between the previous swap and this one -
+  emulation, audio, the once-a-second work - is time in which the panel can
+  finish.
+* **The wait is the frame's slack, not an addition to it.** A frame that has to
+  wait at the present is a frame that arrived early: its picture is finished,
+  and the only thing left to do with the frame is show it. A frame that arrives
+  late finds the swap long taken and does not wait at all.
+
+That also removes the "present at once and accept a tear" path: it existed for
+frames that overran a panel period, and a frame that overran no longer has
+anything to wait for, so it is unreachable rather than merely unlikely. Tearing
+is now impossible by construction - `video_draw_frame()` is only ever called
+after `video_begin_frame()`, which does not return until the buffer it hands
+back has been released. `presenttest` checks that as a property, including for a
+frame 20 ms over budget.
+
+### Expected on the console
+
+The four figures to read, in the next log line:
+
+```
+core=~12.4 emu=8.4 dec=3.0 draw=1.0   <- work (unchanged: this moved nothing)
+sync=~4       <- the panel handing the buffer back; slack, not work
+frame=~16.7   <- one panel period, instead of 17.6
+fps=~59.7
+```
+
+`core` should stay where it was and `frame` should *fall*, which is the point:
+the emulator did not get faster, the waiting stopped being counted against it.
+`sync_free` counts the frames that did not have to wait at all; on a console
+that is keeping up it should be most of them, and `pace_late` - which read 41 to
+58 out of ~57 frames a second in the last log - should collapse.
+
+### And the sound
+
+The crackle in the 0.3.1 log is this bug's fault, by way of the audio FIFO. The
+decimator produces 548.6 samples per emulated frame; CSND consumes 32768 a
+second. Those match at exactly 59.7275 fps and not below it:
+
+```
+56.7 fps   ->  31,100 samples/s produced against 32,768 consumed
+               = 1,668 samples/s missing, ~125 ms of buffer gone every 2.5 s
+```
+
+which is what `under 176` underruns and a queue swinging between 15 and 70 ms
+look like. 13.35 ms of work in a 16.74 ms budget is a full-speed console; the
+frame rate was low because it was *waiting*, and the sound was paying for it.
+If the next log still crackles, the next change is a resize in the resampler.
