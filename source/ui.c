@@ -855,9 +855,11 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 		 "sync_skip=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms,
 		 g_perf.post_ms, g_perf.sync_ms, g_perf.wait_ms,
+		 /* `sync` is a part of `wait` now, not extra: the panel
+		  * wait happens in the same idle window, so subtracting both
+		  * would count it twice. */
 		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-				    g_perf.post_ms + g_perf.sync_ms +
-				    g_perf.wait_ms),
+				    g_perf.post_ms + g_perf.wait_ms),
 		 audio_queue_ms(), sync_skip, sync_late, hud_late, hud_resyncs);
 
 	hud_frames = 0;

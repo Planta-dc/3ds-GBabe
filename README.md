@@ -216,7 +216,7 @@ sdmc:/3ds/gbabe/debug.log
 [    0.191] core: gambatte 0.5.0, CGB, 64 rom banks, 0 ram banks
 [    0.204] rom: "BUGS BUNNY4" CGB mbc5 64 rom banks 0 ram banks
 [    0.204] rom path: sdmc:/roms/gb/Bugs Bunny in Crazy Castle 4 (USA).gbc
-[    1.225] perf fps=59.8 frame=16.7 worst=18.7 core=10.0 blit=0.1 post=0.4 sync=6.6 wait=0.0 other=0.0 audio=55ms sync_skip=0 sync_late=0 pace_late=0 resync=0
+[    1.225] perf fps=59.7 frame=16.6 worst=16.8 core=10.2 blit=0.1 post=0.4 sync=5.9 wait=6.1 other=0.0 audio=55ms sync_skip=0 sync_late=0 pace_late=0 resync=0
 [    1.259] hud: render 0.9 ms + present 16.8 ms in 8 bands (worst band 2.1 ms)
 [    8.914] slow frame 26.2 ms: core 10.6 blit 0.1 post 2.1 vblank 15.6 audio 41 ms
 [   10.518] perf fps=58.9 frame=17.0 worst=26.2 core=15.1 blit=0.1 post=2.1 sync=3.1 wait=0.6 other=0.0 audio=62ms sync_skip=3 sync_late=0 pace_late=41 resync=0
@@ -241,6 +241,10 @@ sdmc:/3ds/gbabe/debug.log
   many were late and by how much, underruns, resyncs, dropped samples, the
   queue depth and the submit margin. A stutter shows up here as `late` or
   `underruns`, not as a vague "sound is bad";
+* `sync` is the panel wait, measured while the loop is idle rather than inside
+  the frame (`docs/PORT-NOTES.md` §14), so it is part of `wait`; `frame` is the
+  work - emulation, blit and the once-a-second jobs - and it is that figure
+  which has to stay under one 16.74 ms Game Boy frame;
 * `hud:` once a second when the bottom-screen readout is on: how long it took
   to redraw and present, and the worst single band. The redraw is 16 ms of work
   that would be a dropped frame if it happened all at once, so it is spent one

@@ -195,6 +195,14 @@ void gspWaitForVBlank(void)
 	present_pending[0] = present_pending[1] = 0;
 }
 
+/* The panel takes a pending swap. Same thing gspWaitForVBlank() does, without
+ * the wait - the real one happens at a vblank, and the point of
+ * video_swap_pending() is that the caller polls instead of waiting. */
+void g_host_present_take(void)
+{
+	gspWaitForVBlank();
+}
+
 PrintConsole *consoleInit(gfxScreen_t screen, PrintConsole *console)
 {
 	(void)screen;

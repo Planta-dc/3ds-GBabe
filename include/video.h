@@ -50,10 +50,18 @@ void video_draw_frame(const uint16_t *frame565, int pitch);
  * is struggling - one torn frame is the lesser evil. */
 void video_end_frame(void);
 
-/* Wait for the panel to take the swap made by video_end_frame(), and return the
- * ARM11 ticks spent waiting (0 if there was nothing to wait for, or if the wait
- * was skipped). video_begin_frame() calls this too, so a caller that forgets
- * cannot tear; calling it first is how the frame loop gets the wait for free. */
+/* Has the panel taken the swap made by video_end_frame()? Non-blocking.
+ *
+ * The frame loop polls this in its idle time before the next frame instead of
+ * blocking on the vblank straight after the swap: a blocking wait there pushed
+ * every frame past its slot (the Game Boy's frame is 16.74 ms and the panel's
+ * is 16.67 ms), which cost ~2 fps and made 95 % of frames start late. The wait
+ * comes out of the idle budget now. */
+bool video_swap_pending(void);
+
+/* Blocking wait for the panel, for the callers outside the frame loop (menus)
+ * and as the safety net in video_begin_frame(). Returns the ticks spent (0 if
+ * nothing was pending). */
 uint64_t video_present_sync(void);
 
 /* Forget which framebuffers already have a black letterbox.

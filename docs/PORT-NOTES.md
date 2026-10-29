@@ -856,3 +856,90 @@ assumed 1-2 ms because it was a text redraw; it is 16 ms because it is also a
 153 KiB cache flush, and nobody had measured the flush. The counter came first
 and the number was in the next log, which is the only reason this section can
 state it.
+
+---
+
+## 14. What the old RetroArch 3DS port does, and the one thing worth taking
+
+RetroArch's 3DS driver is the largest body of working 3DS emulator front-end
+code there is, so it is worth reading before inventing anything. Read at
+v1.6.9 and v1.7.7 (`gfx/drivers/ctr_gfx.c`, `audio/drivers/ctr_dsp_audio.c`,
+`audio/drivers/ctr_csnd_audio.c`) - the versions from before the port grew a
+citro3d shader pipeline, an OSD and a threaded GPU.
+
+What it does, and whether it applies here:
+
+| RetroArch | applies to GBabe? |
+|---|---|
+| Core draws into a **linear** texture; `GX_DisplayTransfer` / `ctrGuCopyImage` moves it to the swizzled framebuffer, the GPU does rotation and scaling with a textured quad | **No, not for speed.** Our blit is 0.1 ms - already free. It would buy cache pressure, not time, and cost a GPU rewrite on hardware we cannot test. |
+| Audio through **ndsp** (the DSP service, `ndspChnSetRate(32728)`, `NDSP_INTERP_NONE`, one looping wave buffer) or CSND | Maybe later. The DSP's native rate is 32730 Hz, so the core resamples to it and the hardware does not. Ours resamples to 32768 and CSND interpolates. Worth a measurement, not a guess - and note their own comment marks `ndspSetClippingMode` with "??". |
+| Pacing by `svcGetSystemTick()`, video driven by the core's own frame rate, `gspWaitForEvent(VBlank0)` only when vsync is on | **Yes - and this is the one.** |
+| `-O3`, `-fno-exceptions -fno-rtti`, no RTTI in the core | Already done here. |
+
+### The one that matters
+
+`ctr_gfx.c` has a long comment admitting the framework's own vsync problem:
+
+> If we are running at below the display refresh rate, then frame updates will
+> happen entirely out of sync with VBlank0 events. […] we'll wait for a VBlank0
+> here, but it will already have happened partway through the previous frame
+> […] resulting in 'overlap' and screen tearing. […] This fixes screen tearing,
+> but it has a significant impact on performance.
+
+They hit the same wall from the other side: **you cannot both block on the
+panel's vblank and keep an emulator of a different frame rate on time.** Their
+workaround is to wait on the *next* vblank, which they say costs performance.
+
+§7 of these notes chose the same trade in the other direction: block after every
+swap, and accept a tear only when the frame has already overrun. That is why the
+console log reads
+
+```
+perf fps=57.8 frame=17.3 worst=33.4 core=13.2 blit=0.1 post=0.2 sync=5.7 wait=0.0 ...
+```
+
+`frame=17.3` is the frame *period*, and 1000/17.3 = 57.8 - the whole reported
+frame rate is the period, and 5.7 of those 17.3 ms are spent blocked in
+`gspWaitForVBlank()` after the swap. The Game Boy's frame is 16.74 ms, so
+10.7 ms of work + 5.7 ms of waiting does not fit, the loop never sleeps
+(`wait=0.0`), and every frame starts late (`pace_late=58`).
+
+### The change
+
+The swap and the wait for it are now separated by the *whole rest of the frame*,
+not by a few microseconds of bookkeeping. `video_end_frame()` posts the swap and
+returns. The loop goes back to the top, finds the next frame is not due yet, and
+spends that idle time - which it would have slept through - draining the swap:
+
+```c
+if (!frame_due()) {
+        ...
+        if (video_swap_pending()) {          /* poll, do not block */
+                const u64 slice = FRAME_TICKS / 64;   /* ~0.26 ms */
+                if (now + slice < wake) wake = now + slice;
+        }
+        svcSleepThread(TICKS_TO_NS(wake - now));
+}
+```
+
+`video_swap_pending()` is a non-blocking `gspIsPresentPending()`, so the loop
+wakes a few times, sees the panel has taken the frame, and goes back to sleep.
+`video_present_sync()` still exists - `video_begin_frame()` calls it as a safety
+net, so nothing can draw into a buffer the panel has not released.
+
+The work is now ~10.7 ms in a 16.74 ms schedule with ~6 ms of slack, which is
+where the panel wait goes. `sync` stops being time taken from the frame; it is
+reported as part of `wait`, and the `slow frame` line now measures work over one
+panel period (16.7 ms) rather than wall time, because a frame can no longer be
+made slow by waiting.
+
+### The simulation, and its honest limit
+
+Modelling the loop against a 60 Hz panel grid (`/tmp` scratch, not committed):
+late starts go from 11 % to 0 % with identical throughput when the wait fits in
+the slack. That is the mechanism, and the console numbers say the wait does not
+currently fit - 10.7 + 5.7 = 16.4 ms of a 16.74 ms schedule, with the jitter that
+makes it 17.3. What the simulation cannot prove is the size of the slack on
+ARM11, because it cannot model cache or `emu_run_frame()`'s real distribution.
+The next log answers it: `wait` should rise to ~6 ms, `frame` should fall to
+~10.7, `pace_late` should collapse toward 0, and `fps` should be 59.7.

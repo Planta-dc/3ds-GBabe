@@ -51,6 +51,7 @@ static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
 /* Diagnostics for the present path, see video_sync_take(). */
 static unsigned sync_skips;  /* frames presented without waiting for the panel */
 static bool sync_pending;    /* the last swap has not been waited for yet    */
+static u64  swap_tick;       /* when that swap was posted                    */
 static unsigned sync_late;   /* swaps the panel did not take at the next vblank */
 
 /* One Game Boy frame, in ARM11 ticks. Used to decide whether there is time to
@@ -321,7 +322,10 @@ void video_end_frame(void)
 	const bool slack = frame_timed && now - frame_start < FRAME_TICKS;
 
 	if (slack)
+	{
 		sync_pending = true;
+		swap_tick = now;
+	}
 	else
 		sync_skips++;
 
@@ -329,23 +333,41 @@ void video_end_frame(void)
 	frame_timed = false;
 }
 
+/* Has the panel taken the swap yet? Answering this is what lets the frame loop
+ * put the wait where it costs nothing.
+ *
+ * Waiting for the vblank right after the swap was the wrong place: the Game Boy
+ * frame is 16.74 ms and the panel's is 16.67 ms, so a blocking wait at the end
+ * of every frame pushes the next frame past its own slot - 95 % of frames
+ * started late in the console log, and the loop drifted down to 57.8 fps. The
+ * panel must not gate the emulator.
+ *
+ * So main.c polls this in the idle time *before* the next frame - time it would
+ * have slept through anyway - and stops as soon as the answer is no. The wait
+ * comes out of the idle budget instead of out of the next frame. */
+bool video_swap_pending(void)
+{
+	if (!sync_pending)
+		return false;
+
+	if (gspIsPresentPending(GFX_TOP))
+		return true;
+
+	/* The panel took it. Time the wait from the swap, not from the poll, so
+	 * the figure is comparable with the blocking path's. */
+	present_wait = svcGetSystemTick() - swap_tick;
+	sync_pending = false;
+	return false;
+}
+
 uint64_t video_present_sync(void)
 {
 	if (!sync_pending)
 		return 0;
 
-	sync_pending = false;
-
-	/* Wait for the panel to take the swap. Until this returns, the buffer
-	 * the next frame would draw into is still being scanned out; drawing
-	 * into it before the swap lands is exactly the tear that used to slide
-	 * down the screen (see video.h).
-	 *
-	 * This is deliberately separate from video_end_frame(): the wait is
-	 * dead time, so the caller gets the chance to do its once-a-second work
-	 * *between* the two calls, where the wait absorbs it. Doing that work
-	 * after the wait put it in the ~0.1 ms of slack the loop has left, and
-	 * pushed one frame a second past its vblank. */
+	/* Blocking version, for the callers outside the frame loop (menus) and
+	 * as the safety net in video_begin_frame(): draw only into a buffer the
+	 * panel has released. */
 	const u64 now = svcGetSystemTick();
 
 	gspWaitForVBlank();
@@ -360,6 +382,7 @@ uint64_t video_present_sync(void)
 		gspWaitForVBlank();
 	}
 
+	sync_pending = false;
 	present_wait = svcGetSystemTick() - now;
 	return present_wait;
 }
