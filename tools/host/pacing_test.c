@@ -247,6 +247,70 @@ static void test_autosave_interval(void)
 	      ticks > (uint64_t)0xFFFFFFFFu);
 }
 
+/* The idle wait: how long the loop sleeps between frames, and what it is
+ * willing to wake for.
+ *
+ * This is the arithmetic that stands in for blocking on the panel's vblank
+ * (§14). The two ways it could go wrong are quiet ones: a deadline already in
+ * the past turning into a zero-length sleep (a busy spin, which on a handheld
+ * is heat and battery), and the swap poll delaying the next frame instead of
+ * fitting inside the wait. */
+static void test_idle_wake(void)
+{
+	const uint64_t now = 1000000000ull;
+	const uint64_t frame_at = now + 4 * FRAME;
+	const uint64_t audio_at = now + 3 * FRAME;
+	const uint64_t slice = FRAME / 64;
+
+	/* Nothing pending: wake exactly at the frame. */
+	check("with nothing pending the loop wakes at the next frame",
+	      pace_wake(now, frame_at, 0, false, FRAME) == frame_at);
+
+	/* A sound block due before the frame comes first. */
+	check("a sound deadline before the frame is woken for",
+	      pace_wake(now, frame_at, audio_at, false, FRAME) == audio_at);
+
+	/* A sound deadline after the frame is not: the frame is first. */
+	check("a sound deadline after the frame does not delay it",
+	      pace_wake(now, frame_at, frame_at + FRAME, false, FRAME) ==
+		      frame_at);
+
+	/* The swap poll sleeps in slices, well short of the frame. */
+	check("a pending swap wakes the loop in a slice",
+	      pace_wake(now, frame_at, 0, true, FRAME) == now + slice);
+
+	/* ...but never past the frame: a swap in flight is not worth a frame. */
+	check("a pending swap does not delay the next frame",
+	      pace_wake(now, now + slice / 2, 0, true, FRAME) ==
+		      now + slice / 2);
+
+	/* A deadline already in the past must not become a negative sleep. */
+	check("a deadline in the past never returns a time before now",
+	      pace_wake(now, now - FRAME, now - FRAME, false, FRAME) == now);
+	check("a past sound deadline cannot spin the loop",
+	      pace_wake(now, frame_at, now - FRAME, false, FRAME) == now);
+
+	/* frame_ticks 0 cannot happen, but a division by it would be a crash. */
+	check("a zero frame length does not divide by zero",
+	      pace_wake(now, frame_at, 0, true, 0) == frame_at);
+
+	/* Over a simulated second the loop must not spin: every wake is far
+	 * enough ahead that svcSleepThread() actually sleeps. */
+	{
+		uint64_t t = now;
+		int spins = 0;
+		for (int i = 0; i < 200; i++)
+		{
+			const uint64_t w = pace_wake(t, t + FRAME, 0, true, FRAME);
+			if (w <= t)
+				spins++;
+			else
+				t = w;
+		}
+		check("polling a pending swap never busy-spins", spins == 0);
+	}
+}
+
 int main(void)
 {
 	test_steady_state();
@@ -259,6 +323,7 @@ int main(void)
 	test_long_run();
 	test_counters();
 	test_autosave_interval();
+	test_idle_wake();
 
 	printf("pace: %s\n", failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;

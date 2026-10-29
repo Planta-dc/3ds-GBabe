@@ -452,9 +452,12 @@ nothing at all once switched off. `make -C tools/host logtest` checks the
 format, because the file is the interface: a report is read from it by hand.
 
 That is also why the numbers it prints are defined precisely. `core` is the
-emulator core (CPU + PPU + APU), `blit` is the scaled copy, `sync` is waiting
-for the panel to take the finished frame, `wait` is pacing, and `other` is the
-rest of the loop - which is where a blocking service call would show up. A frame
+emulator core (CPU + PPU + APU), `blit` is the scaled copy, `post` is the
+once-a-second work (status readout, log, cartridge save), `sync` is waiting for
+the panel to take the finished frame and `wait` is pacing - since §14 both of
+those happen in the same idle window, so `sync` is reported as part of `wait`
+rather than as frame time. `other` is the rest of the frame, which is where a
+blocking service call would show up. A frame
 that is slow with a large `other` is the port's fault; a large `core` is the
 ARM11 and needs a dynarec, not tuning.
 
@@ -481,11 +484,12 @@ appeared wherever the scanout happened to be. And because the Game Boy runs at
 59.7275 Hz against a 60 Hz panel, the position of that race drifts by 0.45 % of
 a frame every frame - the tear line slides.
 
-The fix is one wait: after asking for the swap, wait for the vblank that takes
-it, and re-check `gspIsPresentPending()` in case the request missed that vblank
-by a hair. The wait costs nothing, because it happens in the idle part of the
-frame anyway. It is kept out of the `blit` figure in the log (`sync`), or it
-would look as if the copy had got 12 ms slower.
+The fix is one wait: the panel has to take the swap before the buffer it
+released is written to again, and `gspIsPresentPending()` says whether it has.
+Where that wait happens moved in §14 - it belongs in the idle time before the
+next frame, not inside the frame - but the reasoning here is unchanged: it is
+kept out of the `blit` figure in the log (`sync`), or it would look as if the
+copy had got 12 ms slower.
 
 The wait is skipped when the frame has already overrun its own 16.74 ms period
 (`video_end_frame()` compares against `video_begin_frame()`). Waiting then would
@@ -598,7 +602,7 @@ first measurement of this port that was not taken on a PC:
 |---|---|---|
 | `core` | 8.6 - 16.5 ms | the interpreter, scene dependent. Inside the 16.74 ms budget, but not by much in heavy scenes |
 | `blit` | 0.1 ms | the whole-frame column-major blit is free. The PC said 0.05 ms; the console agrees |
-| `sync` | 3 - 8 ms, occasionally 16.6 | the vblank wait, as designed |
+| `sync` | 3 - 8 ms, occasionally 16.6 | the vblank wait. In 0.2.0 it was taken out of the frame; §14 moved it into the idle window, so it is part of `wait` in the log now, not extra frame time |
 | `fps` | 57.8 - 58.8 | **not** 59.7275, which is the one number that explains the rest |
 | a 26 ms frame | about once a second | 10 ms of core plus a whole 16.7 ms panel period: the swap landed just after a vblank |
 | `sync_skip` | 0 in light scenes, 1 - 8/s when `core` >= 14 | frames that had to be presented without the wait: the tearing that is left |
@@ -774,3 +778,181 @@ to answer first - *which binary wrote this log* - could not be answered before.
 
 `check-version.sh` still refuses any version typed into a source file, so the
 stamp is the only new string and it comes from the build, not from the source.
+
+---
+
+## 13. The status readout was spending a frame a second, and §11 did not fix it
+
+The third log from hardware (0.3.0, Croc 2, CGB, 191 s) says the same thing
+as the second one, only more precisely, because §11 added a counter for it:
+
+| | third log |
+|---|---|
+| `worst` | **33.4 ms or more in 157 of 157 seconds** |
+| slow frames | 150 in 191 s, one every **1.003 s** |
+| `post` (in the slow-frame lines) | **16.4 ms** median |
+| `core` | 10.0 ms median |
+| `vblank` | 5.9 ms median |
+| `core + post + vblank` | 33.0 ms - the whole dropped frame |
+
+So the diagnosis in §11 was right about *what* and wrong about *how much*.
+Moving the once-a-second work into the gap between the swap and the vblank wait
+is only free if the work is smaller than the gap. The gap is ~6 ms. The work is
+16 ms. It was never going to fit, and moving it only made it visible - which is
+worth something, but it is not a fix, and the frame was still lost.
+
+Two other things in §11 were simply wrong, and the log is what caught them:
+
+* the `perf` line was documented (in the commit, the pull request and the
+  README) as having gained a `post=` field. It had not: the edit that would have
+  added it silently did nothing, so `post` appeared only in the `slow frame`
+  lines and the whole 16 ms sat inside `other` in the once-a-second summary. The
+  field is there now, and `other` no longer absorbs it.
+* "`post` should sit around 1-2 ms" - asserted, not measured. It is 16 ms.
+
+### What the 16 ms is
+
+`ui_present()` transposes the 320x240 canvas into the bottom panel's 240x320
+layout - 76 800 pixel writes, strided by a panel row - and then flushes 153 KiB
+of framebuffer cache so the GPU does not read stale pixels. On a 268 MHz ARM11
+that is about 16 ms, once a second, for a debug readout.
+
+### The fix: one band per frame
+
+Both halves of the present are now done in bands of panel *columns*, which are
+contiguous in the framebuffer, so each band is one region and one
+`GSPGPU_FlushDataCache()` call:
+
+```
+ui_present_begin();                     /* take the back buffer          */
+ui_present_band(UI_W / 8) x 8 frames    /* 2 ms each, inside the gap     */
+ui_present_swap();                      /* show it - nothing before this */
+```
+
+Eight frames of ~2 ms rather than one frame of 16 ms. The panel keeps showing
+the previous buffer until the swap, so a banded update is never visible
+half-done, and `ui_present()` still exists as the immediate whole-screen path
+for menus.
+
+The `hud:` log line reports the split every second:
+
+```
+hud: render 0.9 ms + present 16.8 ms in 8 bands (worst band 2.1 ms)
+```
+
+`present` staying at ~16 ms while `worst band` stays near 2 ms is the success
+condition: the work still costs 16 ms, but it is paid in eight slices that fit
+in the waiting, so no frame is lost to it. If `worst band` approaches the frame
+period, the band count needs to go up.
+
+### The test
+
+`tools/uipreview` now checks the banded present against the one-shot present at
+band widths 320, 7, 40 and 1, with a canvas that differs in every pixel, and
+checks that the bottom screen does not change until the swap. Dropping the last
+column of every band leaves `present: ok` - the whole-screen path hides it -
+and fails the banded check with 9600 wrong pixels, which is why both exist.
+
+### The lesson
+
+A fix that moves work into slack has to know how much slack there is. §11
+assumed 1-2 ms because it was a text redraw; it is 16 ms because it is also a
+153 KiB cache flush, and nobody had measured the flush. The counter came first
+and the number was in the next log, which is the only reason this section can
+state it.
+
+---
+
+## 14. What the old RetroArch 3DS port does, and the one thing worth taking
+
+RetroArch's 3DS driver is the largest body of working 3DS emulator front-end
+code there is, so it is worth reading before inventing anything. Read at
+v1.6.9 and v1.7.7 (`gfx/drivers/ctr_gfx.c`, `audio/drivers/ctr_dsp_audio.c`,
+`audio/drivers/ctr_csnd_audio.c`) - the versions from before the port grew a
+citro3d shader pipeline, an OSD and a threaded GPU.
+
+What it does, and whether it applies here:
+
+| RetroArch | applies to GBabe? |
+|---|---|
+| Core draws into a **linear** texture; `GX_DisplayTransfer` / `ctrGuCopyImage` moves it to the swizzled framebuffer, the GPU does rotation and scaling with a textured quad | **No, not for speed.** Our blit is 0.1 ms - already free. It would buy cache pressure, not time, and cost a GPU rewrite on hardware we cannot test. |
+| Audio through **ndsp** (the DSP service, `ndspChnSetRate(32728)`, `NDSP_INTERP_NONE`, one looping wave buffer) or CSND | Maybe later. The DSP's native rate is 32730 Hz, so the core resamples to it and the hardware does not. Ours resamples to 32768 and CSND interpolates. Worth a measurement, not a guess - and note their own comment marks `ndspSetClippingMode` with "??". |
+| Pacing by `svcGetSystemTick()`, video driven by the core's own frame rate, `gspWaitForEvent(VBlank0)` only when vsync is on | **Yes - and this is the one.** |
+| `-O3`, `-fno-exceptions -fno-rtti`, no RTTI in the core | Already done here. |
+
+### The one that matters
+
+`ctr_gfx.c` has a long comment admitting the framework's own vsync problem:
+
+> If we are running at below the display refresh rate, then frame updates will
+> happen entirely out of sync with VBlank0 events. […] we'll wait for a VBlank0
+> here, but it will already have happened partway through the previous frame
+> […] resulting in 'overlap' and screen tearing. […] This fixes screen tearing,
+> but it has a significant impact on performance.
+
+They hit the same wall from the other side: **you cannot both block on the
+panel's vblank and keep an emulator of a different frame rate on time.** Their
+workaround is to wait on the *next* vblank, which they say costs performance.
+
+§7 of these notes chose the same trade in the other direction: block after every
+swap, and accept a tear only when the frame has already overrun. That is why the
+console log reads
+
+```
+perf fps=57.8 frame=17.3 worst=33.4 core=13.2 blit=0.1 post=0.2 sync=5.7 wait=0.0 ...
+```
+
+`frame=17.3` is the frame *period*, and 1000/17.3 = 57.8 - the whole reported
+frame rate is the period, and 5.7 of those 17.3 ms are spent blocked in
+`gspWaitForVBlank()` after the swap. The Game Boy's frame is 16.74 ms, so
+10.7 ms of work + 5.7 ms of waiting does not fit, the loop never sleeps
+(`wait=0.0`), and every frame starts late (`pace_late=58`).
+
+### The change
+
+The swap and the wait for it are now separated by the *whole rest of the frame*,
+not by a few microseconds of bookkeeping. `video_end_frame()` posts the swap and
+returns. The loop goes back to the top, finds the next frame is not due yet, and
+spends that idle time - which it would have slept through - draining the swap:
+
+```c
+if (!frame_due()) {
+        ...
+        if (video_swap_pending()) {          /* poll, do not block */
+                const u64 slice = FRAME_TICKS / 64;   /* ~0.26 ms */
+                if (now + slice < wake) wake = now + slice;
+        }
+        svcSleepThread(TICKS_TO_NS(wake - now));
+}
+```
+
+`video_swap_pending()` is a non-blocking `gspIsPresentPending()`, so the loop
+wakes a few times, sees the panel has taken the frame, and goes back to sleep.
+`video_present_sync()` still exists - `video_begin_frame()` calls it as a safety
+net, so nothing can draw into a buffer the panel has not released.
+
+The work is now ~10.7 ms in a 16.74 ms schedule with ~6 ms of slack, which is
+where the panel wait goes. `sync` stops being time taken from the frame; it is
+reported as part of `wait`, and the `slow frame` line now measures work over one
+panel period (16.7 ms) rather than wall time, because a frame can no longer be
+made slow by waiting.
+
+### The simulation, and its honest limit
+
+The decision itself - what the loop is willing to wake for - is in
+`include/pace.h` as `pace_wake()`, because it is the third piece of loop
+arithmetic in this file and the first two both had bugs. Writing the tests found
+one in the new code with no hardware involved: a deadline already in the past
+returned a wake time *behind* the clock, which the caller turns into a 0.2 ms
+sleep - a spin, polluting the very idle time the change exists to use. It now
+returns `now` at worst, and `pacetest` holds it to that along with "a pending
+swap cannot delay a frame" and "a zero-length frame cannot divide by zero".
+
+Modelling the loop against a 60 Hz panel grid (`/tmp` scratch, not committed):
+late starts go from 11 % to 0 % with identical throughput when the wait fits in
+the slack. That is the mechanism, and the console numbers say the wait does not
+currently fit - 10.7 + 5.7 = 16.4 ms of a 16.74 ms schedule, with the jitter that
+makes it 17.3. What the simulation cannot prove is the size of the slack on
+ARM11, because it cannot model cache or `emu_run_frame()`'s real distribution.
+The next log answers it: `wait` should rise to ~6 ms, `frame` should fall to
+~10.7, `pace_late` should collapse toward 0, and `fps` should be 59.7.

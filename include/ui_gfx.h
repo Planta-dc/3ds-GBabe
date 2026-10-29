@@ -70,5 +70,21 @@ void ui_text_right(const ui_font *f, int rx, int y, const char *s, uint16_t c);
 int ui_text_vc(const ui_font *f, int x, int y, int h, const char *s, uint16_t c,
 	       int max_w);
 
-/* Copy the canvas to the bottom framebuffer and show it. */
+/* Copy the canvas to the bottom framebuffer and show it, all at once. For
+ * menus and anything that is not inside the frame loop. */
 void ui_present(void);
+
+/* The same copy in bands, for the frame loop: the whole present is ~16 ms on
+ * the console (transpose + 153 KiB cache flush), which is a dropped frame when
+ * it happens in one go. Begin, then spend one band per frame where the waiting
+ * is free, then swap.
+ *
+ *   ui_present_begin();                       canvas -> back buffer, band 0
+ *   ... ui_present_band(cols) each frame ...  returns true on the last band
+ *   ui_present_swap();                        show it
+ *
+ * Nothing is visible until the swap, so an interrupted or abandoned sequence
+ * cannot show a half-updated screen; ui_present() replaces one safely. */
+bool ui_present_begin(void);
+bool ui_present_band(int cols);
+void ui_present_swap(void);

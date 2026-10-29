@@ -80,6 +80,29 @@ int main(void)
 	check("an on-time frame does not skip the wait", skipped == 0);
 	check("an on-time frame does not tear", tears == 0);
 
+	/* --- and the wait can be polled instead of blocked ------------------- */
+	/* This is the frame loop's actual path: swap, go back to the top of the
+	 * loop, and drain the pending swap in the idle time before the next
+	 * frame. Blocking there instead cost ~2 fps on the console. */
+	{
+		/* begin, draw, swap - and then nothing: this is the state the
+		 * frame loop returns to the top of its loop with. */
+		static uint16_t picture[144 * 160];
+
+		video_begin_frame();
+		video_draw_frame(picture, 160);
+		video_end_frame();
+	}
+
+	printf("pending after a frame: %d\n", (int)video_swap_pending());
+	check("a swap is pending until the panel takes it",
+	      video_swap_pending());
+
+	g_host_present_take();
+	check("the poll sees the panel take it", !video_swap_pending());
+	check("the polled wait is timed from the swap",
+	      video_present_wait() > 0);
+
 	/* --- over budget: present at once, and say so ------------------------ */
 	frame(20000); /* 20 ms of work in a 16.74 ms period */
 

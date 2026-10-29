@@ -219,6 +219,86 @@ static int check_present(void)
 	return bad == 0;
 }
 
+/* The banded present the frame loop uses must produce exactly what the
+ * one-shot present does, for any band width, and must not become visible until
+ * the swap. Getting this wrong is silent: a missing band leaves a stale strip of
+ * the old status readout on screen, which on a handheld looks like a rendering
+ * bug rather than an off-by-one in a loop.
+ *
+ * The canvas is filled with a pattern that differs in every pixel, so a band
+ * copied twice (or skipped) cannot go unnoticed. */
+static int check_present_bands(void)
+{
+	static uint16_t expect_fb[320 * 240];
+	int bad = 0;
+
+	/* What a single ui_present() produces, for reference. */
+	for (int i = 0; i < UI_W * UI_H; i++)
+		ui_canvas[i] = (uint16_t)(i * 40503u >> 7);
+
+	ui_present();
+	memcpy(expect_fb, g_host_bottom_fb, sizeof expect_fb);
+
+	/* The band widths to try: a single band, one that does not divide the
+	 * canvas, the 1/8 the frame loop uses, and one column at a time. */
+	const int widths[] = { UI_W, 7, UI_W / 8, 1 };
+
+	for (size_t w = 0; w < sizeof widths / sizeof widths[0]; w++)
+	{
+		/* Whatever is on screen now must stay there until the swap. */
+		memcpy(expect_fb, g_host_bottom_fb, sizeof expect_fb);
+
+		/* A different picture, banded in. */
+		for (int i = 0; i < UI_W * UI_H; i++)
+			ui_canvas[i] = (uint16_t)(i * 2246822519u >> 11);
+
+		if (!ui_present_begin())
+		{
+			printf("banded present %d: no framebuffer\n", widths[w]);
+			bad++;
+			continue;
+		}
+
+		/* Halfway through, the old picture must still be on screen. */
+		ui_present_band(widths[w]);
+		if (memcmp(g_host_bottom_fb, expect_fb, sizeof expect_fb) != 0)
+		{
+			printf("banded present %d: visible before the swap\n",
+			       widths[w]);
+			bad++;
+		}
+
+		/* Bounded on purpose: a band width that stops making progress
+		 * would otherwise hang the test instead of failing it. */
+		int guard = UI_W + 1;
+		while (!ui_present_band(widths[w]) && --guard > 0)
+			;
+		if (guard == 0)
+		{
+			printf("banded present %d: never finished\n", widths[w]);
+			bad++;
+			continue;
+		}
+		ui_present_swap();
+
+		int wrong = 0;
+		for (int y = 0; y < 240; y++)
+			for (int x = 0; x < 320; x++)
+				if (g_host_bottom_fb[y * 320 + x] !=
+				    ui_canvas[y * 320 + x])
+					wrong++;
+		if (wrong)
+		{
+			printf("banded present %d: %d pixels wrong\n",
+			       widths[w], wrong);
+			bad++;
+		}
+	}
+
+	printf("banded present: %s\n", bad ? "FAIL" : "ok");
+	return bad == 0;
+}
+
 /* Which screen gets what.
  *
  * The game is drawn by video.c into the top framebuffer and the UI by ui_gfx.c
@@ -434,6 +514,10 @@ int main(void)
 	char long_name[600];
 	char long_path[4096];
 
+	/* Unbuffered: a check that hangs or crashes must still have said what
+	 * it was doing when it did. */
+	setvbuf(stdout, NULL, _IONBF, 0);
+
 	gfxInitDefault();
 	long_strings(long_name, sizeof long_name, long_path, sizeof long_path);
 
@@ -445,6 +529,9 @@ int main(void)
 	}
 
 	if (!check_present())
+		return 1;
+
+	if (!check_present_bands())
 		return 1;
 
 	if (!check_screens())

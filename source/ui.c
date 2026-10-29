@@ -733,7 +733,9 @@ static const char *limit_text(float fps, float core, float blit, float other)
 	return "overhead (see other)";
 }
 
-void ui_draw_hud(void)
+/* Draw the status readout into the canvas. Cheap: it is text and rectangles in
+ * RAM. Presenting it is what costs - see ui_idle_work(). */
+static void hud_render(void)
 {
 	const emu_info *info = emu_get_info();
 	char fps[16], frame[24];
@@ -788,7 +790,6 @@ void ui_draw_hud(void)
 	};
 
 	scr_hud(&h);
-	ui_present();
 }
 
 void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
@@ -844,12 +845,15 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 	video_sync_take(&sync_skip, &sync_late);
 
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f blit=%.1f "
-		 "sync=%.1f wait=%.1f other=%.1f audio=%ums "
+		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums "
 		 "sync_skip=%u sync_late=%u pace_late=%u resync=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms, g_perf.blit_ms,
-		 g_perf.sync_ms, g_perf.wait_ms,
+		 g_perf.post_ms, g_perf.sync_ms, g_perf.wait_ms,
+		 /* `sync` is a part of `wait` now, not extra: the panel
+		  * wait happens in the same idle window, so subtracting both
+		  * would count it twice. */
 		 g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
-				    g_perf.sync_ms + g_perf.wait_ms),
+				    g_perf.post_ms + g_perf.wait_ms),
 		 audio_queue_ms(), sync_skip, sync_late, hud_late, hud_resyncs);
 
 	hud_frames = 0;
@@ -870,16 +874,64 @@ void ui_note_frame(u64 core_ticks, u64 blit_ticks, u64 sync_ticks,
 		hud_due = true;
 }
 
-/* Everything worth doing exactly once a second, done where it is free. */
+/* Everything worth doing exactly once a second, done where it is free.
+ *
+ * The status readout is the expensive part: presenting it means transposing
+ * 76800 pixels and flushing 153 KiB of bottom-screen framebuffer, which the
+ * console measured at ~16 ms - a whole frame. Moving that work into the vblank
+ * wait was not enough (§12): the wait is only ~6 ms, so the frame still
+ * overran. It is now spent one band of panel columns per frame: eight frames of
+ * ~2 ms, each of which fits in the wait, and the panel keeps showing the
+ * previous buffer until the swap at the end. */
 void ui_idle_work(void)
 {
-	if (!hud_due)
+	static bool presenting;
+	static u64 render_ticks, band_ticks, worst_band;
+	static unsigned bands;
+
+	if (!presenting && hud_due)
+	{
+		hud_due = false;
+
+		if (!g_cfg.show_hud || !emu_loaded())
+			return;
+
+		const u64 t0 = svcGetSystemTick();
+		hud_render();
+		render_ticks = svcGetSystemTick() - t0;
+
+		if (!ui_present_begin())
+			return;
+
+		presenting = true;
+		bands = 0;
+		band_ticks = worst_band = 0;
+	}
+
+	if (!presenting)
 		return;
 
-	hud_due = false;
+	const u64 t0 = svcGetSystemTick();
+	const bool done = ui_present_band(UI_W / 8);
+	const u64 took = svcGetSystemTick() - t0;
 
-	if (g_cfg.show_hud && emu_loaded())
-		ui_draw_hud();
+	band_ticks += took;
+	if (took > worst_band)
+		worst_band = took;
+	bands++;
+
+	if (!done)
+		return;
+
+	ui_present_swap();
+	presenting = false;
+
+	/* The split, once a second: if `present` stays near 16 ms total but no
+	 * band is over ~2 ms, the work is free and no frame can be lost to it. */
+	const double ms = 1000.0 / SYSCLOCK_ARM11;
+	log_line("hud: render %.1f ms + present %.1f ms in %u bands "
+		 "(worst band %.1f ms)", (double)render_ticks * ms,
+		 (double)band_ticks * ms, bands, (double)worst_band * ms);
 }
 
 /* ------------------------------------------------------------------------- */

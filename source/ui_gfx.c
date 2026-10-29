@@ -383,39 +383,98 @@ int ui_text_vc(const ui_font *f, int x, int y, int h, const char *s, uint16_t c,
 /* Present                                                                   */
 /* ------------------------------------------------------------------------- */
 
-void ui_present(void)
-{
-	u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
-	if (fb == NULL)
-		return;
+/* The bottom-screen present, in bands.
+ *
+ * The whole-screen present is a transpose of 76800 pixels plus a 153 KiB cache
+ * flush, and on the console that is about 16 ms - a whole frame, once a second,
+ * for a status readout. Doing it in one go means the frame it lands in overruns
+ * its vblank and the game drops a frame (see docs/PORT-NOTES.md §13).
+ *
+ * So the copy and the flush are split into bands of panel *columns*, which are
+ * contiguous in the framebuffer: each band is one 19 KiB region and one
+ * GSPGPU_FlushDataCache() call. ui_present_begin() / ui_present_band() /
+ * ui_present_swap() let the caller spend one band per frame, in the dead time
+ * before the vblank wait, where it is free. The panel shows the previous buffer
+ * until the swap, so a banded update is never visible half-done.
+ */
+static u16 *present_fb;
+static int present_x;
+static int present_cols;
 
-	/*
-	 * The bottom LCD is a 240x320 panel mounted sideways, so landscape pixel
+bool ui_present_begin(void)
+{
+	present_fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+	present_x = 0;
+	present_cols = 0;
+	return present_fb != NULL;
+}
+
+bool ui_present_band(int cols)
+{
+	if (present_fb == NULL)
+		return true;
+
+	if (cols < 1)
+		cols = 1;
+
+	int x0 = present_x;
+	int x1 = x0 + cols;
+	if (x1 > UI_W)
+		x1 = UI_W;
+
+	/* The bottom LCD is a 240x320 panel mounted sideways, so landscape pixel
 	 * (x, y) lives at fb[x * UI_H + (UI_H - 1 - y)] - a transpose with the
 	 * rows flipped. Doing it tile by tile keeps the source rows in cache:
 	 * within a tile the destination writes for one source column are 16
-	 * consecutive halfwords, and the next column is a full panel row away.
-	 */
-	for (int ty = 0; ty < UI_H; ty += 16)
+	 * consecutive halfwords, and the next column is a full panel row away. */
+	for (int tx = x0; tx < x1; tx += 16)
 	{
-		for (int tx = 0; tx < UI_W; tx += 16)
-		{
-			for (int x = tx; x < tx + 16; x++)
-			{
-				const uint16_t *src = &ui_canvas[ty * UI_W + x];
-				u16 *dst = &fb[x * UI_H + (UI_H - 1 - ty)];
+		int tx_end = tx + 16;
+		if (tx_end > x1)
+			tx_end = x1;
 
-				for (int y = 0; y < 16; y++)
-				{
-					*dst-- = src[y * UI_W];
-				}
-			}
+		for (int x = tx; x < tx_end; x++)
+		{
+			u16 *dst = &present_fb[x * UI_H + (UI_H - 1)];
+
+			for (int y = 0; y < UI_H; y++)
+				*dst-- = ui_canvas[y * UI_W + x];
 		}
 	}
 
 	/* gfxScreenSwapBuffers() presents but does not clean the data cache; the
-	 * GPU would otherwise read stale pixels. Only the bottom screen is
-	 * flushed (153 KiB) rather than gfxFlushBuffers()'s 300 KiB. */
-	GSPGPU_FlushDataCache(fb, UI_W * UI_H * sizeof(uint16_t));
-	gfxScreenSwapBuffers(GFX_BOTTOM, false);
+	 * GPU would otherwise read stale pixels. Whole buffers are contiguous in
+	 * the panel layout, so a band of columns is one flush of one region -
+	 * flushing the whole 153 KiB once a second is what cost 16 ms. */
+	GSPGPU_FlushDataCache(&present_fb[x0 * UI_H],
+			      (u32)((x1 - x0) * UI_H * sizeof(u16)));
+
+	present_x = x1;
+	present_cols += x1 - x0;
+	return present_x >= UI_W;
+}
+
+int ui_present_band_width(void)
+{
+	return present_cols;
+}
+
+void ui_present_swap(void)
+{
+	if (present_fb != NULL)
+		gfxScreenSwapBuffers(GFX_BOTTOM, false);
+
+	present_fb = NULL;
+	present_x = present_cols = 0;
+}
+
+void ui_present(void)
+{
+	/* Whatever was in flight is abandoned: a full present overwrites every
+	 * band anyway, and only the swap makes it visible. */
+	if (!ui_present_begin())
+		return;
+
+	ui_present_band(UI_W);
+	ui_present_swap();
 }

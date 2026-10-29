@@ -171,6 +171,8 @@ void  gfxFlushBuffers(void);
 void  gfxSwapBuffers(void);
 void  gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 void  gspWaitForVBlank(void);
+/* The panel takes a pending swap, without waiting for one (test hook). */
+void  g_host_present_take(void);
 bool  gspIsPresentPending(unsigned screen);
 Result GSPGPU_FlushDataCache(const void *adr, u32 size);
 

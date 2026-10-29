@@ -258,11 +258,17 @@ int main(int argc, char **argv)
 			if (!frame_due())
 			{
 				u64 now = svcGetSystemTick();
-				u64 wake = pace.next ? pace.next : now;
 
-				const u64 audio_at = audio_next_deadline();
-				if (audio_at != 0 && audio_at < wake)
-					wake = audio_at;
+				/* Everything worth waking for, and the swap
+				 * poll that stands in for the vblank wait - the
+				 * arithmetic is in pace.h, where the host tests
+				 * it (a deadline in the past must not spin the
+				 * loop, and a pending swap must not delay a
+				 * frame). */
+				const u64 wake = pace_wake(now, pace.next,
+							   audio_next_deadline(),
+							   video_swap_pending(),
+							   FRAME_TICKS);
 
 				if (wake > now)
 					svcSleepThread(TICKS_TO_NS(wake - now));
@@ -331,9 +337,14 @@ int main(int argc, char **argv)
 				}
 			}
 
+			/* No vblank wait here: the next iteration's idle time
+			 * absorbs it (video_swap_pending()). Waiting here would
+			 * push the next frame past its slot. `sync` is the
+			 * previous frame's wait, which is what the loop just
+			 * spent, so the average is unchanged. */
 			const u64 after_post = svcGetSystemTick();
-			const u64 sync = draw ? video_present_sync() : 0;
-			const u64 after_sync = svcGetSystemTick();
+			const u64 sync = draw ? video_present_wait() : 0;
+			const u64 after_sync = after_post;
 
 			if (draw)
 			{
@@ -359,12 +370,14 @@ int main(int argc, char **argv)
 			 * with the split, so a stutter can be traced to one part. */
 			static u64 last_slow_log;
 			const u64 now = svcGetSystemTick();
-			/* The whole frame, present wait included: a frame that
-			 * spends 16 ms waiting for the panel is exactly the kind
-			 * that is worth a line in the log. */
-			const double frame_ms = (double)(after_sync - frame_start) *
+			/* The work, not the wall period: the panel wait now
+			 * happens in the next frame's idle time, so what can make
+			 * the loop miss a frame is emulation + blit + the
+			 * once-a-second work. Emulation alone over one panel
+			 * period is the honest definition of a slow frame. */
+			const double frame_ms = (double)(after_post - frame_start) *
 						1000.0 / SYSCLOCK_ARM11;
-			if (draw && frame_ms > 20.0 &&
+			if (draw && frame_ms > 16.7 &&
 			    now - last_slow_log > SYSCLOCK_ARM11)
 			{
 				last_slow_log = now;
@@ -378,7 +391,7 @@ int main(int argc, char **argv)
 				 * a 26 ms frame is core 10 + vblank 16, and the
 				 * line should say so. */
 				log_line("slow frame %.1f ms: core %.1f blit %.1f "
-					 "post %.1f vblank %.1f audio %u ms", frame_ms,
+					 "post %.1f panel %.1f audio %u ms", frame_ms,
 					 (double)(after_core - frame_start) * 1000.0 /
 						 SYSCLOCK_ARM11,
 					 (double)(after_swap - after_core) * 1000.0 /
