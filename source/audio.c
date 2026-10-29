@@ -109,6 +109,13 @@
 #define MARGIN_MAX      (SYSCLOCK_ARM11 / 500)   /* 2 ms   */
 #define MARGIN_BIAS     (SYSCLOCK_ARM11 / 4000)  /* 0.25 ms */
 
+/* Lateness beyond this is not lateness, it is the console having been somewhere
+ * else, and it is not allowed to raise the margin. 4 ms is twice the ceiling, so
+ * anything that would pin the margin is discarded rather than tracked: a hitch
+ * that big leaves a hole whatever the margin is, and paying for it with a 2 ms
+ * overlap on every seam for the next minute is the wrong trade. */
+#define MARGIN_TRACK_MAX (SYSCLOCK_ARM11 / 250)  /* 4 ms */
+
 static s16 *fifo;          /* ring buffer, FIFO_SAMPLES stereo frames */
 static unsigned fifo_head, fifo_tail;
 
@@ -144,7 +151,11 @@ static bool have_last;
  * converted back before being counted), and smoothed over a couple of windows
  * with the same 7/8 filter as the service call timing. */
 #define RATE_WINDOW (SYSCLOCK_ARM11 / 4) /* 0.25 s */
+/* Longer than any frame the loop intends to take: a gap this big is a stall,
+ * not a frame rate. See measure_rate(). */
+#define RATE_STALL  (SYSCLOCK_ARM11 / 10) /* 100 ms */
 static u64      rate_start;
+static u64      rate_last;   /* previous call: one per emulated frame     */
 static unsigned rate_frames;
 static int64_t  rate_frac;   /* 16.16 leftover from the conversion below */
 static int32_t  rate_q16 = RESAMP_UNITY;
@@ -400,7 +411,18 @@ void audio_pump(void)
 				stat_stalled++;
 			else if ((u64)drift > (u64)stat_worst_late)
 				stat_worst_late = drift;
-			if ((u64)drift > late_max)
+			/* Only scheduling jitter goes into the margin. A frame
+			 * loop that was away for 30 ms - an SD write, the menu,
+			 * a stalled kernel thread - is not something a margin
+			 * can cover (the ceiling is MARGIN_MAX, 2 ms), so
+			 * feeding it is a pure loss: it pins the margin at the
+			 * ceiling and every seam in the session then plays 2 ms
+			 * of audio twice. The console log showed exactly that:
+			 * `margin 2.00` in every audio report of a session
+			 * but the first, because every second had one 33 ms
+			 * frame. */
+			if ((u64)drift < (u64)MARGIN_TRACK_MAX &&
+			    (u64)drift > late_max)
 				late_max = (u64)drift;
 		}
 		else
@@ -499,6 +521,7 @@ bool audio_init(void)
 	stat_worst_late = 0;
 
 	rate_start = 0;
+	rate_last = 0;
 	rate_frames = 0;
 	rate_frac = 0;
 	rate_q16 = RESAMP_UNITY;
@@ -612,6 +635,26 @@ unsigned audio_queue_ms(void)
  * starts to struggle is corrected within a fraction of a second. */
 static void measure_rate(u64 now)
 {
+	const u64 since = (rate_last != 0) ? now - rate_last : 0;
+
+	rate_last = now;
+
+	/* A frame that took longer than this was not a frame: the console was
+	 * in the menu, writing the log to the card, or the thread was stalled.
+	 * That time must not go into the measurement, because the measurement
+	 * is "how fast does this console produce samples", and a window that
+	 * contains a 100 ms stall answers 0.6 - which the control law then
+	 * applies as a fifth-of-an-octave pitch drop for the next half second.
+	 * The console log's `rate 0.800` entries are exactly that: all six of
+	 * them are in the reports that follow a stall or a resync. Throw the
+	 * window away and start again instead. */
+	if (since > RATE_STALL)
+	{
+		rate_start = now;
+		rate_frames = 0;
+		return;
+	}
+
 	if (rate_start == 0)
 	{
 		rate_start = now;
@@ -678,7 +721,18 @@ int32_t audio_rate_step(void)
 
 	const int32_t fill = (int32_t)fifo_used();
 
-	fill_ema = (fill_ema < 0) ? fill : fill_ema + (fill - fill_ema) / 256;
+	/* While the stream is stopped - after an underrun, before the prefill
+	 * is back - the queue is empty because nothing is playing, not because
+	 * the emulator is slow. Letting the 1/256 filter crawl up from zero
+	 * made the control law see a starving queue for a second after every
+	 * resync and answer with the 20 % squeeze: `rate 0.800` in the console
+	 * log, a second of audio a fifth too fast, fourteen times a session.
+	 * Follow the queue exactly while stopped instead, so the law is right
+	 * the moment the stream starts again. */
+	if (!scheduled)
+		fill_ema = fill;
+	else
+		fill_ema = (fill_ema < 0) ? fill : fill_ema + (fill - fill_ema) / 256;
 
 	last_step = resamp_control_step(fill_ema, LEVEL_TARGET, rate_q16);
 	return last_step;

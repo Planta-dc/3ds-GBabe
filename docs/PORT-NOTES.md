@@ -1741,3 +1741,91 @@ evidence:
   `GBABE_ASAN_REQUIRED=1` so a skip cannot pass there, and a skip in the
   container shows up as a job annotation rather than as one line in a log
   nobody can download.
+
+## 26. The sound: a margin at its ceiling, and a rate law fed the stall
+
+The log from 0.3.7 on the console, fifty pairs of `perf`/`audio` lines over
+270 seconds, ends like this:
+
+```
+audio: 7131 blocks, holes 1666 (worst 0.01 ms), overlap 1.49 ms,
+       late 3782 (worst 279.58 ms), stalled 7, underruns 14, resyncs 14,
+       dropped 32736, queue 46 ms, level 1598/1536, produced 1.000,
+       margin 2.00 ms, rate 1.000
+```
+
+`produced` and `rate` are 1.000: the emulator is producing the right number of
+samples and the resampler is not being asked to stretch anything. The holes are
+0.01 ms, which is a rounding error, not a hole. So the stream was not starved
+and the pitch was not wrong - and the user still said the sound was bad, which
+is the point at which a counter has to be read as a symptom rather than as an
+all-clear. Two numbers in that line are the symptom:
+
+* `margin 2.00 ms` - the ceiling. Every report of the session but the first
+  shows it pinned there (47 of 48). The margin is how early each block is submitted, and CSND has no
+  scheduled start, so submitting early *plays the block early*: the two blocks
+  are mixed for the margin's worth of audio. 2 ms of a 31.25 ms block is 6 % of
+  every seam played twice, 32 times a second. `overlap 1.49 ms` is that same
+  fact from the other side - the average early seam.
+* `rate` was only 1.000 *because* the margin was pinned. The margin was grown by
+  `late_max`, and `late_max` was grown by every late frame, including the 33 ms
+  frame the console had once a second (§24). A frame loop that was away for
+  33 ms is not scheduling jitter; it is the console being somewhere else, and
+  the seam it costs is a hole whatever the margin is. Feeding it to `late_max`
+  did not prevent that hole - it bought a permanent 2 ms overlap for the rest of
+  the session.
+
+So the fix is in three parts, and the host bench (`make -C tools/host
+audiotest`) is what says whether each one did what it claims:
+
+1. **Only scheduling jitter raises the margin.** Lateness above 4 ms
+   (`MARGIN_TRACK_MAX`) is counted in the log's `late`/`stalled` figures and
+   left out of `late_max`. Bench, 120 frames, clean: margin **0.33-0.73 ms**
+   over repeated runs, was 2000 µs, with 0 underruns and 0 resyncs - the
+   deadline is still met, it is just met 1.3-1.7 ms later.
+2. **The level filter follows the queue while the stream is stopped.** After an
+   underrun the queue is empty because nothing is playing, not because the
+   emulator is slow, and the 1/256 filter crawling up from zero made the level
+   law see a starving queue and answer 0.800 - a fifth too fast for a second
+   after every resync. Measured on the bench after a 30 ms hitch: lowest rate
+   **0.960**, which is the honest answer (the console really did produce 4 %
+   less audio in that window), not 0.800.
+3. **A window containing a stall is thrown away, not averaged.** A 100 ms gap
+   inside a 0.25 s window reads as 0.6, and the law then applies that as a pitch
+   drop for the next half second. `measure_rate()` now restarts its window when
+   a frame takes longer than `RATE_STALL` (100 ms).
+
+The decimator changed too, and that is §20's subject rather than this one, but
+it belongs in the same log line: `dec=` was 1.7 ms a frame on the console, the
+box-of-8 it was replacing had a -32 dB aliasing floor, and the 64-tap sinc that
+replaces stage 2 measures **-74.4 dB** at 50 kHz, **-81.5 dB** at 200 kHz, worst
+case **-27.6 dB** (a 20 kHz tone, which lands in the transition band and is the
+honest worst row). It is 1.18-1.24x *faster* than the box chain on the host. The
+console's own `dec=` in the next log is the number that matters.
+
+Two smaller things, both about being able to read the next log:
+
+* The log was written once a second from inside the frame, and an SD write is
+  10-20 ms: `log_flush_soft()` now writes when the buffer is three quarters
+  full or has been waiting five seconds, which is once every four or five
+  seconds at the current log rate. It is one of the candidates for the 33 ms
+  frame in every second (§24) - and `once:` in the log names which one it was:
+  `once: hud 0.1 log 12.3 audio 0.2 save 0.0 ms`, every second, if the write is
+  the culprit. Until that line appears in a log, the 33 ms frame is a
+  hypothesis, not a diagnosis.
+* `perf`'s `post=` was timed from the swap, so it swallowed `core` and made
+  `other=` a constant `-core`. It is now timed from the end of the emulation,
+  and the three parts add up to `core` by construction.
+
+And one correction to an earlier reading of these logs: `audio=108ms` in `perf`
+is **not** latency and never contradicted `queue 46 ms`. It is the decimator's
+time for the whole second - `dec=1.7` x 60 - and it is the same 94-108 ms in
+every line.
+
+What the next log should show, if this is right: `margin` under a millisecond
+instead of 2.00, `overlap` down from 1.49 ms by roughly the same factor, `rate` still
+1.00 +/- 0.01, and `once:` pointing at one of the four candidates by name. If
+`margin` is still at the ceiling, the lateness raising it is under 4 ms and the
+cause is elsewhere; if `overlap` is still 1.5 ms with a small margin, then the
+early time is coming from `cmd_ticks`, which is the round trip of
+`csndPlaySound()` itself.
