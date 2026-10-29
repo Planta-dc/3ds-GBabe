@@ -78,8 +78,18 @@ make -C tools/host dectest
 echo "=== sound path keeps CSND fed ==="
 make -C tools/host audiotest
 
+# Not `make asan` directly: a container that cannot turn address randomisation
+# off makes AddressSanitizer die before main(), which is not a result. The
+# script says which of the two happened; 77 means "no sanitizer result here",
+# and only that is tolerated. The host job runs the same test with
+# GBABE_ASAN_REQUIRED=1, so the check is not lost by this.
 echo "=== ui stress test ==="
-make -C tools/uipreview asan
+make -C tools/uipreview uistress
+tools/uipreview/run-sanitized.sh || {
+  rc=$?
+  [ "$rc" -eq 77 ] || exit "$rc"
+  echo "ui stress: skipped - this container cannot run the sanitizer"
+}
 
 # The libretro core, host build and render check (same reference frame as
 # `make acid2`), and then the 3DS archive - the only part of this repository's

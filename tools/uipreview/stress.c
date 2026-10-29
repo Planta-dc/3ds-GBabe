@@ -518,6 +518,14 @@ int main(void)
 	 * it was doing when it did. */
 	setvbuf(stdout, NULL, _IONBF, 0);
 
+	/* The first line, before anything else can fail. run-sanitized.sh reads
+	 * it to tell "the sanitizer never reached main()" - which is the runner's
+	 * high-entropy ASLR, not this code - from "the test ran and failed". A
+	 * check for the *presence* of this line cannot be fooled by the shell's
+	 * own "Segmentation fault" notice, which a check for the absence of
+	 * errors can. */
+	puts("ui stress: start");
+
 	gfxInitDefault();
 	long_strings(long_name, sizeof long_name, long_path, sizeof long_path);
 
