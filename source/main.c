@@ -432,6 +432,16 @@ int main(int argc, char **argv)
 				unsigned late, resyncs;
 				pace_take_counters(&pace, &late, &resyncs);
 
+				/* The presents this window had to drop, as a
+				 * window figure: frame_skipped is the running
+				 * total the slow-frame line reports. Only draw
+				 * frames can drop one, and only draw frames
+				 * get here, so the difference is exact. */
+				static unsigned skipped_seen;
+				const unsigned dropped =
+					frame_skipped - skipped_seen;
+				skipped_seen = frame_skipped;
+
 				const gbabe_frame_cost cost = {
 					/* The work: Gambatte, the decimator, the
 					 * transpose. It used to be timed from the
@@ -459,6 +469,7 @@ int main(int argc, char **argv)
 					.frame = after_post - (prev_end ? prev_end : frame_start),
 					.late = late,
 					.resyncs = resyncs,
+					.dropped = dropped,
 				};
 
 				ui_note_frame(&cost);

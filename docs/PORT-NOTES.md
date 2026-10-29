@@ -1687,3 +1687,57 @@ work-bound rather than sync-bound the next `core` figure will say so, because
 
 Next, in order, if the log still shows 58.8: **GPU present** (`blit` 2.2 → ~0.1 ms
 and no transposition at all) and **the decimator on core 2** (`emu` 9.6 → ~7.8).
+
+## 25. A dropped present has to be countable, or it looks like a bog
+
+The frame loop no longer waits for the panel (§24): it offers the swap and, if
+the panel still holds the buffer, drops the presentation and emulates on. That
+is the right trade - a repeat never costs the emulator any time - but it is
+invisible in a log where everything else is a *duration*. A session can read
+`fps 59.7`, `late 0`, `worst 16.9` and still have looked wrong, because the
+number that says so is a count.
+
+`skip` existed, but only inside `slow frame ...` lines, and those are printed
+when a frame overruns 16.7 ms. A build that works never prints one, so the
+counter that matters most was in the lines that only appear when it does not.
+Now:
+
+* `perf ... drop=N` - presentations the panel was too busy for, in that second;
+* `session: N of M presentations dropped (x.xx %), worst frame ...` - the
+  session's own line, written when the game is unloaded.
+
+The margin here is small and that is the reason to measure it. A swap is asked
+for 16.744 ms after the previous one and the panel's period is 16.72 ms, so the
+answer is "free" by about 24 µs. Thread wake-up jitter is larger than that, so
+some drops are expected in any build; what matters is the size of the count. If
+`drop` is a handful per session, the loop is holding 59.73 fps with a few
+repeats - acceptable. If it is a fraction of the frames, then the non-blocking
+ask is being refused often enough to see, and the next step is *not* to go back
+to a blocking present (that is the 58.8 fps of §23/§24) but to wait a bounded
+amount for the panel when - and only when - the slot has the slack: the present
+happens at the top of the slot, the emulation needs 9.6 ms of 16.744, so ~4 ms
+is available to spend before the frame is late. Drop only after that.
+
+Two other things changed in the same pass, both about being able to trust the
+evidence:
+
+* `log_line()` now carries `__attribute__((format(printf, 1, 2)))`. A `%u`
+  against a `double` used to compile without a word; the log is the only
+  evidence a slow-console report has, so the compiler checks every call to it
+  (it found none broken, including the new ones).
+* The UI stress test under AddressSanitizer died in its *own startup* in CI -
+  twenty `AddressSanitizer:DEADLYSIGNAL` lines, `Segmentation fault`, and not
+  one line of the test's output - and took the build with it. ASan needs to map
+  its shadow at fixed addresses, which a kernel with `vm.mmap_rnd_bits=32` does
+  not always allow; the Makefile's `setarch -R` workaround fixed it on the
+  runner and silently did nothing inside the build container, because Docker's
+  default seccomp profile refuses `personality(ADDR_NO_RANDOMIZE)`. A guard
+  that cannot tell "not supported here" from "did not help" turns a runner
+  quirk into a red build, so the test is now run by a script that probes
+  `setarch` once and keys on the test's own first line, `ui stress: start`: a
+  run that never printed it is a skip, anything that printed it and then
+  complained is a failure. The container is allowed to disable ASLR again
+  (`--security-opt seccomp=unconfined`), the host job sets
+  `GBABE_ASAN_REQUIRED=1` so a skip cannot pass there, and a skip in the
+  container shows up as a job annotation rather than as one line in a log
+  nobody can download.
