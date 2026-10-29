@@ -50,6 +50,7 @@ static bool frame_timed;     /* frame_start is set (it can legitimately be 0) */
 
 /* Diagnostics for the present path, see video_sync_take(). */
 static unsigned sync_skips;  /* frames presented without waiting for the panel */
+static bool sync_pending;    /* the last swap has not been waited for yet    */
 static unsigned sync_late;   /* swaps the panel did not take at the next vblank */
 
 /* One Game Boy frame, in ARM11 ticks. Used to decide whether there is time to
@@ -220,6 +221,13 @@ static void clear_letterbox(void)
 
 void video_begin_frame(void)
 {
+	/* Safety net for every caller that draws without asking: a swap the
+	 * panel has not taken yet must land before the buffer it released is
+	 * written to. main.c calls video_present_sync() itself, earlier, so
+	 * that its once-a-second work rides the wait; this only catches the
+	 * callers that do not (the host tools, the UI). */
+	video_present_sync();
+
 	frame_start = svcGetSystemTick();
 	frame_timed = true;
 	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
@@ -237,6 +245,10 @@ void video_begin_frame(void)
  * (nothing is playing then). */
 void video_clear(void)
 {
+	/* A swap from the last game frame may still be in flight; it has to
+	 * land before either buffer is written. */
+	video_present_sync();
+
 	/* The swap is followed by a wait for the same reason as in
 	 * video_end_frame(): the buffer becomes the back buffer immediately but
 	 * is not safe to write until the panel has taken the other one. */
@@ -286,6 +298,7 @@ void video_draw_frame(const uint16_t *frame565, int pitch)
 void video_end_frame(void)
 {
 	present_wait = 0;
+	sync_pending = false;
 
 	if (!fb_ready)
 		return;
@@ -297,43 +310,58 @@ void video_end_frame(void)
 	GSPGPU_FlushDataCache(fb, LCD_TOP_W * FB_STRIDE * sizeof(u16));
 	gfxScreenSwapBuffers(GFX_TOP, true);
 
-	/* Now wait for the panel to take it. Until this returns, the buffer the
-	 * next frame would draw into is still being scanned out; drawing into it
-	 * before the swap lands is exactly the tear that used to slide down the
-	 * screen (see video.h).
-	 *
-	 * Only if there is time. The wait ends at the next vblank, so as long as
-	 * the frame's own work fits in one frame period the cadence becomes
-	 * exactly the panel's 60 Hz; but a frame that has already overrun would
-	 * be pushed to the *following* vblank and the game would run at 30 fps.
-	 * In that case the console is behind anyway: present immediately and let
-	 * it tear, which is much less bad than halving the frame rate. */
+	/* Whether the wait is affordable is decided here, from the frame's own
+	 * work - not later, from video_present_sync(), because by then the
+	 * caller has had time to do its bookkeeping and the frame would look
+	 * slow when it was not. A frame that has already overrun a frame period
+	 * is presented at once and may tear: waiting would push it to the
+	 * *following* vblank and halve the frame rate at exactly the moment the
+	 * console is struggling. */
 	const u64 now = svcGetSystemTick();
 	const bool slack = frame_timed && now - frame_start < FRAME_TICKS;
 
 	if (slack)
-	{
-		gspWaitForVBlank();
-
-		/* A swap posted just before a vblank can miss it by a hair, in
-		 * which case the panel keeps the old buffer for another
-		 * 16.7 ms and the next draw would tear. gspIsPresentPending()
-		 * says whether that happened; give it one more vblank rather
-		 * than guess. */
-		if (gspIsPresentPending(GFX_TOP))
-		{
-			sync_late++;
-			gspWaitForVBlank();
-		}
-	}
+		sync_pending = true;
 	else
-	{
 		sync_skips++;
+
+	fb_ready = false;
+	frame_timed = false;
+}
+
+uint64_t video_present_sync(void)
+{
+	if (!sync_pending)
+		return 0;
+
+	sync_pending = false;
+
+	/* Wait for the panel to take the swap. Until this returns, the buffer
+	 * the next frame would draw into is still being scanned out; drawing
+	 * into it before the swap lands is exactly the tear that used to slide
+	 * down the screen (see video.h).
+	 *
+	 * This is deliberately separate from video_end_frame(): the wait is
+	 * dead time, so the caller gets the chance to do its once-a-second work
+	 * *between* the two calls, where the wait absorbs it. Doing that work
+	 * after the wait put it in the ~0.1 ms of slack the loop has left, and
+	 * pushed one frame a second past its vblank. */
+	const u64 now = svcGetSystemTick();
+
+	gspWaitForVBlank();
+
+	/* A swap posted just before a vblank can miss it by a hair, in which
+	 * case the panel keeps the old buffer for another 16.7 ms and the next
+	 * draw would tear. gspIsPresentPending() says whether that happened;
+	 * give it one more vblank rather than guess. */
+	if (gspIsPresentPending(GFX_TOP))
+	{
+		sync_late++;
+		gspWaitForVBlank();
 	}
 
 	present_wait = svcGetSystemTick() - now;
-	fb_ready = false;
-	frame_timed = false;
+	return present_wait;
 }
 
 uint64_t video_present_wait(void)

@@ -678,3 +678,72 @@ have reported 100 % of frames as resyncs, which is how it was found - a metric
 that reads implausible is a bug in the metric or in what it measures, and this
 time it was both. Second: this is exactly the kind of arithmetic that should
 never live inside a loop that can only be exercised on hardware you do not have.
+
+---
+
+## 11. The once-a-second work was costing a frame a second
+
+The second log from hardware, same Old 3DS, with §10 in it:
+
+```
+[    1.128] perf fps=59.8 frame=16.9 worst=33.4 core=9.2 blit=0.1 sync=7.3
+                wait=0.3 other=0.0 audio=39ms sync_skip=0 sync_late=0
+                pace_late=55 resync=0
+[    3.167] slow frame 26.4 ms: core 9.5 blit 0.2 vblank 16.7 audio 34 ms
+[   10.153] perf fps=56.8 frame=17.6 worst=66.9 core=9.0 ... resync=1
+```
+
+The pacing fix worked - `resync` is 0 almost everywhere, `fps` is 59.8 where
+it used to be 57.8 - but two numbers in it are still wrong, and they turned
+out to be the same thing.
+
+`worst=33.4` in *every* second. A 33.4 ms frame is two panel periods, i.e. a
+frame that missed its vblank and had to wait for the next one. One per second,
+not one per 3.67 s (which is what the 59.7275-vs-60 Hz beat alone would give),
+so something in the loop happens once a second and costs a vblank.
+
+The log has the answer in its own line ordering: of the 117 `slow frame` lines
+between 26 s and 320 s, 110 come within 60 ms of a `perf` line, with a median
+of 33 ms. The `slow frame` line is rate-limited to one a second, so this is
+not the whole population - but the trigger is obvious once asked for: the
+`perf` line is written by `ui_note_frame()`, which at the one-second mark also
+calls `ui_draw_hud()` - a bottom-screen redraw plus a 153 KiB cache flush -
+and it did it *after* `video_end_frame()` had waited for the vblank, in the
+~0.1 ms of slack the loop has left at that point. It could only ever be paid
+for by missing the next vblank.
+
+The loop had 7.3 ms of dead time per frame - the average `sync`, spent
+blocked in `gspWaitForVBlank()` doing nothing - and the fixed budget was being
+spent right after it.
+
+So the swap and the wait for it are now two calls:
+
+```c
+video_end_frame();     /* hand the frame to the panel            */
+ui_idle_work();        /* redraw the status/HUD if due, 1/s      */
+log_flush();           /* the line buffered up over the last s   */
+audio_log_stats();
+emu_flush_save();      /* every 30 s                             */
+video_present_sync();  /* wait for the vblank - absorbs all of it */
+```
+
+`video_present_sync()` is also called by `video_begin_frame()`, so no other
+caller can tear by forgetting; `main.c` calls it first only to get the wait
+for free. `presenttest` grew a check for exactly this: two frames with 6 ms of
+"once-a-second work" between the swap and the wait still present and still do
+not tear.
+
+The `perf` line gained `post=` for that work, between `blit` and `sync`, so
+the next log says how much it was. If `post` climbs above about 7 ms the work
+no longer fits in the gap and the frame rate pays for it, which is the number
+to watch.
+
+Two things this deliberately does *not* do. It does not move the frame start
+onto the vblank: that would lock the emulator to the panel's 60 Hz and run the
+Game Boy 0.45 % fast, and it is a much larger change than the log justifies
+yet. And it does not touch `pace_late`, which still reports 55-60 of 60 frames
+a second: either the loop really is starting frames a frame late, or the
+counter measures the wrong thing once the frame is being presented at the
+panel's pace rather than the schedule's. The next log will say which, because
+`post` removes the delay that was making it plausible.
+

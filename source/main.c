@@ -308,16 +308,35 @@ int main(int argc, char **argv)
 			if (draw)
 				video_end_frame();
 
-			const u64 after_blit = svcGetSystemTick();
+			const u64 after_swap = svcGetSystemTick();
+
+			/* ---- the window between the swap and the vblank ----------- */
+			/* The frame is handed over; the panel takes it at the next
+			 * vblank, and until then the loop has nothing to do. Work
+			 * that is not per frame - the status readout, the log, the
+			 * cartridge save - goes here, where the wait below absorbs it.
+			 * After the wait there is about 0.1 ms of slack left and any
+			 * of this pushes the next frame past its vblank: that was the
+			 * 33 ms frame in every second of the console log. */
+			if (draw)
+			{
+				ui_idle_work();
+				log_flush();
+				audio_log_stats();
+
+				if (svcGetSystemTick() - autosave_tick > AUTOSAVE_TICKS)
+				{
+					emu_flush_save();
+					autosave_tick = svcGetSystemTick();
+				}
+			}
+
+			const u64 after_post = svcGetSystemTick();
+			const u64 sync = draw ? video_present_sync() : 0;
+			const u64 after_sync = svcGetSystemTick();
 
 			if (draw)
 			{
-				/* Waiting for the panel is not the blit: report it
-				 * apart, or the status readout blames the copy
-				 * for time the frame spent asleep. */
-				const u64 sync = video_present_wait();
-				const u64 blit = (after_blit - after_core) - sync;
-
 				/* What the emulator could not use because it was
 				 * waiting for the next Game Boy frame to be due. */
 				const u64 prev_end = last_frame_end;
@@ -327,13 +346,12 @@ int main(int argc, char **argv)
 				unsigned late, resyncs;
 				pace_take_counters(&pace, &late, &resyncs);
 
-				ui_note_frame(after_core - frame_start, blit,
-					      sync, waited,
-					      after_blit - (prev_end ? prev_end : frame_start),
+				ui_note_frame(after_core - frame_start,
+					      after_swap - after_core, sync,
+					      after_post - after_swap, waited,
+					      after_sync - (prev_end ? prev_end : frame_start),
 					      late, resyncs);
-				last_frame_end = after_blit;
-
-				audio_log_stats();
+				last_frame_end = after_sync;
 			}
 
 			/* A frame that missed its deadline is what the player actually
@@ -341,7 +359,10 @@ int main(int argc, char **argv)
 			 * with the split, so a stutter can be traced to one part. */
 			static u64 last_slow_log;
 			const u64 now = svcGetSystemTick();
-			const double frame_ms = (double)(after_blit - frame_start) *
+			/* The whole frame, present wait included: a frame that
+			 * spends 16 ms waiting for the panel is exactly the kind
+			 * that is worth a line in the log. */
+			const double frame_ms = (double)(after_sync - frame_start) *
 						1000.0 / SYSCLOCK_ARM11;
 			if (draw && frame_ms > 20.0 &&
 			    now - last_slow_log > SYSCLOCK_ARM11)
@@ -349,28 +370,23 @@ int main(int argc, char **argv)
 				last_slow_log = now;
 
 				/* The wait for the panel is not the blit. On
-				 * hardware the panels's own frame is 16.67 ms and
+				 * hardware the panel's own frame is 16.67 ms and
 				 * the Game Boy's is 16.74, so a frame that
 				 * arrives just after a vblank waits a whole panel
 				 * period - which reads as "blit 16.8" in this
 				 * line while the copy itself is 0.1 ms. Split it:
 				 * a 26 ms frame is core 10 + vblank 16, and the
 				 * line should say so. */
-				const u64 sync = video_present_wait();
 				log_line("slow frame %.1f ms: core %.1f blit %.1f "
-					 "vblank %.1f audio %u ms", frame_ms,
+					 "post %.1f vblank %.1f audio %u ms", frame_ms,
 					 (double)(after_core - frame_start) * 1000.0 /
 						 SYSCLOCK_ARM11,
-					 (double)((after_blit - after_core) - sync) *
-						 1000.0 / SYSCLOCK_ARM11,
+					 (double)(after_swap - after_core) * 1000.0 /
+						 SYSCLOCK_ARM11,
+					 (double)(after_post - after_swap) * 1000.0 /
+						 SYSCLOCK_ARM11,
 					 (double)sync * 1000.0 / SYSCLOCK_ARM11,
 					 audio_queue_ms());
-			}
-
-			if (now - autosave_tick > AUTOSAVE_TICKS)
-			{
-				emu_flush_save();
-				autosave_tick = now;
 			}
 		}
 	}

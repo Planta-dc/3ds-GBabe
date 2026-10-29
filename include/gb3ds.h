@@ -69,6 +69,7 @@ typedef struct
 	float worst_ms; /* the slowest single frame in the last second           */
 	float core_ms;  /* emulation: CPU + PPU + APU                           */
 	float blit_ms;  /* scaled copy into the framebuffer                     */
+	float post_ms;  /* once-a-second work done before that wait (free)      */
 	float sync_ms;  /* waiting for the panel to take the finished frame     */
 	float wait_ms;  /* paced off waiting for the next Game Boy frame        */
 } gbabe_perf;
