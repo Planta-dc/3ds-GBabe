@@ -32,11 +32,14 @@
 
 set -u
 
-binary=./uistress
+# Next to this script, not next to the caller: docker/ci-build.sh runs it from
+# the repository root, where "./uistress" would not exist.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+binary="$here/uistress"
 attempts=5
 
 if [ ! -x "$binary" ]; then
-	echo "run-sanitized: $binary is not built (make uistress)" >&2
+	echo "run-sanitized: $binary is not built (make -C tools/uipreview uistress)" >&2
 	exit 2
 fi
 
