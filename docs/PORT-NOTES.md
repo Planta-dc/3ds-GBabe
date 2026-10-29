@@ -774,3 +774,85 @@ to answer first - *which binary wrote this log* - could not be answered before.
 
 `check-version.sh` still refuses any version typed into a source file, so the
 stamp is the only new string and it comes from the build, not from the source.
+
+---
+
+## 13. The status readout was spending a frame a second, and §11 did not fix it
+
+The third log from hardware (0.3.0, Croc 2, CGB, 191 s) says the same thing
+as the second one, only more precisely, because §11 added a counter for it:
+
+| | third log |
+|---|---|
+| `worst` | **33.4 ms or more in 157 of 157 seconds** |
+| slow frames | 150 in 191 s, one every **1.003 s** |
+| `post` (in the slow-frame lines) | **16.4 ms** median |
+| `core` | 10.0 ms median |
+| `vblank` | 5.9 ms median |
+| `core + post + vblank` | 33.0 ms - the whole dropped frame |
+
+So the diagnosis in §11 was right about *what* and wrong about *how much*.
+Moving the once-a-second work into the gap between the swap and the vblank wait
+is only free if the work is smaller than the gap. The gap is ~6 ms. The work is
+16 ms. It was never going to fit, and moving it only made it visible - which is
+worth something, but it is not a fix, and the frame was still lost.
+
+Two other things in §11 were simply wrong, and the log is what caught them:
+
+* the `perf` line was documented (in the commit, the pull request and the
+  README) as having gained a `post=` field. It had not: the edit that would have
+  added it silently did nothing, so `post` appeared only in the `slow frame`
+  lines and the whole 16 ms sat inside `other` in the once-a-second summary. The
+  field is there now, and `other` no longer absorbs it.
+* "`post` should sit around 1-2 ms" - asserted, not measured. It is 16 ms.
+
+### What the 16 ms is
+
+`ui_present()` transposes the 320x240 canvas into the bottom panel's 240x320
+layout - 76 800 pixel writes, strided by a panel row - and then flushes 153 KiB
+of framebuffer cache so the GPU does not read stale pixels. On a 268 MHz ARM11
+that is about 16 ms, once a second, for a debug readout.
+
+### The fix: one band per frame
+
+Both halves of the present are now done in bands of panel *columns*, which are
+contiguous in the framebuffer, so each band is one region and one
+`GSPGPU_FlushDataCache()` call:
+
+```
+ui_present_begin();                     /* take the back buffer          */
+ui_present_band(UI_W / 8) x 8 frames    /* 2 ms each, inside the gap     */
+ui_present_swap();                      /* show it - nothing before this */
+```
+
+Eight frames of ~2 ms rather than one frame of 16 ms. The panel keeps showing
+the previous buffer until the swap, so a banded update is never visible
+half-done, and `ui_present()` still exists as the immediate whole-screen path
+for menus.
+
+The `hud:` log line reports the split every second:
+
+```
+hud: render 0.9 ms + present 16.8 ms in 8 bands (worst band 2.1 ms)
+```
+
+`present` staying at ~16 ms while `worst band` stays near 2 ms is the success
+condition: the work still costs 16 ms, but it is paid in eight slices that fit
+in the waiting, so no frame is lost to it. If `worst band` approaches the frame
+period, the band count needs to go up.
+
+### The test
+
+`tools/uipreview` now checks the banded present against the one-shot present at
+band widths 320, 7, 40 and 1, with a canvas that differs in every pixel, and
+checks that the bottom screen does not change until the swap. Dropping the last
+column of every band leaves `present: ok` - the whole-screen path hides it -
+and fails the banded check with 9600 wrong pixels, which is why both exist.
+
+### The lesson
+
+A fix that moves work into slack has to know how much slack there is. §11
+assumed 1-2 ms because it was a text redraw; it is 16 ms because it is also a
+153 KiB cache flush, and nobody had measured the flush. The counter came first
+and the number was in the next log, which is the only reason this section can
+state it.

@@ -216,9 +216,10 @@ sdmc:/3ds/gbabe/debug.log
 [    0.191] core: gambatte 0.5.0, CGB, 64 rom banks, 0 ram banks
 [    0.204] rom: "BUGS BUNNY4" CGB mbc5 64 rom banks 0 ram banks
 [    0.204] rom path: sdmc:/roms/gb/Bugs Bunny in Crazy Castle 4 (USA).gbc
-[    1.225] perf fps=59.8 frame=16.7 worst=18.7 core=10.0 blit=0.1 post=0.0 sync=6.6 wait=0.0 audio=55ms sync_skip=0 sync_late=0 pace_late=0 resync=0
-[    8.914] slow frame 26.2 ms: core 10.6 blit 0.1 post 0.0 vblank 15.6 audio 41 ms
-[   10.518] perf fps=52.9 frame=18.9 worst=33.4 core=15.1 blit=0.1 post=1.2 sync=3.1 wait=0.6 audio=62ms sync_skip=3 sync_late=0 pace_late=41 resync=0
+[    1.225] perf fps=59.8 frame=16.7 worst=18.7 core=10.0 blit=0.1 post=0.4 sync=6.6 wait=0.0 other=0.0 audio=55ms sync_skip=0 sync_late=0 pace_late=0 resync=0
+[    1.259] hud: render 0.9 ms + present 16.8 ms in 8 bands (worst band 2.1 ms)
+[    8.914] slow frame 26.2 ms: core 10.6 blit 0.1 post 2.1 vblank 15.6 audio 41 ms
+[   10.518] perf fps=58.9 frame=17.0 worst=26.2 core=15.1 blit=0.1 post=2.1 sync=3.1 wait=0.6 other=0.0 audio=62ms sync_skip=3 sync_late=0 pace_late=41 resync=0
 [   12.510] audio: 301 blocks, late 207 (worst 648.96 ms), underruns 8, resyncs 0, dropped 0, queue 10 ms, margin 5.00 ms
 ```
 
@@ -240,6 +241,11 @@ sdmc:/3ds/gbabe/debug.log
   many were late and by how much, underruns, resyncs, dropped samples, the
   queue depth and the submit margin. A stutter shows up here as `late` or
   `underruns`, not as a vague "sound is bad";
+* `hud:` once a second when the bottom-screen readout is on: how long it took
+  to redraw and present, and the worst single band. The redraw is 16 ms of work
+  that would be a dropped frame if it happened all at once, so it is spent one
+  band per frame (see `docs/PORT-NOTES.md` §13) - if `present` grows but no band
+  does, it is still free;
 * `slow frame` whenever a presented frame takes over 20 ms, with the split and
   the audio queue depth - a stutter is usually one of those two. `vblank` is
   the wait for the panel, kept apart from `blit`: a 26 ms frame is normally
