@@ -53,10 +53,14 @@ void emu_set_rendering(bool on);
  * backend; valid until the next emu_run_frame(). */
 const uint16_t *emu_frame_buffer(void);
 
-/* How emu_run_frame() spent its time since the last call, in ARM11 ticks:
- * emulation (Gambatte's CPU+PPU+APU) and the audio decimator, separately.
- * Zero when nothing is loaded. */
-void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks);
+/* How emu_run_frame() spent its time since the last call, in ARM11 ticks, in
+ * three parts: emulation (Gambatte's CPU+PPU+APU), the audio decimation and
+ * resampling, and handing the result to CSND (a FIFO copy plus, every other
+ * frame, a service call). They have nothing in common except that they all
+ * happen inside emu_run_frame(), which is why `core` used to hide all three.
+ * Zero when nothing is loaded; any pointer may be NULL. */
+void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks,
+		     uint64_t *push_ticks);
 
 /* The DMG palette selection changed: re-apply the colours to the core. It is
  * handed the colour values directly, so this has to be pushed rather than

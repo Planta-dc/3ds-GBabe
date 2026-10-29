@@ -1329,3 +1329,71 @@ reports a continuous stream.
 
 Not verified on hardware yet - the same caveat as every other claim in this
 file. `rate` in the next log is what will settle it.
+
+## 20. The decimator was two passes, one of which was a copy
+
+Section 17's accounting left `dec` at 3.0 ms a frame - Gambatte's audio coming
+out at 2,097,152 Hz and being brought to 32,768. That is 18 % of the frame, more
+than the picture costs, and it was the largest item still standing.
+
+### What it was doing
+
+```
+core output   35,112 stereo samples at 2 MHz      (140 KiB, read once)
+stage 1       box-average 8:1 -> 4,389 samples    (write 17.5 KiB)
+stage 2       box-average 8:1 -> 548 samples      (read 17.5 KiB back, write 2.2 KiB)
+resampler     548 -> 548 +- 5 %
+```
+
+The 17.5 KiB array between the stages existed only because there were two
+stages. It is written and read again immediately, it is bigger than a quarter of
+the L1, and it buys nothing: the two filters can be applied to the same stream in
+the same pass, because stage 2 only needs the *output* of stage 1, not its
+buffer.
+
+Two more things were free:
+
+* **one 32-bit load per sample, not two.** The core packs stereo into a `u32`
+  (left low, right high), and the old code handed that buffer to a `int16_t *`
+  and did two 16-bit loads. On an ARM11 with no L2 the loads are the cost.
+* **no branch per sample.** Counting to 8 inside the loop is a branch on
+  35,112 samples. Eight at a time with the counter unrolled removes it.
+
+Measured on the host, 2000 frames of a real frame's worth of audio: **0.034 ->
+0.014 ms/frame, 2.36x**. The console number will be different - x86 has caches
+this CPU does not - which is why `dec=` stays in the log.
+
+### Why it is still two stages
+
+A length-64 box filter at 2 MHz has its first null at 32.7 kHz, and at the
+output's Nyquist of 16.4 kHz it is only **-3.9 dB** down. Anything between 16 and
+32 kHz folds straight into the audible band at almost full level, which turns
+square waves into hiss. Two cascaded 8-boxes double that attenuation. So the
+fusion is of the *pass*, not of the *filter* - the arithmetic is unchanged, which
+is what makes it safe.
+
+### The test that makes "unchanged" checkable
+
+`make -C tools/host dectest`, in CI: the two-stage implementation this replaced
+is kept in the test as a reference, and both are run over 200 frames of pseudo
+random square-wave-plus-noise audio in six block sizes (2065, 2064, 1000, 64, 7
+and 1 samples), asserting **byte-for-byte equality** - 109,725 output samples in
+the first case alone. It also prints the timing ratio, marked indicative.
+
+A speed rewrite whose output is "about the same" would have been another claim
+nobody could check. This one cannot drift without the build failing.
+
+### The log grew a field, which is why this is a version bump
+
+`dec` was ambiguous: it contained the arithmetic *and* `audio_push_frames()`,
+which every other frame does a `csndPlaySound()` service call for. Those have
+different fixes - one is arithmetic over 140 KiB, the other is IPC - so they are
+now counted and logged apart:
+
+```
+perf ... core=12.4 emu=8.4 dec=1.5 push=0.2 draw=1.0 ...
+```
+
+`core` is now exactly `emu + dec + push + draw`. If the next console log shows
+`dec` still near 3.0, the cost was the service call and this change is
+irrelevant, which the log will now say instead of leaving it to be guessed.

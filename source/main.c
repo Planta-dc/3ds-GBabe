@@ -312,9 +312,9 @@ int main(int argc, char **argv)
 			 * transpose. Counted inside the callees, so they are taken
 			 * here too - an emulated frame with no drawing still decodes
 			 * audio, and a skipped frame still runs the emulator. */
-			u64 emu_ticks, audio_ticks, draw_ticks;
+			u64 emu_ticks, audio_ticks, push_ticks, draw_ticks;
 
-			emu_timing_take(&emu_ticks, &audio_ticks);
+			emu_timing_take(&emu_ticks, &audio_ticks, &push_ticks);
 
 			/* The picture goes to the panel *now*, after the emulation,
 			 * and not before it. video_begin_frame() hands back the
@@ -398,9 +398,10 @@ int main(int argc, char **argv)
 					 * inside it. Now it is the sum, so the
 					 * three parts add up to it by definition. */
 					.core = emu_ticks + audio_ticks +
-						draw_ticks,
+						push_ticks + draw_ticks,
 					.emu = emu_ticks,
 					.audio = audio_ticks,
+					.push = push_ticks,
 					.draw = draw_ticks,
 					.blit = after_swap - after_core,
 					.sync = sync,

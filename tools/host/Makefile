@@ -12,6 +12,7 @@
 #   make presenttest           check the present path's wait-or-tear trade
 #   make drawtest              check the scaled transpose against a reference
 #   make resamptest            check the audio rate matcher's arithmetic
+#   make dectest               check the decimator is bit-exact, and faster
 #
 # Uses ../host/3ds.h in place of libctru. Not part of the 3DS build.
 
@@ -40,7 +41,7 @@ CSTD    := -std=gnu11
 CXXSTD  := -std=gnu++11 -fno-exceptions -fno-rtti
 
 FRONT_C := $(ROOT)/source/video.c $(ROOT)/source/audio.c \
-           $(ROOT)/source/resamp.c \
+           $(ROOT)/source/resamp.c $(ROOT)/source/decimator.c \
            $(ROOT)/source/palette.c $(ROOT)/source/config.c \
            $(ROOT)/source/log.c \
            $(ROOT)/source/ui.c $(ROOT)/source/ui_gfx.c \
@@ -97,10 +98,10 @@ acid2: $(BIN)
 # stand-in CSND is only enabled for this run.
 audiotest: $(OBJDIR)/audio.o $(OBJDIR)/stub.o $(OBJDIR)/log.o \
 	   $(OBJDIR)/config.o $(OBJDIR)/palette.o $(OBJDIR)/audiotest.o \
-	   $(OBJDIR)/resamp.o
+	   $(OBJDIR)/resamp.o $(OBJDIR)/decimator.o
 	$(CC) $(CFLAGS) -o gbabe-audiotest $(OBJDIR)/audio.o $(OBJDIR)/stub.o \
 		$(OBJDIR)/log.o $(OBJDIR)/config.o $(OBJDIR)/palette.o \
-		$(OBJDIR)/resamp.o $(OBJDIR)/audiotest.o -lm
+		$(OBJDIR)/resamp.o $(OBJDIR)/decimator.o $(OBJDIR)/audiotest.o -lm
 	GBABE_HOST_AUDIO=1 ./gbabe-audiotest
 	@echo
 	@echo "audiotest: again with only two CSND channels (the mono fallback)"
@@ -113,6 +114,13 @@ presenttest: $(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c \
 	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-presenttest \
 		$(OBJDIR)/video.o $(OBJDIR)/stub.o presenttest.c
 	./gbabe-presenttest
+
+# The decimator: bit-exact against the two-stage version it replaced, in every
+# block size the backend can hand it, plus an indicative timing.
+dectest: $(ROOT)/source/decimator.c $(ROOT)/include/decimator.h dectest.c
+	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -o gbabe-dectest \
+		$(ROOT)/source/decimator.c dectest.c
+	./gbabe-dectest
 
 # The audio rate matcher, as arithmetic: the control law and the resampler on
 # their own, with no console, no DSP and no timing in the way.

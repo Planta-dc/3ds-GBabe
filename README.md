@@ -432,6 +432,8 @@ make -C tools/host drawtest            # the scaled transpose, every panel
                                        #   pixel, at every band height
 make -C tools/host resamptest          # the audio rate matcher: no dropped
                                        #   samples, no clicks per block
+make -C tools/host dectest             # the decimator is bit-exact against
+                                       #   the two-stage version it replaced
 make -C libretro test                  # the libretro core, against the same
                                        #   reference frame
 ./tools/host/gbabe-host game.gb 300 out.ppm 0

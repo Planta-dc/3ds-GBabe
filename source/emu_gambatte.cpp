@@ -46,6 +46,7 @@
 #include "palette.h"
 
 #include "gambatte.h"
+#include "decimator.h"
 #include "resamp.h"
 
 /* ------------------------------------------------------------------------- */
@@ -101,52 +102,23 @@ bool error_pending;
 
 /* Gambatte's native audio rate is 35112 samples per frame, and 35112 / 59.7275
  * = 2097152 Hz exactly. That is 64x the rate the CSND channel is opened at, so
- * the decimation is two stages of 8 by box averaging. Box averaging is a
- * cheap first-order low pass; two stages make the alias rejection good enough
- * that square waves do not turn into hiss, and it needs no history buffer:
- * just an accumulator per channel and a counter. */
-struct Downsampler
-{
-	int32_t sum_l, sum_r;
-	uint8_t count;
+ * the decimation is two stages of 8 by box averaging (see include/decimator.h
+ * for why it is two and not one, and for why it is now a single pass).
+ *
+ * Measured on the console, this was 3.0 ms of a 16.74 ms frame - the largest
+ * single item after Gambatte itself, and larger than the picture. */
+decimator stage;
 
-	void reset() { sum_l = sum_r = 0; count = 0; }
-
-	/* Feed `n` interleaved stereo samples; writes at most n/8 to `out`. */
-	unsigned run(const int16_t *in, unsigned n, int16_t *out)
-	{
-		unsigned written = 0;
-
-		for (unsigned i = 0; i < n; i++)
-		{
-			sum_l += in[i * 2];
-			sum_r += in[i * 2 + 1];
-
-			if (++count == 8)
-			{
-				count = 0;
-				out[written * 2]     = (int16_t)(sum_l >> 3);
-				out[written * 2 + 1] = (int16_t)(sum_r >> 3);
-				written++;
-				sum_l = sum_r = 0;
-			}
-		}
-
-		return written;
-	}
-};
-
-Downsampler stage1, stage2;
-
+/* 35112 stereo samples per frame, in 2064-sample calls (the core's own
+ * front-end uses the same step size). */
 /* 35112 stereo samples per frame, in 2064-sample calls (the core's own
  * front-end uses the same step size). */
 const unsigned RUN_SAMPLES  = 2064;
 const unsigned SOUND_BUF    = RUN_SAMPLES + 2064; /* core may overshoot      */
 gambatte::uint_least32_t sound_buf[SOUND_BUF];
 
-/* One runFor() call produces at most 4128 samples; stage 1 divides by 8 and
- * stage 2 by another 8, so 520 and 72 frames are those bounds with slack. */
-int16_t audio_mid[520 * 2];
+/* One runFor() call produces at most 4128 samples, which is 64 output frames
+ * at 32768 Hz; 72 leaves room for a block that overruns. */
 int16_t audio_out[72 * 2];
 
 /* And then the rate matcher: 72 frames stretched by up to 5 % is 76, so 80. */
@@ -576,12 +548,17 @@ extern "C" void emu_flush_save(void)
 	}
 }
 
-/* Ticks spent inside runFor() and in the decimator since the last
- * emu_timing_take(), i.e. the emulator split from the audio work. Both happen
- * inside emu_run_frame(), so they are part of what the log calls `core`; the
- * point of splitting them is that they are the two things a slow frame can be
- * blamed on, and until they are counted separately neither can be. */
-static u64 emu_ticks_, audio_ticks_;
+/* Ticks spent inside runFor(), in the decimator, and in handing the result to
+ * CSND, since the last emu_timing_take(). All three happen inside
+ * emu_run_frame(), so they are parts of what the log calls `core`; the point of
+ * splitting them is that they are the things a slow frame can be blamed on, and
+ * until they are counted separately none of them can be.
+ *
+ * The decimator and the push are measured apart because they have completely
+ * different fixes: one is arithmetic over 140 KiB of samples, the other is a
+ * service call to the DSP. `dec=` was 3.0 ms on the console and nobody could
+ * say which half it was. */
+static u64 emu_ticks_, audio_ticks_, push_ticks_;
 
 extern "C" void emu_run_frame(void)
 {
@@ -605,13 +582,15 @@ extern "C" void emu_run_frame(void)
 		if (samples > SOUND_BUF)
 			samples = SOUND_BUF; /* documented to overshoot by 2064 */
 
-		/* Decimating 35112 samples per frame is not free (~2% of a 268 MHz
-		 * frame), so it only runs when the sound is actually wanted. */
+		/* The decimation and the resampling, then the hand-over to CSND
+		 * as two separate figures. It only runs when the sound is
+		 * actually wanted. */
 		if (samples > 0 && audio_enabled())
 		{
-			unsigned mid = stage1.run((const int16_t *)sound_buf,
-						  samples, audio_mid);
-			unsigned out = stage2.run(audio_mid, mid, audio_out);
+			const unsigned out = decimator_run(&stage, sound_buf,
+							   samples, audio_out);
+			unsigned n = 0;
+
 			if (out > 0)
 			{
 				/* 548.6 samples a frame is only the right number
@@ -621,16 +600,25 @@ extern "C" void emu_run_frame(void)
 				 * an underrun (see include/resamp.h). */
 				resamp_set_step(&shaper, audio_rate_step());
 
-				unsigned n = resamp_run(&shaper, audio_out, out,
-							audio_play,
-							sizeof audio_play /
-							(2 * sizeof audio_play[0]));
-				if (n > 0)
-					audio_push_frames(audio_play, n);
+				n = resamp_run(&shaper, audio_out, out, audio_play,
+					       sizeof audio_play /
+					       (2 * sizeof audio_play[0]));
 			}
-		}
 
-		audio_ticks_ += svcGetSystemTick() - t_done;
+			const u64 t_dec = svcGetSystemTick();
+
+			audio_ticks_ += t_dec - t_done;
+
+			/* The FIFO copy and, every other frame, the
+			 * csndPlaySound() service call: a different animal
+			 * from the arithmetic, and logged apart. */
+			if (n > 0)
+				audio_push_frames(audio_play, n);
+
+			push_ticks_ += svcGetSystemTick() - t_dec;
+		}
+		else
+			audio_ticks_ += svcGetSystemTick() - t_done;
 
 		if (ret >= 0)
 			break;
@@ -650,12 +638,15 @@ extern "C" const uint16_t *emu_frame_buffer(void)
 	return (const uint16_t *)vbuf;
 }
 
-extern "C" void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks)
+extern "C" void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks,
+				uint64_t *push_ticks)
 {
 	if (emu_ticks != NULL)
 		*emu_ticks = emu_ticks_;
 	if (audio_ticks != NULL)
 		*audio_ticks = audio_ticks_;
+	if (push_ticks != NULL)
+		*push_ticks = push_ticks_;
 
-	emu_ticks_ = audio_ticks_ = 0;
+	emu_ticks_ = audio_ticks_ = push_ticks_ = 0;
 }
