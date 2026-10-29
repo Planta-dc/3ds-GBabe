@@ -1059,3 +1059,379 @@ own arithmetic - for all three scale modes, three source pitches (160, 161, 256)
 and eight band heights (1, 2, 3, 7, 16, 17, 23, 64). It was checked by breaking
 the code three ways (rows in the wrong order inside a band, no clamp on the last
 band, one band short); every mutation fails it with hundreds of wrong pixels.
+
+## 17. The log answers the question: the front-end costs more than the emulator
+
+The 0.3.1 log from the console (230 s, Super Mario Land then Croc 2) is the first
+one that can be added up, because `core` is no longer a single opaque number.
+Every line now accounts for itself and the parts do sum to the whole.
+
+Steady state, frameskip=0, 48 one-second samples, take the medians:
+
+```
+frame  17.60 ms   ->  56.7 fps, and not one second of the run reached 58
+core   16.60 ms
+  emu   8.35 ms   Gambatte
+  dec   3.00 ms   audio decimator (plus the csndPlaySound() IPC inside it)
+  draw  1.00 ms   the scaled transpose, banded in §16
+  ???   4.30 ms   inside `core` and in none of the three
+blit    0.10 ms   cache flush + swap
+post    0.90 ms   log flush, HUD bands, audio stats
+```
+
+13.35 ms of work in a 16.74 ms budget. **The emulator would already be at 59.7
+fps if the front-end were not taking 4.3 ms of it.** That is the answer to "why
+does Gambatte in RetroArch run at full speed" - not because its core is faster
+(8.4 ms is 8.4 ms) but because its front-end adds almost nothing per frame, and
+ours was adding nine milliseconds.
+
+### The 4.3 ms is a blocking vblank wait, counted as emulation
+
+`main.c` calls `video_begin_frame()` before `emu_run_frame()`, and `core` is
+timed from before the first to after the second. `video_begin_frame()` ends with
+`video_present_sync()`, whose job is to guarantee the buffer about to be drawn
+into has been released. It does not ask first:
+
+```c
+if (!sync_pending)
+        return 0;
+...
+gspWaitForVBlank();          /* <- a whole panel period, every frame */
+```
+
+`video_swap_pending()`, a few lines below it, already knows how to answer
+"has the panel taken it yet" without blocking. The idle loop in `main.c` calls
+*that*, in the dead time before the next frame - which is exactly right, and is
+what the comment in `video_begin_frame()` claims happens ("main.c calls
+video_present_sync() itself, earlier"). It does not. There is no such call in
+`main.c`.
+
+So the design was: poll in the idle time, block only as a fallback. What
+actually happens: with 13.35 ms of work in a 16.74 ms budget the loop is late
+often enough that `frame_due()` is true the moment the previous frame ends, the
+idle branch never runs, `sync_pending` is never cleared, and every single frame
+pays a full blocking vblank in the fallback. The log says so twice over:
+
+* `wait=0.0` on every line - the loop never idles, so nothing polled the swap;
+* `pace_late=41..58` - the pacer counted ~58 late frames a second, out of ~57
+  frames. Every frame is late. It is late *because* it blocks, and it blocks
+  *because* it is late. That is the whole frame-rate problem in two numbers.
+
+A blocking wait for the next vblank when the swap has already landed is pure
+loss: on average half a panel period, which is the 4.3 ms.
+
+### The decimator is 3 ms for 548 output samples
+
+`dec` is 2.8-3.0 ms and has never been anything else. 35,112 stereo samples go
+in, 548 come out: 70,224 adds, plus one branch per input sample, plus a 35 KiB
+intermediate buffer written and read again (`sound_buf` -> `audio_mid` ->
+`audio_out`), plus two `csndPlaySound()` IPC round trips. On a 268 MHz core with
+no L2 that is 2-3 ms, and it is 22 % of the frame budget for the one thing
+RetroArch does on a separate DSP thread.
+
+### What the rest of the log says, which the frame rate hides
+
+* **Audio is not keeping up.** `under 176` underruns in 230 s, and
+  `late 2607` of `3750` blocks: the pump is late for 70 % of blocks. That is
+  audible, and it is the part that makes a 56 fps game feel worse than a 55 fps
+  one.
+* **The HUD costs 13.3 ms every second.** `hud: render 4.4 ms + present 13.3 ms
+  in 8 bands (worst band 1.8 ms)` - 141 times, once per second. Eight frames of
+  1.8 ms would fit in an idle window if there were one; with `wait=0.0` there
+  is not, so those 1.8 ms land on frames that had no room for them.
+* **The picture freezes for a third of a second at a time.** `post` is normally
+  0.9 ms, and on nine frames in the run it is 249, 242, 403, 503, 573, 571,
+  706, 783 and 789 ms. That is SD card I/O in the frame (`log_flush()` and the
+  30-second autosave) - 0.8 s where the console does nothing but wait for the
+  card, twice a minute.
+* **The default configuration is 30 fps.** `frameskip=1` in the shipped config
+  presents every other frame. The log shows the first 23 seconds at
+  `fps=29.9 frame=33.5 wait=23.5` until the setting was changed in the menu,
+  after which the same build ran at 57.8. A console that now has the budget for
+  60 should not ship presenting 30.
+
+### Where that leaves it
+
+`emu = 8.35 ms` is the floor on this hardware and it fits: 16.74 - 8.35 = 8.4 ms
+for everything else, and everything else is currently 5.0 ms of real work plus
+4.3 ms of waiting. The next work is not in Gambatte and not in the transpose. It
+is, in order of what the log proves:
+
+1. never block the emulator on the panel - poll, and give the present path a
+   buffer it can use without waiting (§17 above, ~4 ms/frame);
+2. decimate audio in one pass, 8 samples at a time, and get the CSND IPC out of
+   the frame (~2 ms/frame);
+3. only do the HUD when the frame has genuine idle time, which needs (1) first;
+4. keep SD writes out of the frame entirely.
+
+## 18. Present at the end of the frame, not the start of it
+
+Section 17 found 4.3 ms of "emulation" that was a blocking vblank. This is the
+fix, and it is not "call the wait differently" - it is where in the frame the
+panel is touched at all.
+
+### What the frame used to do
+
+```
+frame N   begin_frame()      <- takes the back buffer
+          emu_run_frame()    <- emulates, then transposes into that buffer
+          end_frame()        <- flush + swap
+          once-a-second work
+```
+
+`begin_frame()` has to hand back a buffer the panel has finished with, and it
+cannot know: the swap made at the end of frame N-1 is 1 ms old and the panel
+takes a whole vblank to get to it. So it waited. Every frame. That wait is the
+4.3 ms, and because it sat before `emu_run_frame()` it was counted as emulation.
+
+The comment in the old `begin_frame()` even claimed `main.c` did the wait
+"itself, earlier", so this was only a safety net for the other callers. There
+was no such call in `main.c`. The net was the only path.
+
+### What it does now
+
+```
+frame N   emu_run_frame()    <- emulates into the backend's own buffer
+          begin_frame()      <- asks: has the panel taken the swap? usually yes
+          draw_frame()       <- transposes into a buffer the panel has released
+          end_frame()        <- flush + swap
+```
+
+Two changes make it work:
+
+* **The picture is produced before the panel is touched.** `emu_run_frame()` no
+  longer draws; it leaves the 160x144 RGB565 frame in `emu_frame_buffer()` and
+  `main.c` presents it. Everything between the previous swap and this one -
+  emulation, audio, the once-a-second work - is time in which the panel can
+  finish.
+* **The wait is the frame's slack, not an addition to it.** A frame that has to
+  wait at the present is a frame that arrived early: its picture is finished,
+  and the only thing left to do with the frame is show it. A frame that arrives
+  late finds the swap long taken and does not wait at all.
+
+That also removes the "present at once and accept a tear" path: it existed for
+frames that overran a panel period, and a frame that overran no longer has
+anything to wait for, so it is unreachable rather than merely unlikely. Tearing
+is now impossible by construction - `video_draw_frame()` is only ever called
+after `video_begin_frame()`, which does not return until the buffer it hands
+back has been released. `presenttest` checks that as a property, including for a
+frame 20 ms over budget.
+
+### Expected on the console
+
+The four figures to read, in the next log line:
+
+```
+core=~12.4 emu=8.4 dec=3.0 draw=1.0   <- work (unchanged: this moved nothing)
+sync=~4       <- the panel handing the buffer back; slack, not work
+frame=~16.7   <- one panel period, instead of 17.6
+fps=~59.7
+```
+
+`core` should stay where it was and `frame` should *fall*, which is the point:
+the emulator did not get faster, the waiting stopped being counted against it.
+`sync_free` counts the frames that did not have to wait at all; on a console
+that is keeping up it should be most of them, and `pace_late` - which read 41 to
+58 out of ~57 frames a second in the last log - should collapse.
+
+### And the sound
+
+The crackle in the 0.3.1 log is this bug's fault, by way of the audio FIFO. The
+decimator produces 548.6 samples per emulated frame; CSND consumes 32768 a
+second. Those match at exactly 59.7275 fps and not below it:
+
+```
+56.7 fps   ->  31,100 samples/s produced against 32,768 consumed
+               = 1,668 samples/s missing, ~125 ms of buffer gone every 2.5 s
+```
+
+which is what `under 176` underruns and a queue swinging between 15 and 70 ms
+look like. 13.35 ms of work in a 16.74 ms budget is a full-speed console; the
+frame rate was low because it was *waiting*, and the sound was paying for it.
+If the next log still crackles, the next change is a resize in the resampler.
+
+## 19. The sound has to be elastic, because the frame rate is not
+
+Section 18 ended with a warning: fixing the frame loop stops the FIFO draining,
+but only while the console is keeping up. This is the part that makes the sound
+survive the times it is not.
+
+### The arithmetic that made the crackle
+
+Gambatte emits a fixed 35112 samples per emulated frame. The decimator turns
+that into 548.6 samples at 32768 Hz - a rate that is correct at exactly 59.7275
+fps and nowhere else:
+
+```
+fps    produced/s   consumed/s   missing
+59.73    32,768       32,768         0
+57.00    31,283       32,768     -1,485   (-91 ms of buffer a minute)
+53.20    29,198       32,768     -3,570   (-214 ms a minute)
+```
+
+The FIFO holds 4096 frames (125 ms). At 56.7 fps it is empty about every 2.5
+seconds, and every time it empties `audio_pump()` says so and restarts the
+stream: a hole, a count in `underruns`, and the click that comes with both. The
+0.3.1 log has 176 of those in 230 seconds, which is one every 1.3 s - the
+console was never at full speed, so the holes never stopped.
+
+### What a real audio path does
+
+RetroArch's audio drivers resample against a rate the frontend can nudge
+("dynamic rate control"), and that is what this now does too:
+
+```
+decimator -> resampler (0.96x .. 1.04x) -> FIFO -> CSND
+                   ^                         |
+                   +----- queue level --------+
+```
+
+* `resamp_control_step()` reads the FIFO level against its target (2 blocks,
+  2048 frames) and returns a step: 1.0 on target, below 1.0 when the queue is
+  draining (produce *more* samples per emulated frame, i.e. stretch the audio),
+  above 1.0 when it is filling. Clamped to +-5 %.
+* `resamp_run()` is a linear interpolator with one frame of carry, so block
+  boundaries do not click. At 1:1 it is the identity - every input sample comes
+  out once, in order, which the host test checks over 20 blocks.
+* The step is only changed when the queue is off target by more than 2 ms, so a
+  console that is keeping up resamples *nothing*. It is a safety net, not a
+  mixer.
+
+A 5 % pitch shift is roughly a twentieth of a semitone; a Game Boy's square
+waves at that shift are indistinguishable. A hole every two seconds is not.
+
+### What the log will say
+
+The audio line grew a rate and lost a lie:
+
+```
+audio: 3750 blocks, late 2607 (worst 4.20 ms), stalled 3, underruns 0, ...,
+       queue 41 ms, margin 5.00 ms, rate 0.997
+```
+
+* `rate` is the resampler's current step. `1.000` is a console at full speed.
+  On a slow frame it dips - `0.96` means the audio is being stretched by 4 % to
+  keep the queue fed, and that is the port working as intended.
+* `stalled` counts blocks more than half a second late, which is what the old
+  `worst 56344.07 ms` really was: the application having been somewhere else (an
+  SD write, a menu). It is reported apart from `worst`, which now means
+  scheduling again.
+* `underruns` is the number to watch. It should be 0.
+
+### Tested
+
+`make -C tools/host resamptest`, in CI: the control law (1:1 on target, stretch
+when low, squeeze when full, monotone, clamped at 5 %, safe on nonsense), the
+identity at 1:1, the output count at both clamps, the worst block (75 frames for
+an 80-frame buffer) and the absence of a discontinuity at block boundaries on a
+200 Hz sine. `audiotest` still runs the whole audio path in real time and still
+reports a continuous stream.
+
+Not verified on hardware yet - the same caveat as every other claim in this
+file. `rate` in the next log is what will settle it.
+
+## 20. The decimator was two passes, one of which was a copy
+
+Section 17's accounting left `dec` at 3.0 ms a frame - Gambatte's audio coming
+out at 2,097,152 Hz and being brought to 32,768. That is 18 % of the frame, more
+than the picture costs, and it was the largest item still standing.
+
+### What it was doing
+
+```
+core output   35,112 stereo samples at 2 MHz      (140 KiB, read once)
+stage 1       box-average 8:1 -> 4,389 samples    (write 17.5 KiB)
+stage 2       box-average 8:1 -> 548 samples      (read 17.5 KiB back, write 2.2 KiB)
+resampler     548 -> 548 +- 5 %
+```
+
+The 17.5 KiB array between the stages existed only because there were two
+stages. It is written and read again immediately, it is bigger than a quarter of
+the L1, and it buys nothing: the two filters can be applied to the same stream in
+the same pass, because stage 2 only needs the *output* of stage 1, not its
+buffer.
+
+Two more things were free:
+
+* **one 32-bit load per sample, not two.** The core packs stereo into a `u32`
+  (left low, right high), and the old code handed that buffer to a `int16_t *`
+  and did two 16-bit loads. On an ARM11 with no L2 the loads are the cost.
+* **no branch per sample.** Counting to 8 inside the loop is a branch on
+  35,112 samples. Eight at a time with the counter unrolled removes it.
+
+Measured on the host, 2000 frames of a real frame's worth of audio: **0.034 ->
+0.014 ms/frame, 2.36x**. The console number will be different - x86 has caches
+this CPU does not - which is why `dec=` stays in the log.
+
+### Why it is still two stages
+
+A length-64 box filter at 2 MHz has its first null at 32.7 kHz, and at the
+output's Nyquist of 16.4 kHz it is only **-3.9 dB** down. Anything between 16 and
+32 kHz folds straight into the audible band at almost full level, which turns
+square waves into hiss. Two cascaded 8-boxes double that attenuation. So the
+fusion is of the *pass*, not of the *filter* - the arithmetic is unchanged, which
+is what makes it safe.
+
+### The test that makes "unchanged" checkable
+
+`make -C tools/host dectest`, in CI: the two-stage implementation this replaced
+is kept in the test as a reference, and both are run over 200 frames of pseudo
+random square-wave-plus-noise audio in six block sizes (2065, 2064, 1000, 64, 7
+and 1 samples), asserting **byte-for-byte equality** - 109,725 output samples in
+the first case alone. It also prints the timing ratio, marked indicative.
+
+A speed rewrite whose output is "about the same" would have been another claim
+nobody could check. This one cannot drift without the build failing.
+
+### The log grew a field, which is why this is a version bump
+
+`dec` was ambiguous: it contained the arithmetic *and* `audio_push_frames()`,
+which every other frame does a `csndPlaySound()` service call for. Those have
+different fixes - one is arithmetic over 140 KiB, the other is IPC - so they are
+now counted and logged apart:
+
+```
+perf ... core=12.4 emu=8.4 dec=1.5 push=0.2 draw=1.0 ...
+```
+
+`core` is now exactly `emu + dec + push + draw`. If the next console log shows
+`dec` still near 3.0, the cost was the service call and this change is
+irrelevant, which the log will now say instead of leaving it to be guessed.
+
+## 21. What a Game Boy Color frame costs that a monochrome one does not
+
+The Game Boy Color half of the last console log is the slower half, and the
+front-end is not why: the transpose, the blit and the present are the same
+267x240 of work whatever is in the cartridge. Everything that differs is inside
+`emu=`, which measured 8.4 ms on Super Mario Land and 8.1-12.7 ms on Croc 2.
+
+So the CGB question is a core question, and there is exactly one CGB-only thing
+this port does that monochrome does not: **colour correction**. `LCD` is
+constructed with `setColorCorrection(true)` and mode 0, which is Pokefan531's
+"gold standard" conversion - a gamma expansion, a 3x3 colour matrix and a gamma
+compression, six `powf()` calls, per palette register write. A fade rewrites all
+64 entries every step, so a fade costs 64 conversions and a game that fades
+constantly pays it constantly. `setColorCorrection(false)` is the identity and
+costs six comparisons.
+
+Two things are done about it here, and neither changes the picture:
+
+* **Half of the arithmetic is tabulated.** The gamma expansion takes one of 32
+  inputs per channel, so it is a 32-entry table now - the same `powf()` on the
+  same arguments, computed once per brightness change instead of once per colour
+  per write. (The multiplication is kept as `v * (1/31)` and not `v / 31`,
+  because those are not the same float and "nearly identical" is not a property
+  worth risking on 32,768 colours.)
+* **It is counted, so the next log can answer the question.** The perf line grew
+  `pal=` - CGB palette conversions per frame. Zero on a monochrome game by
+  construction, which is also the sanity check for the counter.
+
+If `pal=` is in the tens, colour correction is a rounding error and the CGB gap
+is Gambatte doing more work on more colours, which is what it was bought for. If
+it is in the thousands, one fade-heavy game can be made much cheaper by making
+the correction a setting - and `colorCorrectionMode = 1` (the fast approximation)
+instead of 0 is a third option that costs six integer multiply-adds.
+
+What is *not* going to happen: turning colour correction off by default to win a
+number. It changes what every Game Boy Color game looks like, and this project
+has spent enough rounds confusing "faster" with "better".

@@ -46,6 +46,7 @@
 #include <3ds/allocator/linear.h>
 
 #include "log.h"
+#include "resamp.h"
 
 /* CSND wants the sample rate as an integer and resamples on its own.
  * Gambatte delivers 32768 Hz, which is what the channels are opened at. */
@@ -115,6 +116,7 @@ static unsigned stat_underruns;
 static unsigned stat_resyncs;
 static unsigned stat_dropped;
 static unsigned stat_late_blocks;
+static unsigned stat_stalled;      /* blocks over half a second late      */
 static s64      stat_worst_late;   /* ticks, negative = early */
 
 /* ------------------------------------------------------------------------- */
@@ -326,7 +328,16 @@ void audio_pump(void)
 		if (drift > 0)
 		{
 			stat_late_blocks++;
-			if ((u64)drift > (u64)stat_worst_late)
+
+			/* A gap longer than half a second is not a late block,
+			 * it is the application having been somewhere else (an
+			 * SD write, a menu, a stalled kernel thread) - and the
+			 * log used to carry "worst 56344.07 ms" for exactly
+			 * that, a number that says nothing about scheduling.
+			 * Reported separately and left out of the worst case. */
+			if (drift > (s64)(SYSCLOCK_ARM11 / 2))
+				stat_stalled++;
+			else if ((u64)drift > (u64)stat_worst_late)
 				stat_worst_late = drift;
 			if ((u64)drift > late_max)
 				late_max = (u64)drift;
@@ -435,6 +446,7 @@ bool audio_init(void)
 
 	csnd_ok = true;
 	next_start = svcGetSystemTick();
+	(void)audio_rate_step(); /* clears the smoothed level for the new stream */
 
 	log_line("audio: %u Hz, %s, %d ms blocks, channels %d/%d/%d/%d",
 		 OUT_RATE, stereo ? "stereo" : "mono (not enough channels)",
@@ -486,6 +498,29 @@ unsigned audio_queue_ms(void)
 	if (fifo == NULL)
 		return 0;
 	return (fifo_used() * 1000u) / OUT_RATE;
+}
+
+/* See include/audio.h and include/resamp.h. The queue sawtooths by a whole
+ * block - it drains for 31 ms and is then topped up with 1024 frames - so the
+ * control law is given a slow average of the level, not the instant one.
+ * 1/64 per call, and the emulator pushes 17 times a frame, is a time constant
+ * of about four frames. */
+int32_t audio_rate_step(void)
+{
+	static int32_t fill_ema = -1;
+
+	if (!enabled || !csnd_ok || fifo == NULL)
+	{
+		fill_ema = -1;
+		return RESAMP_UNITY;
+	}
+
+	const int32_t fill = (int32_t)fifo_used();
+
+	fill_ema = (fill_ema < 0) ? fill : (fill_ema * 63 + fill) / 64;
+
+	return resamp_control_step(fill_ema,
+				   (int32_t)(BLOCK_SAMPLES * PREFILL_BLOCKS));
 }
 
 /* Hand the APU's output to the hardware. `frames` stereo frames at OUT_RATE,
@@ -544,9 +579,16 @@ void audio_log_stats(void)
 	audio_stats st;
 	audio_get_stats(&st);
 
-	log_line("audio: %u blocks, late %u (worst %.2f ms), underruns %u, "
-		 "resyncs %u, dropped %u, queue %u ms, margin %.2f ms",
+	/* Once, not twice: the step carries the smoothed queue level, so asking
+	 * it twice in one expression advances it twice. */
+	const int32_t step = audio_rate_step();
+
+	log_line("audio: %u blocks, late %u (worst %.2f ms), stalled %u, "
+		 "underruns %u, resyncs %u, dropped %u, queue %u ms, "
+		 "margin %.2f ms, rate %u.%03u",
 		 st.blocks, st.late_blocks, st.worst_late_us / 1000.0,
-		 st.underruns, st.resyncs, st.dropped, st.queue_ms,
-		 st.margin_us / 1000.0);
+		 stat_stalled, st.underruns, st.resyncs, st.dropped,
+		 st.queue_ms, st.margin_us / 1000.0,
+		 (unsigned)(step / 65536),
+		 (unsigned)(((step % 65536) * 1000) / 65536));
 }

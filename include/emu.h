@@ -38,16 +38,36 @@ void emu_set_joypad(uint8_t pressed);
 /* Re-run the power-on sequence without reloading the ROM. */
 void emu_reset(void);
 
-/* Run exactly one Game Boy frame (~70224 cycles). Rendering to the top screen
- * only happens while rendering is enabled; disabling it implements frame skip
- * without leaving half-updated buffers behind. */
+/* Run exactly one Game Boy frame (~70224 cycles). Rendering happens while
+ * rendering is enabled; disabling it implements frame skip without leaving
+ * half-updated buffers behind. The finished 160x144 RGB565 picture is left in
+ * emu_frame_buffer(); *presenting* it is the caller's job, and deliberately so:
+ * the scaled transpose into the panel is the last thing a frame does, so that
+ * video_begin_frame() can hand back a framebuffer the panel has really finished
+ * with instead of waiting for one (docs/PORT-NOTES.md section 17). */
 void emu_run_frame(void);
 void emu_set_rendering(bool on);
 
-/* How emu_run_frame() spent its time since the last call, in ARM11 ticks:
- * emulation (Gambatte's CPU+PPU+APU) and the audio decimator, separately.
- * Zero when nothing is loaded. */
-void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks);
+/* The 160x144 RGB565 picture from the last emu_run_frame(), `pitch` pixels per
+ * line, or NULL when the last frame ran with rendering disabled. Owned by the
+ * backend; valid until the next emu_run_frame(). */
+const uint16_t *emu_frame_buffer(void);
+
+/* How emu_run_frame() spent its time since the last call, in ARM11 ticks, in
+ * three parts: emulation (Gambatte's CPU+PPU+APU), the audio decimation and
+ * resampling, and handing the result to CSND (a FIFO copy plus, every other
+ * frame, a service call). They have nothing in common except that they all
+ * happen inside emu_run_frame(), which is why `core` used to hide all three.
+ * Zero when nothing is loaded; any pointer may be NULL. */
+void emu_timing_take(uint64_t *emu_ticks, uint64_t *audio_ticks,
+		     uint64_t *push_ticks);
+
+/* CGB palette conversions since the last call. Gambatte converts a 15-bit
+ * colour every time a CGB palette register is written - a fade rewrites all 64
+ * entries over and over - and with colour correction on that is a gamma round
+ * trip each time. This is the one Game Boy Color cost that a monochrome frame
+ * does not pay, so it is counted rather than guessed at. */
+unsigned emu_palette_take(void);
 
 /* The DMG palette selection changed: re-apply the colours to the core. It is
  * handed the colour values directly, so this has to be pushed rather than

@@ -296,9 +296,6 @@ int main(int argc, char **argv)
 			}
 
 			emu_set_rendering(draw);
-			if (draw)
-				video_begin_frame();
-
 			emu_run_frame();
 
 			/* The core reports bad opcodes and unmapped reads from
@@ -315,10 +312,40 @@ int main(int argc, char **argv)
 			 * transpose. Counted inside the callees, so they are taken
 			 * here too - an emulated frame with no drawing still decodes
 			 * audio, and a skipped frame still runs the emulator. */
-			u64 emu_ticks, audio_ticks, draw_ticks;
+			u64 emu_ticks, audio_ticks, push_ticks, draw_ticks;
+			const unsigned palette = emu_palette_take();
 
-			emu_timing_take(&emu_ticks, &audio_ticks);
+			emu_timing_take(&emu_ticks, &audio_ticks, &push_ticks);
+
+			/* The picture goes to the panel *now*, after the emulation,
+			 * and not before it. video_begin_frame() hands back the
+			 * buffer the panel has finished with; asked at the top of
+			 * the frame, 1 ms after the previous swap was posted, that
+			 * answer is always "not yet", and the wait for it was a
+			 * blocking vblank on every single frame - 4.3 ms, counted
+			 * inside `core`, which is most of the reason this port ran
+			 * at 56 fps when the emulator alone fits in 8.4 ms. */
+			const u64 t_present = svcGetSystemTick();
+
+			if (draw)
+			{
+				video_begin_frame();
+
+				const uint16_t *px = emu_frame_buffer();
+				if (px != NULL)
+					video_draw_frame(px, 160);
+			}
+
 			draw_ticks = video_draw_take();
+			const u64 t_drawn = svcGetSystemTick();
+
+			/* What video_begin_frame() spent handing back a buffer the
+			 * panel had not finished with. It is affordable now because
+			 * the emulation has already run: the wait is the frame's
+			 * slack, not an addition to it - the buffer the panel
+			 * releases at the next vblank is the one this frame needs,
+			 * and by then the frame is ready to use it. */
+			const u64 sync = draw ? (t_drawn - t_present) - draw_ticks : 0;
 
 			if (draw)
 				video_end_frame();
@@ -346,14 +373,12 @@ int main(int argc, char **argv)
 				}
 			}
 
-			/* No vblank wait here: the next iteration's idle time
-			 * absorbs it (video_swap_pending()). Waiting here would
-			 * push the next frame past its slot. `sync` is the
-			 * previous frame's wait, which is what the loop just
-			 * spent, so the average is unchanged. */
+			/* No vblank wait here either: the panel takes the swap
+			 * while the loop emulates the next frame, and the wait
+			 * for it happens in the next frame's present, where it is
+			 * slack. Waiting here as well would only delay the frame
+			 * that is already prepared. */
 			const u64 after_post = svcGetSystemTick();
-			const u64 sync = draw ? video_present_wait() : 0;
-			const u64 after_sync = after_post;
 
 			if (draw)
 			{
@@ -367,21 +392,30 @@ int main(int argc, char **argv)
 				pace_take_counters(&pace, &late, &resyncs);
 
 				const gbabe_frame_cost cost = {
-					.core = after_core - frame_start,
+					/* The work: Gambatte, the decimator, the
+					 * transpose. It used to be timed from the
+					 * start of the block to here, which was the
+					 * same thing until the panel wait landed
+					 * inside it. Now it is the sum, so the
+					 * three parts add up to it by definition. */
+					.core = emu_ticks + audio_ticks +
+						push_ticks + draw_ticks,
 					.emu = emu_ticks,
 					.audio = audio_ticks,
+					.push = push_ticks,
+					.palette = palette,
 					.draw = draw_ticks,
 					.blit = after_swap - after_core,
 					.sync = sync,
 					.post = after_post - after_swap,
 					.wait = waited,
-					.frame = after_sync - (prev_end ? prev_end : frame_start),
+					.frame = after_post - (prev_end ? prev_end : frame_start),
 					.late = late,
 					.resyncs = resyncs,
 				};
 
 				ui_note_frame(&cost);
-				last_frame_end = after_sync;
+				last_frame_end = after_post;
 			}
 
 			/* A frame that missed its deadline is what the player actually
@@ -389,13 +423,15 @@ int main(int argc, char **argv)
 			 * with the split, so a stutter can be traced to one part. */
 			static u64 last_slow_log;
 			const u64 now = svcGetSystemTick();
-			/* The work, not the wall period: the panel wait now
-			 * happens in the next frame's idle time, so what can make
-			 * the loop miss a frame is emulation + blit + the
-			 * once-a-second work. Emulation alone over one panel
-			 * period is the honest definition of a slow frame. */
-			const double frame_ms = (double)(after_post - frame_start) *
-						1000.0 / SYSCLOCK_ARM11;
+			/* The work, not the wall period: the panel wait is not
+			 * work. A frame that syncs to the vblank spends up to a
+			 * whole panel period inside video_begin_frame() and is
+			 * still perfectly on time, so it is subtracted here and
+			 * reported as `sync`. What can make the loop miss a frame
+			 * is emulation + transpose + the once-a-second work. */
+			const double frame_ms =
+				(double)(after_post - frame_start - sync) *
+				1000.0 / SYSCLOCK_ARM11;
 			if (draw && frame_ms > 16.7 &&
 			    now - last_slow_log > SYSCLOCK_ARM11)
 			{

@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define GBABE_VERSION       "0.3.1"
+#define GBABE_VERSION       "0.3.3"
 
 /* Which build this is, stamped in by the Makefile (date + git revision).
  *
@@ -78,9 +78,11 @@ typedef struct
 	float fps;      /* presented frames per second                          */
 	float frame_ms; /* wall time per presented frame (all of it)            */
 	float worst_ms; /* the slowest single frame in the last second           */
-	float core_ms;  /* everything emu_run_frame() did: emu + audio + draw   */
+	float core_ms;  /* emu_run_frame()'s work: emu + audio + push + draw    */
 	float emu_ms;   /* Gambatte's CPU + PPU + APU, nothing else             */
-	float audio_ms; /* the 2 MHz -> 32 kHz decimator                        */
+	float audio_ms; /* the 2 MHz -> 32 kHz decimator and the rate matcher   */
+	float push_ms;  /* the FIFO copy and the csndPlaySound() behind it      */
+	unsigned palette; /* CGB palette conversions per frame                  */
 	float draw_ms;  /* scaled transpose into the framebuffer (64k writes)   */
 	float blit_ms;  /* cache flush + buffer swap                            */
 	float post_ms;  /* once-a-second work done before that wait (free)      */
@@ -100,9 +102,11 @@ extern gbabe_perf g_perf;
  * nine unnamed uint64_ts cannot be read at the call site. */
 typedef struct
 {
-	uint64_t core;   /* emu_run_frame() in full                              */
+	uint64_t core;   /* the work: emu + audio + push + draw                  */
 	uint64_t emu;    /*   of which Gambatte                                 */
 	uint64_t audio;  /*   of which the decimator                            */
+	uint64_t push;   /*   of which handing the samples to CSND              */
+	unsigned palette;/* CGB palette conversions (a Game Boy Color cost)     */
 	uint64_t draw;   /*   of which the scaled transpose                     */
 	uint64_t blit;   /* video_end_frame(): cache flush + swap               */
 	uint64_t sync;   /* waiting for the panel to take the swap              */

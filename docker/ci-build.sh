@@ -71,6 +71,8 @@ make -C tools/host logtest
 make -C tools/host pacetest
 make -C tools/host presenttest
 make -C tools/host drawtest
+make -C tools/host resamptest
+make -C tools/host dectest
 
 # Real-time: two seconds for the stereo run, two for the mono fallback.
 echo "=== sound path keeps CSND fed ==="

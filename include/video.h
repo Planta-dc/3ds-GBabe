@@ -14,7 +14,24 @@ void video_exit(void);
 /* Select the scaling mode (enum video_scale). Cheap, safe to call per frame. */
 void video_set_scale(int mode);
 
-/* Grab the back framebuffer for this frame. */
+/* Grab the back framebuffer for this frame.
+ *
+ * Call this as late as possible - after the emulator has produced the frame and
+ * immediately before video_draw_frame() - not at the top of the frame. The
+ * buffer it hands back is the one the panel has finished with, and "finished
+ * with" only becomes true at the vblank that takes the previous swap, a whole
+ * panel period after that swap was posted. Called at the top of the frame, 1 ms
+ * after the swap, the answer is always "not yet": every frame then blocked on a
+ * vblank on its way into the emulation, 4.3 ms measured and counted inside
+ * `core`, which is most of the reason this port ran at 56 fps when the emulator
+ * alone fits in 8.4 ms (docs/PORT-NOTES.md section 17).
+ *
+ * Called at the end of the frame the wait is free instead: a frame that has to
+ * wait is a frame that arrived early, with its picture already rendered and
+ * nothing left to do but present it. A frame that overran finds the swap long
+ * taken and does not wait at all. Either way the picture is drawn into a buffer
+ * the panel has released, so nothing is ever presented torn.
+ */
 void video_begin_frame(void);
 
 /* Draw a whole 160x144 RGB565 frame, `pitch` pixels per line.
@@ -54,28 +71,26 @@ void video_test_set_band(int rows);
  * be, and because the Game Boy's 59.7275 Hz does not divide 60 Hz it *drifts*
  * down the screen.
  *
- * So the swap and the wait for it are two calls: video_present_sync() does the
- * waiting. Everything the loop does once a frame but not per frame - the status
- * redraw, the log flush, the cartridge save - belongs between them, where the
- * wait absorbs it instead of delaying the next frame.
+ * That is why the present is the *last* thing a frame does (see
+ * video_begin_frame()) and why the picture is emulated into the backend's own
+ * buffer first: the panel needs the time, and the emulator does not need the
+ * panel.
  *
- * If the frame's own work already overran a frame period, video_present_sync()
- * returns 0 and the frame is presented at once. Waiting would take until the
- * *following* vblank and halve the frame rate at exactly the moment the console
- * is struggling - one torn frame is the lesser evil. */
+ * Everything the loop does once a frame but not per frame - the status redraw,
+ * the log flush, the cartridge save - belongs after this call, where the
+ * panel's own vblank absorbs it. */
 void video_end_frame(void);
 
 /* Has the panel taken the swap made by video_end_frame()? Non-blocking.
  *
- * The frame loop polls this in its idle time before the next frame instead of
- * blocking on the vblank straight after the swap: a blocking wait there pushed
- * every frame past its slot (the Game Boy's frame is 16.74 ms and the panel's
- * is 16.67 ms), which cost ~2 fps and made 95 % of frames start late. The wait
- * comes out of the idle budget now. */
+ * video_begin_frame() is the caller that cares, and it asks this before
+ * waiting: after the emulation the answer is usually "yes, long ago". The frame
+ * loop also polls it in the idle time at the top of a frame, which is where the
+ * wait costs nothing at all. */
 bool video_swap_pending(void);
 
 /* Blocking wait for the panel, for the callers outside the frame loop (menus)
- * and as the safety net in video_begin_frame(). Returns the ticks spent (0 if
+ * and as the fallback in video_begin_frame(). Returns the ticks spent (0 if
  * nothing was pending). */
 uint64_t video_present_sync(void);
 
@@ -92,15 +107,18 @@ uint64_t video_present_wait(void);
 
 /* Present-path diagnostics since the previous call, for the log:
  *
- *   skipped       frames presented without waiting, because their own work
- *                 already overran a frame period (they may tear)
+ *   free_waits    frames that reached video_begin_frame() after the panel had
+ *                 already taken the previous swap, so getting the buffer back
+ *                 cost nothing
  *   late_applies  swaps the panel did not take at the next vblank, so a second
  *                 one was waited for
  *
- * Both should be 0 on a console that is keeping up. A non-zero skipped count
- * means the machine is too slow for the scale mode in use, and that is the only
- * way tearing can still appear. */
-void video_sync_take(unsigned *skipped, unsigned *late_applies);
+ * `free_waits` is the healthy direction: it says the frame arrived at the
+ * present with time to spare. `late_applies` should be 0; if it is not, the
+ * swap is being posted too late in the panel's period to make the next vblank,
+ * which costs a whole extra period - and that is a pacing problem, not a
+ * rendering one. */
+void video_sync_take(unsigned *free_waits, unsigned *late_applies);
 
 /* Fill the top screen with black (used by menus). */
 void video_clear(void);

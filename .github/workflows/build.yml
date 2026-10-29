@@ -106,6 +106,20 @@ jobs:
       - name: Scaled transpose
         run: make -C tools/host drawtest
 
+      # The audio rate matcher: the control law and the resampler, as
+      # arithmetic. A dropped or repeated sample per block is a 31 ms periodic
+      # click, and a discontinuity at a block boundary is exactly the artefact
+      # the resampler exists to prevent, so both are checked without a console.
+      - name: Audio rate matcher
+        run: make -C tools/host resamptest
+
+      # The decimator is a speed rewrite of the audio path, so the thing that
+      # makes it acceptable is that its output is identical to the two-stage
+      # version it replaced - compared sample for sample, in every block size
+      # the backend can hand it.
+      - name: Audio decimator
+        run: make -C tools/host dectest
+
       # The libretro core: the same Gambatte behind the libretro API, so the
       # emulation can run under a mature frontend (docs/RETROARCH-3DS.md). It
       # has to draw dmg-acid2 exactly like the 3DS path does, or the
