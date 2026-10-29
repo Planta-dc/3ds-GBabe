@@ -63,6 +63,26 @@ static void frame_gap(unsigned work_us, unsigned gap_us)
 
 static void frame(unsigned work_us) { frame_gap(work_us, 0); }
 
+/* One frame the way main.c now does it: present the frame emulated last slot
+ * first, without ever waiting, then emulate. Returns whether it presented. */
+static bool frame_pipelined(unsigned work_us)
+{
+	static uint16_t picture[144 * 160];
+	bool presented = false;
+
+	if (video_begin_frame_try())
+	{
+		video_draw_frame(picture, 160);
+		video_end_frame();
+		presented = true;
+	}
+
+	if (work_us > 0)
+		svcSleepThread((s64)work_us * 1000);
+
+	return presented;
+}
+
 int main(void)
 {
 	unsigned free_waits, late;
@@ -186,6 +206,46 @@ int main(void)
 	check("nothing tore for the whole run", g_host_tears == 0);
 
 	video_exit();
+	/* --- the non-blocking path the frame loop uses ----------------------- */
+	/*
+	 * The console measured 5.6-6.3 ms of every frame spent waiting in
+	 * video_begin_frame() for a panel that had not let go of the buffer -
+	 * a third of the 16.74 ms budget, and the reason the loop sat at
+	 * 58.8 fps with 9.6 ms of emulation in it. The frame loop now presents
+	 * the *previous* slot's frame at the top of the next one, one Game Boy
+	 * frame (16.74 ms) after the swap was posted, which is longer than a
+	 * panel period: the buffer is free by then and the ask costs nothing.
+	 *
+	 * The property that has to hold, and is checked here: it never blocks.
+	 * If the panel is still busy the frame is dropped, not waited for. */
+	{
+		/* A frame, then the panel takes it - the steady state. */
+		g_host_present_take();
+		const u64 before = svcGetSystemTick();
+		const bool ok = frame_pipelined(0);
+		const u64 took = svcGetSystemTick() - before;
+
+		printf("pipelined present with the panel free: %s in %.2f ms\n",
+		       ok ? "presented" : "DROPPED", (double)took * 1000.0 /
+						       SYSCLOCK_ARM11);
+		check("a free panel presents", ok);
+		check("... and costs no vblank", took < SYSCLOCK_ARM11 / 100);
+	}
+
+	{
+		/* The panel has NOT taken the last swap: the old code blocked
+		 * here for up to a panel period. This one must not. */
+		const u64 before = svcGetSystemTick();
+		const bool ok = frame_pipelined(0);
+		const u64 took = svcGetSystemTick() - before;
+
+		printf("pipelined present with the panel busy: %s in %.2f ms\n",
+		       ok ? "presented" : "dropped", (double)took * 1000.0 /
+						      SYSCLOCK_ARM11);
+		check("a busy panel drops the frame instead of waiting for it", !ok);
+		check("... and the drop costs nothing", took < SYSCLOCK_ARM11 / 100);
+	}
+
 	printf("present: %s\n", failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;
 }

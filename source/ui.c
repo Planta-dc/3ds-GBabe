@@ -51,6 +51,11 @@ static bool      last_scan_ok;
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static bool     hud_due;         /* the status readout needs a redraw */
+/* Slack the loop had in the last frame, and how long a redraw has been
+ * postponed. See ui_idle_work(): the readout must never cost a frame while the
+ * console is busy, and it must not freeze either. */
+static u64      last_idle;
+static unsigned hud_postponed;
 static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
                 hud_sum_wait, hud_sum_frame;
@@ -814,6 +819,7 @@ static void hud_render(void)
 
 void ui_note_frame(const gbabe_frame_cost *c)
 {
+	last_idle = c->wait;
 	hud_late += c->late;
 	hud_resyncs += c->resyncs;
 	hud_frames++;
@@ -989,6 +995,25 @@ void ui_idle_work(void)
 
 		if (!g_cfg.show_hud || !emu_loaded())
 			return;
+
+		/* Rendering the readout is 4.2 ms in one go, measured on the
+		 * console, and it lands inside a frame like any other work: the
+		 * log showed one frame every single second over 25 ms, which is
+		 * a visible hitch, and it was this. Only start it when the last
+		 * frame actually had that much slack; if the console is too busy
+		 * to ever have it, redraw anyway every ten seconds or so rather
+		 * than leaving a readout that looks frozen. Turning the readout
+		 * off is the way to never pay for it at all - the once-a-second
+		 * `perf` line and the `session` summary carry the same numbers. */
+		if (last_idle < SYSCLOCK_ARM11 / 200 /* 5 ms */ &&
+		    hud_postponed < 10)
+		{
+			hud_postponed++;
+			hud_due = true;
+			return;
+		}
+
+		hud_postponed = 0;
 
 		const u64 t0 = svcGetSystemTick();
 		hud_render();

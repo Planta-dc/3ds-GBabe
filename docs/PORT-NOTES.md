@@ -1622,3 +1622,68 @@ computed as `frame - (core + blit + post + wait + sync)` while `frame` already
 contained `sync` and `blit` contained it too, so it printed exactly `-sync` in
 every line of this log (`other=-6.9` next to `sync=6.3`). It is zero now when
 everything is accounted for, which makes it a check instead of noise.
+
+## 24. The panel was gating the emulator, and the HUD was the 31 ms frame
+
+The first log from the build that was on the console, read properly this time.
+The median hid it: `fps` is 58.8 in the steady windows, not 59.8, **65 seconds of
+143 are below 59.5**, `pace_late` counts 58-60 of 60 frames per second as started
+late, and **142 of 143 seconds contain a frame over 25 ms**. So the report -
+"still not full speed, still drops framerate" - was exactly right and the
+average was lying.
+
+Two causes, both visible in the same line.
+
+**1. 6.3 ms of every frame was the CPU waiting for the panel.**
+
+```
+frame 17.0 = core 9.6 + blit 7.5 + post 0.8     (blit: 6.3 of it is `sync`)
+```
+
+`video_begin_frame()` called `video_present_sync()` when the previous swap had
+not been taken, and that is a blocking `gspWaitForVBlank()`. It ran at the end of
+the frame - 10.6 ms after the swap was posted - and the panel takes a swap at the
+*next* vblank, so by construction the answer there is "not yet" and the wait is
+whatever is left of a panel period. The wait was written down as "the frame's
+own slack", and that was true when the frame's work was 13 ms; at 9.6 ms it is
+not slack, it is the loop synchronising to the panel instead of the Game Boy.
+The result is a 17.0 ms frame against a 16.744 ms budget, forever.
+
+The fix is to ask at a point where the answer is yes. A frame is now emulated in
+one slot and presented at the **top of the next**, one Game Boy frame (16.74 ms)
+after its swap was posted - longer than a panel period (16.72 ms) - so the panel
+has released the buffer and `video_begin_frame_try()` costs two registers. It
+never blocks: if the panel is still busy the frame is *dropped* and the emulator
+carries on. `sync` is therefore 0 by construction now, and `skip` counts the
+drops.
+
+One frame of presentation latency is the price, and it is worth it: 6.3 ms of a
+16.7 ms budget is 38 % of the console's time.
+
+**2. The status readout cost one 31 ms frame every second.**
+
+```
+hud: render 4.2 ms + present 13.1 ms in 8 bands (worst band 1.7 ms)   x146
+```
+
+The 13.1 ms present was already spread over eight frames. The **render** was not:
+4.2 ms in one go, once a second, inside a 16.7 ms slot - which is precisely the
+`worst=31.x` that every single second of the log carries. It now only starts
+when the last frame actually had 5 ms of slack, and postpones (up to ten
+seconds) when it did not. A diagnostic must not cost frames; the `perf` line and
+the `session` summary carry the same numbers for free.
+
+Both are why `other` in the old log was a constant `-sync`: the accounting
+subtracted the panel wait twice. With the wait gone the term is zero and `other`
+reads ~0, which makes it a check again.
+
+**What this does and does not buy.** Work per slot is now the present (~2.2 ms:
+transpose + flush + swap) plus the emulation (9.6) plus the once-a-second work:
+about 12.6 ms against 16.744, so the loop has ~4 ms of real slack and can hold
+the schedule instead of being dragged by the panel. It does not make the
+emulator faster - `emu` is untouched - and if the console turns out to be
+work-bound rather than sync-bound the next `core` figure will say so, because
+`blit` no longer contains a wait.
+
+Next, in order, if the log still shows 58.8: **GPU present** (`blit` 2.2 → ~0.1 ms
+and no transposition at all) and **the decimator on core 2** (`emu` 9.6 → ~7.8).
