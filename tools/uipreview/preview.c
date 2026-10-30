@@ -17,10 +17,19 @@
 #include <string.h>
 
 #include "gb3ds.h"
+#include "hud.h"
+#include "hud_test.h"
 #include "ui_gfx.h"
 #include "ui_screens.h"
 
-static void write_ppm(const char *path)
+static void rgb565_bytes(u16 p, unsigned char rgb[3])
+{
+	rgb[0] = (unsigned char)(((p >> 11) & 0x1F) * 255 / 31);
+	rgb[1] = (unsigned char)(((p >> 5) & 0x3F) * 255 / 63);
+	rgb[2] = (unsigned char)((p & 0x1F) * 255 / 31);
+}
+
+static void write_ppm_fb(const char *path, const uint16_t *fb, int w, int h)
 {
 	FILE *f = fopen(path, "wb");
 	if (f == NULL)
@@ -29,18 +38,20 @@ static void write_ppm(const char *path)
 		return;
 	}
 
-	fprintf(f, "P6\n320 240\n255\n");
-	for (int i = 0; i < 320 * 240; i++)
+	fprintf(f, "P6\n%d %d\n255\n", w, h);
+	for (int i = 0; i < w * h; i++)
 	{
-		const u16 p = g_host_bottom_fb[i];
-		const unsigned char rgb[3] = {
-			(unsigned char)(((p >> 11) & 0x1F) * 255 / 31),
-			(unsigned char)(((p >> 5) & 0x3F) * 255 / 63),
-			(unsigned char)((p & 0x1F) * 255 / 31),
-		};
+		unsigned char rgb[3];
+
+		rgb565_bytes(fb[i], rgb);
 		fwrite(rgb, 1, 3, f);
 	}
 	fclose(f);
+}
+
+static void write_ppm(const char *path)
+{
+	write_ppm_fb(path, g_host_bottom_fb, 320, 240);
 }
 
 /* Draw the canvas, push it through the framebuffer path, dump the result. */
@@ -113,78 +124,51 @@ static void show_menu(const char *dir)
 	emit(dir, "menu-game");
 }
 
-/* The stat table is built from the same numbers as the headline, so the
- * preview cannot show a HUD that disagrees with itself. */
-static void fill_stats(ui_hud *h, const char *sound, const char *palette)
+/* The status strip replaced the status readout (hud.h): it is drawn onto the
+ * game framebuffer itself, in place, so the preview renders it the way the
+ * console sees it - a 160x144 game frame with the strip on top - rather than
+ * as a bottom-screen layout. The three scenarios are the ones the readout
+ * had: full speed, a console that cannot keep up, and a loop that is the
+ * problem. */
+static void show_strip(const char *dir)
 {
-	static char core[16], blit[16], wait[16], frame[16];
-	static const char *labels[] = { "core", "blit", "wait", "frame",
-					"sound", "palette" };
+	static uint16_t fb[144 * 160];
 
-	snprintf(core, sizeof core, "%.1f ms", h->core_ms);
-	snprintf(blit, sizeof blit, "%.1f ms", h->blit_ms);
-	snprintf(wait, sizeof wait, "%.1f ms", h->wait_ms);
-	snprintf(frame, sizeof frame, "%.1f ms", h->frame_ms);
+	g_cfg.show_hud = true;
 
-	h->stat_label[0] = labels[0];
-	h->stat_value[0] = core;
-	h->stat_label[1] = labels[1];
-	h->stat_value[1] = blit;
-	h->stat_label[2] = labels[2];
-	h->stat_value[2] = wait;
-	h->stat_label[3] = labels[3];
-	h->stat_value[3] = frame;
-	h->stat_label[4] = labels[4];
-	h->stat_value[4] = sound;
-	h->stat_label[5] = labels[5];
-	h->stat_value[5] = palette;
-	h->n_stats = 6;
-}
-
-static void show_hud(const char *dir)
-{
-	ui_hud h = {
-		.title = "Pokemon Crystal",
-		.sub = "CGB   2 Mbit   MBC5",
-		.fps = 59.7f,
-		.frame_ms = 16.8f,
-		.worst_ms = 17.4f,
-		.core_ms = 11.4f,
-		.blit_ms = 1.9f,
-		.wait_ms = 3.1f,
-		.other_ms = 0.4f,
-		.limit = "full speed",
+	const struct
+	{
+		float fps, frame_ms, worst_ms, core_ms, blit_ms;
+		const char *name;
+	} scenarios[] = {
+		{ 59.7f, 16.8f, 17.4f, 11.4f, 1.9f, "strip" },
+		{ 43.1f, 23.2f, 31.8f, 19.6f, 1.7f, "strip-slow" },
+		{ 51.0f, 19.6f, 28.2f, 9.1f, 1.2f, "strip-overhead" },
 	};
-	fill_stats(&h, "42 ms", "green");
-	scr_hud(&h);
-	emit(dir, "hud");
 
-	/* The case that matters on an Old 3DS: the interpreter cannot keep up. */
-	h.fps = 43.1f;
-	h.frame_ms = 23.2f;
-	h.worst_ms = 31.8f;
-	h.core_ms = 19.6f;
-	h.blit_ms = 1.7f;
-	h.wait_ms = 0.4f;
-	h.other_ms = 1.5f;
-	h.limit = "CPU-bound (interpreter)";
-	fill_stats(&h, "18 ms", "green");
-	scr_hud(&h);
-	emit(dir, "hud-slow");
+	for (size_t i = 0; i < sizeof scenarios / sizeof scenarios[0]; i++)
+	{
+		/* A game frame: the strip only replaces its top 16 rows. */
+		for (int y = 0; y < 144; y++)
+		{
+			for (int x = 0; x < 160; x++)
+				fb[y * 160 + x] = (uint16_t)(0x2143 + (y & 1));
+		}
 
-	/* And the case where the loop itself is the problem, which the old
-	 * readout hid: core and blit are fine but the frames are still late. */
-	h.fps = 51.0f;
-	h.frame_ms = 19.6f;
-	h.worst_ms = 28.2f;
-	h.core_ms = 9.1f;
-	h.blit_ms = 1.2f;
-	h.wait_ms = 0.2f;
-	h.other_ms = 9.1f;
-	h.limit = "overhead (see other)";
-	fill_stats(&h, "off", "auto");
-	scr_hud(&h);
-	emit(dir, "hud-overhead");
+		g_perf.fps = scenarios[i].fps;
+		g_perf.frame_ms = scenarios[i].frame_ms;
+		g_perf.worst_ms = scenarios[i].worst_ms;
+		g_perf.core_ms = scenarios[i].core_ms;
+		g_perf.blit_ms = scenarios[i].blit_ms;
+
+		hud_draw(fb, 160);
+
+		char path[512];
+
+		snprintf(path, sizeof path, "%s/%s.ppm", dir, scenarios[i].name);
+		write_ppm_fb(path, fb, 160, 144);
+		printf("%s\n", path);
+	}
 }
 
 static void show_message(const char *dir)
@@ -203,7 +187,7 @@ int main(int argc, char **argv)
 	gfxInitDefault();
 	show_browser(dir);
 	show_menu(dir);
-	show_hud(dir);
+	show_strip(dir);
 	show_message(dir);
 	return 0;
 }

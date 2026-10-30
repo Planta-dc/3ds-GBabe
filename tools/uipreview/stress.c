@@ -17,11 +17,14 @@
  */
 #include <3ds.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "gb3ds.h"
+#include "hud.h"
+#include "hud_test.h"
 #include "ui_gfx.h"
 #include "ui_screens.h"
 #include "video.h"
@@ -68,32 +71,6 @@ static void all_screens(const char *long_name, const char *long_path)
 	scr_message(long_name, long_name, long_name, long_name);
 	scr_message("", "", "", "");
 	scr_message("t", NULL, NULL, NULL);
-	ui_present();
-
-	ui_hud h;
-	memset(&h, 0, sizeof h);
-	h.title = long_name;
-	h.sub = long_name;
-	h.fps = 0.0f;
-	h.frame_ms = 999.0f;
-	h.core_ms = 500.0f;
-	h.blit_ms = -5.0f;
-	h.wait_ms = 1e9f;
-	for (int i = 0; i < UI_HUD_STATS; i++)
-	{
-		h.stat_label[i] = long_name;
-		h.stat_value[i] = long_name;
-	}
-	h.n_stats = 99; /* more than the array holds */
-	scr_hud(&h);
-	ui_present();
-
-	ui_hud z;
-	memset(&z, 0, sizeof z);
-	z.n_stats = -3;
-	scr_hud(&z);
-	z.n_stats = 6;
-	scr_hud(&z);
 	ui_present();
 
 	ui_row rows[BIG] = {
@@ -509,6 +486,142 @@ static int check_screens(void)
 	return ok;
 }
 
+/* The status strip (hud.c) replaced the status readout, and with it the
+ * bottom-screen layout there was to hostile-test: the strip is drawn onto the
+ * game framebuffer itself, in place, at a fixed 160x144. What is left to
+ * test is the strip's own drawing, and its numbers come from g_perf, where a
+ * console that is not keeping up produces negative, huge, NaN and infinite
+ * values - all of which go through the snprintf formats below, under UBSan.
+ *
+ * The checks, in the strip's own terms:
+ *
+ *   - the guards draw nothing: a NULL framebuffer, and a pitch too small to
+ *     hold one row of it;
+ *   - with the strip on, the bar replaces rows 0..15 of whatever pitch the
+ *     caller handed over (the rows are written at y*pitch, so a pitch the
+ *     caller invents has to be respected) and the text is drawn on top of it;
+ *   - nothing below the strip is touched, at any pitch;
+ *   - with the strip switched off, the frame is left exactly as it was.
+ *
+ * The bar's own colour is the same UI_RGB expression the strip uses, so the
+ * comparison is in the strip's terms rather than a magic number.
+ */
+static int strip_hostile(void)
+{
+	static uint16_t fb[144 * 1000]; /* room for the widest pitch below */
+
+	const uint16_t bar = UI_RGB(14, 17, 23);
+	const uint16_t dead = 0xDEDE;
+
+	int bad = 0;
+
+	g_cfg.show_hud = true;
+
+	/* The guards: no framebuffer, and a pitch too small to hold a row. */
+	memset(fb, 0xDE, sizeof fb);
+	hud_draw(NULL, 160);
+	hud_draw(fb, 159);
+
+	for (int i = 0; i < 144 * 160; i++)
+	{
+		if (fb[i] != dead)
+		{
+			printf("strip guard drew at %d\n", i);
+			bad++;
+		}
+	}
+
+	/* The numbers a console can actually hand over, including the ones the
+	 * formats must survive: negative, huge, NaN and infinite. */
+	const float hostile[][5] = {
+		{ 59.7f, 16.8f, 17.4f, 11.4f, 1.9f },  /* a normal second */
+		{ 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+		{ -1.0f, -5.0f, -0.5f, -100.0f, -1.0f },
+		{ 1e38f, 1e38f, 1e38f, 1e38f, 1e38f },
+		{ -1e38f, -1e38f, -1e38f, -1e38f, -1e38f },
+		{ NAN, NAN, NAN, NAN, NAN },
+		{ INFINITY, INFINITY, INFINITY, INFINITY, INFINITY },
+		{ -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY },
+	};
+
+	const int pitches[] = { 160, 161, 400, 1000 };
+
+	for (size_t h = 0; h < sizeof hostile / sizeof hostile[0]; h++)
+	{
+		for (size_t p = 0; p < sizeof pitches / sizeof pitches[0]; p++)
+		{
+			const int pitch = pitches[p];
+
+			g_perf.fps = hostile[h][0];
+			g_perf.frame_ms = hostile[h][1];
+			g_perf.worst_ms = hostile[h][2];
+			g_perf.core_ms = hostile[h][3];
+			g_perf.blit_ms = hostile[h][4];
+
+			memset(fb, 0xDE, sizeof fb);
+			hud_draw(fb, pitch);
+
+			/* The opaque bar: rows 0..15 start with it. */
+			for (int y = 0; y < 16; y++)
+			{
+				if (fb[(size_t)y * pitch] != bar)
+				{
+					printf("strip row %d not the bar (pitch %d)\n",
+					       y, pitch);
+					bad++;
+				}
+			}
+
+			/* The text is drawn on top of it: at least one pixel of
+			 * the first line differs from the bar. */
+			int text = 0;
+
+			for (int y = 1; y < 9 && !text; y++)
+			{
+				for (int x = 2; x < 60; x++)
+				{
+					if (fb[(size_t)y * pitch + x] != bar)
+					{
+						text = 1;
+						break;
+					}
+				}
+			}
+
+			if (!text)
+			{
+				printf("strip drew no text (pitch %d)\n", pitch);
+				bad++;
+			}
+
+			/* And nothing below the strip was touched. */
+			if (fb[(size_t)16 * pitch] != dead ||
+			    fb[(size_t)143 * pitch + 159] != dead)
+			{
+				printf("strip wrote below its rows (pitch %d)\n",
+				       pitch);
+				bad++;
+			}
+		}
+	}
+
+	/* Switched off: the frame is left exactly as it was. */
+	g_cfg.show_hud = false;
+	memset(fb, 0xDE, sizeof fb);
+	hud_draw(fb, 160);
+
+	for (int i = 0; i < 144 * 160; i++)
+	{
+		if (fb[i] != dead)
+		{
+			printf("strip drew with the strip off, at %d\n", i);
+			bad++;
+		}
+	}
+
+	return bad;
+}
+
 int main(void)
 {
 	char long_name[600];
@@ -543,6 +656,9 @@ int main(void)
 		return 1;
 
 	if (!check_screens())
+		return 1;
+
+	if (!expect("the status strip", strip_hostile()))
 		return 1;
 
 	puts("ui stress: ok");

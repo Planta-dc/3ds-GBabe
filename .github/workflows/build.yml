@@ -165,9 +165,9 @@ jobs:
           GBABE_ASAN_REQUIRED: '1'
         run: make -C tools/uipreview asan
 
-      # Renders browser/menu/HUD/message screens with the same ui_gfx.c and
-      # ui_screens.c the 3DS runs, so a layout that breaks is visible in the
-      # run's artifacts instead of only on hardware.
+      # Renders the browser/menu/message screens and the status strip with the
+      # same ui_gfx.c / ui_screens.c / hud.c the 3DS runs, so a layout that
+      # breaks is visible in the run's artifacts instead of only on hardware.
       - name: Render the bottom-screen layouts
         run: |
           make -C tools/uipreview -j"$(nproc)"
