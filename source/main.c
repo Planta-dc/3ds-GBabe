@@ -411,7 +411,12 @@ int main(int argc, char **argv)
 				 * says which one it is. */
 				u64 t = svcGetSystemTick();
 
-				ui_idle_work();
+				/* The readout is only worth starting if
+				 * the rest of this frame's slot can hold
+				 * it; `pace.next` is when the next frame
+				 * is due, so this is the loop's own
+				 * answer rather than a guess. */
+				ui_idle_work(pace.next > t ? pace.next - t : 0);
 
 				const u64 t_hud = svcGetSystemTick();
 

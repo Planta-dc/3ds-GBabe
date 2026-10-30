@@ -1800,8 +1800,11 @@ it belongs in the same log line: `dec=` was 1.7 ms a frame on the console, the
 box-of-8 it was replacing had a -32 dB aliasing floor, and the 64-tap sinc that
 replaces stage 2 measures **-74.4 dB** at 50 kHz, **-81.5 dB** at 200 kHz, worst
 case **-27.6 dB** (a 20 kHz tone, which lands in the transition band and is the
-honest worst row). It is 1.18-1.24x *faster* than the box chain on the host. The
-console's own `dec=` in the next log is the number that matters.
+honest worst row). The host said it was 1.18-1.24x *faster* than the box chain;
+**that was wrong** - see §27. The console's own `dec=` is the only number that
+matters, and in the 0.3.8 log it was 5.9 ms a frame against 1.7 for the box
+chain, a 4.2 ms regression that took the Game Boy Color build from 59.70 to
+56.40 fps.
 
 Two smaller things, both about being able to read the next log:
 
@@ -1829,3 +1832,91 @@ instead of 2.00, `overlap` down from 1.49 ms by roughly the same factor, `rate` 
 cause is elsewhere; if `overlap` is still 1.5 ms with a small margin, then the
 early time is coming from `cmd_ticks`, which is the round trip of
 `csndPlaySound()` itself.
+
+## 27. What the x86 benchmark was worth: nothing. And what the readout costs
+
+0.3.8 fixed the sound and made the Game Boy Color build slower, in the same
+pass, without anyone having asked for the second half. The user's log says it in
+one line:
+
+```
+0.3.7  CROC 2   fps med 59.70   core 12.7 (emu 8.4 dec 1.7 push 0.5 draw 2.2)
+0.3.8  CROC 2   fps med 56.40   core 16.8 (emu 8.2 dec 5.9 push 0.7 draw 2.1)
+```
+
+`dec` - the decimator and the rate matcher - went from 1.7 ms to 5.9 ms a
+frame, and 16.8 ms does not fit in a 16.74 ms frame. The emulator did not get
+slower; the new lowpass filter did.
+
+The filter was measured before it shipped, on the host, with
+`tools/host/dectest.c`, which reported it **1.18-1.24x faster** than the two box
+filters it replaced. On the console it was **3.5x slower**. That is not a small
+error, it is a sign error, and the reasons are worth writing down because the
+same trap is in this repository for every change:
+
+* the host is x86-64: `gcc -O3` auto-vectorises the box chain into SIMD adds,
+  and does nothing comparable with the FIR. The comparison measured the
+  compiler, not the filter;
+* the host also has an out-of-order core with a 4-wide pipeline and a real L1/L2.
+  The ARM11 is in-order, 268 MHz, no L2, and takes a load-use penalty for every
+  `ldrsh` it feeds to a multiply;
+* the host run was 2 ms of work measured with a clock good to ~1 µs, i.e. the
+  answer was mostly measurement error, and it was reported to three significant
+  figures anyway.
+
+What replaced it as the evidence: **compile the file for the real CPU and count
+the instructions**, and keep using the console's own `dec=` as the final word.
+There is no devkitARM in the sandbox, so the ARM build here is `zig cc -target
+arm-linux-gnueabi -mcpu=arm1136jf_s`, which is enough to see that (a) the
+compiler had *outlined* `convolve()` as a real function, calling it twice per
+output with the state spilled around it, (b) each tap cost seven instructions in
+a loop that was not unrolled, and (c) the two `memmove()`s per output were being
+called as functions. On the old code that is ~1000 instructions per output
+sample; the rewrite is ~260.
+
+The rewrite is two things, both structural rather than clever:
+
+* **symmetry.** The taps are symmetric, so `taps[k] * (h[k] + h[63-k])` does two
+  taps with one multiply. Thirty-two multiplies per output instead of sixty-four
+  (four accumulators, so the multiplies do not serialise on an in-order core).
+* **a doubled ring instead of a shift.** Every stage-1 sample is written at
+  `pos` and at `pos + 64`, so the 64-sample window is always contiguous at
+  `pos + 1` and nothing has to be moved. The old code shifted the history down
+  by eight samples with two `memmove()` calls *per output sample* - 1096 calls a
+  frame, and that alone was probably half of the 4.2 ms.
+
+Expected on the console: `dec` back to ~1.7-2.2 ms and the Game Boy Color build
+back over 59.7 fps. Unverified until a log arrives: the same class of change has
+been wrong before.
+
+### The other half: the readout was dropping the frames
+
+The same log shows `drop` at 5.1 a second (mean) with 6.4 a second in the Game
+Boy Color session - and the 0.3.7 log showed 5-6 a second *even at 59.70 fps*,
+where nothing was over budget. That number had been read for weeks as "the panel
+was too busy" (§25). It was the HUD:
+
+```
+hud: render 4.3 ms + present 13.3 ms in 8 bands (worst band 1.7 ms)
+```
+
+17.6 ms of work every second, deliberately spread over nine frames "so each one
+fits in the wait" - but there is no wait to fit in: in the 0.3.8 Game Boy Color
+log `wait` is 0.0 ms, because the frame loop spends the whole slot emulating.
+Nine frames a second carrying 1.7 ms of extra work, in a loop with 0.85 ms of
+slack at best, is nine presents lost a second. The `hud_due` postponement that
+was supposed to prevent it keyed on `wait`, and `wait` is zero exactly when it
+matters, so it postponed ten frames and then drew anyway.
+
+`ui_idle_work()` now takes the real figure - `pace.next - now`, the loop's own
+deadline - and does one of three things with it: draws the whole readout in one
+frame if the slot has 18 ms left, one band if it has 2 ms, and otherwise waits,
+except that a readout that has been stale for five seconds is drawn anyway. One
+hitch every five seconds (3.5 ms/s of work, one affected frame) is strictly
+better than nine affected frames every second, and the readout still tracks a
+game that is running badly. `hud=` in the log now says which of the three
+happened.
+
+If `drop` does not fall to near zero with this, then §25's panel story was right
+after all and the present path is the thing to attack - `blit` is 2.3-2.4 ms of
+CPU work per frame that the GPU could be doing (the next structural change).

@@ -788,6 +788,14 @@ void audio_get_stats(audio_stats *out)
 				(stat_overlaps ? stat_overlaps : 1) *
 				1000000ull / (u64)SYSCLOCK_ARM11);
 	out->margin_us = (int)(margin * 1000000ull / (u64)SYSCLOCK_ARM11);
+	/* The margin has three parts and only one of them is a choice: the
+	 * round trip of csndPlaySound() (cmd_us), the worst recent scheduling
+	 * lateness (track_us) and the 0.25 ms bias. The console log showed the
+	 * total pinned at the ceiling for a whole session, which could be read
+	 * as "the margin is too greedy" - it was not, or not only. This line
+	 * says which part it is. */
+	out->cmd_us = (int)(cmd_ticks * 1000000ull / (u64)SYSCLOCK_ARM11);
+	out->track_us = (int)(late_max * 1000000ull / (u64)SYSCLOCK_ARM11);
 	out->worst_late_us = (stat_worst_late == 0) ? 0 :
 		(int)(stat_worst_late * 1000000ll / (s64)SYSCLOCK_ARM11);
 	out->queue_ms = audio_queue_ms();
@@ -839,14 +847,15 @@ void audio_log_stats(void)
 	log_line("audio: %u blocks, holes %u (worst %.2f ms), overlap %.2f ms, "
 		 "late %u (worst %.2f ms), stalled %u, "
 		 "underruns %u, resyncs %u, dropped %u, queue %u ms, "
-		 "level %d/%d, produced %.3f, margin %.2f ms, rate %u.%03u",
+		 "level %d/%d, produced %.3f, margin %.2f ms "
+		 "(cmd %.2f + late %.2f), rate %u.%03u",
 		 st.blocks, st.holes, st.worst_hole_ms / 1000.0,
 		 st.overlap_us / 1000.0,
 		 st.late_blocks, st.worst_late_us / 1000.0,
 		 stat_stalled, st.underruns, st.resyncs, st.dropped,
 		 st.queue_ms, st.fill_frames, st.fill_target,
 		 (double)st.rate_meas_q16 / RESAMP_UNITY,
-		 st.margin_us / 1000.0,
+		 st.margin_us / 1000.0, st.cmd_us / 1000.0, st.track_us / 1000.0,
 		 (unsigned)(step / 65536),
 		 (unsigned)(((step % 65536) * 1000) / 65536));
 }

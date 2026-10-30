@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define GBABE_VERSION       "0.3.8"
+#define GBABE_VERSION       "0.3.9"
 
 /* Which build this is, stamped in by the Makefile (date + git revision).
  *
