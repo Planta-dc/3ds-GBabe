@@ -45,6 +45,7 @@ FRONT_C := $(ROOT)/source/video.c $(ROOT)/source/audio.c \
            $(ROOT)/source/resamp.c $(ROOT)/source/decimator.c \
            $(ROOT)/source/palette.c $(ROOT)/source/config.c \
            $(ROOT)/source/log.c \
+           $(ROOT)/source/hud.c \
            $(ROOT)/source/ui.c $(ROOT)/source/ui_gfx.c \
            $(ROOT)/source/ui_screens.c $(ROOT)/source/ui_font.c
 

@@ -2091,3 +2091,56 @@ console build. It now is: `make -C tools/host check` compiles emu_gambatte.cpp a
 C++ with `-fsyntax-only`, which is the check that would have caught this before
 the push. The header uses `__attribute__((aligned(4)))` now, which is spelled the
 same in both languages.
+
+## 30. The status readout was the frame drops, so it moved onto the game frame
+
+§13, §24 and §27 each took a piece out of the bottom-screen status readout:
+banding the present, then moving it into the vblank wait, then keying the
+postponement on the loop's real deadline. The console log after §27 still
+dropped frames, and the user's verdict on 0.3.11 was that the mitigation had
+not bought much. The readout was still the problem, and the diagnosis in
+§27's own last paragraph was right: a full readout is 4.2 ms of drawing plus
+13.3 ms of presenting - 17.6 ms, one whole frame - and even spread over eight
+bands of 2 ms it stole from frames that had no slack to give, nine presents a
+second. No amount of scheduling makes 17.6 ms of work free; the work itself
+had to go.
+
+It has. The readout is no longer a separate overlay:
+
+* **It lives on the game frame.** The strip is drawn *into* the 160x144 RGB565
+  framebuffer the core just rendered (`hud_draw()`, called from the frame loop
+  immediately before `video_draw_frame()`), so it is scaled, transposed and
+  presented by the machinery that is already running - the banded loop in
+  `video.c` - and its marginal cost is the ~3,000 pixel writes of the strip
+  itself, a few hundredths of a millisecond. There is no second present, no
+  second 153 KiB cache flush, and nothing left to schedule into a vblank wait.
+* **It is small because it can be.** Two lines of 5x7 text on an opaque 16-row
+  bar across the top of the image: the frame rate (green at 55+, red below),
+  the frame time and the worst frame of the last second, then the machine
+  (DMG/CGB, ROM size, MBC) and the two costs a frame is made of, `core` and
+  `blit`. What fell away - the title, the frame-budget bar, the six-stat grid,
+  the "what is limiting it" sentence - was all bottom-screen UI furniture; the
+  numbers it carried are still in the once-a-second `perf` log line, which is
+  where a report should quote them anyway. The full split is a log line, not a
+  screen.
+* **It costs what it costs, visibly.** The strip is drawn only on frames that
+  are actually presented (inside the `video_begin_frame_try()` branch), every
+  presented frame, so it can never desynchronise from the image and never
+  leaves a stale bar behind. Its cost lands in `draw`, where the log can show
+  it - a strip that was too expensive would show up as a `draw` above ~1 ms,
+  and the toggle (`hud=off`, the same key as before) turns it off entirely.
+
+The old `ui_idle_work()`, `scr_hud()`, the banded bottom-screen present path
+for the readout and the `hud:` log line are gone; the banded present machinery
+itself stays, because the menus still use it (`ui_present()`). The strip is
+not in the host test path at all - `hud_draw()` is only called from `main.c`'s
+frame loop - which is why `make -C tools/host acid2` still renders
+pixel-identical frames (0 of 23,040 differ) after the change.
+
+What to check on the console, and the reason this is a structural change
+rather than another schedule: with the strip on, the `perf` line should show
+`drop` near zero on the games that dropped before, and `draw` should not move
+(the strip is inside the present that was already happening). If `drop` is
+still nonzero, the next suspects are the ones §27 named - the present path's
+own `blit` cost (2.3-2.4 ms of CPU per frame the GPU could be doing) and the
+decimator - because the readout is now off the list.

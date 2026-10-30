@@ -21,6 +21,7 @@
 #include "audio.h"
 #include "emu.h"
 #include "gb3ds.h"
+#include "hud.h"
 #include "log.h"
 #include "pace.h"
 #include "palette.h"
@@ -42,7 +43,7 @@ static pace_state pace;
 
 /* Per-second totals for the four things the loop does after the emulation, in
  * ticks. Reported as one `once:` line a second: see the block that fills them. */
-static u64 once_hud, once_log, once_audio, once_save, once_since;
+static u64 once_log, once_audio, once_save, once_since;
 static u64 autosave_tick;
 static u64 last_frame_end;
 
@@ -342,7 +343,15 @@ int main(int argc, char **argv)
 						const uint16_t *px = emu_frame_buffer();
 
 						if (px != NULL)
+						{
+							/* The status strip is drawn onto the frame
+							 * itself, before it is presented, so it
+							 * rides the transpose for free and can
+							 * never cost a present (hud.h). */
+							hud_draw((uint16_t *)px, 160);
+
 							video_draw_frame(px, 160);
+						}
 
 						draw_ticks = video_draw_take();
 						video_end_frame();
@@ -393,35 +402,26 @@ int main(int argc, char **argv)
 			/* ---- the window between the swap and the vblank ----------- */
 			/* The frame is handed over; the panel takes it at the next
 			 * vblank, and until then the loop has nothing to do. Work
-			 * that is not per frame - the status readout, the log, the
-			 * cartridge save - goes here, where the wait below absorbs it.
-			 * After the wait there is about 0.1 ms of slack left and any
-			 * of this pushes the next frame past its vblank: that was the
-			 * 33 ms frame in every second of the console log. */
+			 * that is not per frame - the log, the cartridge save -
+			 * goes here, where the wait below absorbs it. After the
+			 * wait there is about 0.1 ms of slack left and any of this
+			 * pushes the next frame past its vblank: that was the 33 ms
+			 * frame in every second of the console log. */
 			if (draw)
 			{
 				/* Timed apart, and reported once a second as `once:`
 				 * in the log. Every second the console's log showed
 				 * a 33 ms frame whose `post` was 20-27 ms while the
-				 * emulation in it was 6-8, and there are four
+				 * emulation in it was 6-8, and there were four
 				 * candidates in this block - the status readout,
 				 * the log's SD write, the audio bookkeeping and the
 				 * cartridge autosave. Guessing which one is how
 				 * this project has wasted time before, so the log
-				 * says which one it is. */
+				 * says which one it is. The status readout is no
+				 * longer one of them: it is drawn on the game frame
+				 * itself now (hud.h), and costs a few hundredths of a
+				 * millisecond instead of a present. */
 				u64 t = svcGetSystemTick();
-
-				/* The readout is only worth starting if
-				 * the rest of this frame's slot can hold
-				 * it; `pace.next` is when the next frame
-				 * is due, so this is the loop's own
-				 * answer rather than a guess. */
-				ui_idle_work(pace.next > t ? pace.next - t : 0);
-
-				const u64 t_hud = svcGetSystemTick();
-
-				once_hud += t_hud - t;
-				t = t_hud;
 
 				log_flush_soft();
 
@@ -456,13 +456,12 @@ int main(int argc, char **argv)
 				{
 					const double ms = 1000.0 / SYSCLOCK_ARM11;
 
-					log_line("once: hud %.1f log %.1f audio %.1f "
-						 "save %.1f ms (worst frame of the "
-						 "second: see above)", (double)once_hud * ms,
-						 (double)once_log * ms,
+					log_line("once: log %.1f audio %.1f save %.1f ms "
+						 "(worst frame of the second: "
+						 "see above)", (double)once_log * ms,
 						 (double)once_audio * ms,
 						 (double)once_save * ms);
-					once_hud = once_log = once_audio = once_save = 0;
+					once_log = once_audio = once_save = 0;
 					once_since = svcGetSystemTick();
 				}
 			}

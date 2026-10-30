@@ -110,7 +110,7 @@ typedef struct
 	uint64_t draw;   /*   of which the scaled transpose                     */
 	uint64_t blit;   /* video_end_frame(): cache flush + swap               */
 	uint64_t sync;   /* waiting for the panel to take the swap              */
-	uint64_t post;   /* ui_idle_work(): once-a-second work, before the wait */
+	uint64_t post;   /* once-a-second work (log, audio, save), before the wait */
 	uint64_t wait;   /* slept, waiting for the next frame to be due         */
 	uint64_t frame;  /* the whole frame, start to start                     */
 	unsigned late;   /* frames that started after their slot                */
