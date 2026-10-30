@@ -83,7 +83,7 @@ check:
 		-o /tmp/gbabe-main.o $(ROOT)/source/main.c
 	@echo "main.c and the UI: type check ok"
 	@# The backend is C++ and includes the same headers as everything else, so
-	@# a header that is legal only in C breaks here and nowhere else. 0.3.11
+	@# a header that is legal only in C breaks here and nowhere else. This one
 	@# shipped `_Alignas` in include/decimator.h and CI caught it in this very
 	@# file, after every other build in this tree had passed - so it is a
 	@# check now, not a hope.
