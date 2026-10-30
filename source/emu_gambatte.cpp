@@ -102,11 +102,10 @@ bool error_pending;
 
 /* Gambatte's native audio rate is 35112 samples per frame, and 35112 / 59.7275
  * = 2097152 Hz exactly. That is 64x the rate the CSND channel is opened at, so
- * the decimation is two stages of 8 by box averaging (see include/decimator.h
- * for why it is two and not one, and for why it is now a single pass).
- *
- * Measured on the console, this was 3.0 ms of a 16.74 ms frame - the largest
- * single item after Gambatte itself, and larger than the picture. */
+ * the decimation is 8 x 2 x 4: two box filters to get the rate down cheaply and
+ * a 32-tap windowed sinc at 131072 Hz to do the anti-alias work where taps cost
+ * least. See include/decimator.h for the shape and docs/PORT-NOTES.md 27/29 for
+ * what the console measured each version at. */
 decimator stage;
 
 /* 35112 stereo samples per frame, in 2064-sample calls (the core's own

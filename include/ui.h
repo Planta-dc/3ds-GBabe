@@ -38,8 +38,9 @@ bool ui_in_game_menu(void);
  * The split it is given (see gbabe_frame_cost) stops where blame starts:
  * `core` for the whole of emu_run_frame(), then `emu`/`audio`/`draw` for the
  * parts of it worth telling apart, `blit` for the flush and swap, `post` for
- * ui_idle_work() - work that costs nothing when it happens before the wait for
- * the vblank, and a dropped frame when it happens after it - and `wait` for
+ * the once-a-second work (the log flush, the audio stats, the cartridge
+ * save) - work that costs nothing when it happens before the wait for the
+ * vblank, and a dropped frame when it happens after it - and `wait` for
  * time asleep. `late`/`resyncs` belong to the caller, which resets them. */
 void ui_note_frame(const gbabe_frame_cost *cost);
 
@@ -50,14 +51,3 @@ void ui_note_frame(const gbabe_frame_cost *cost);
  * session gets its own line. This is what a "how did it run?" report should
  * quote. */
 void ui_log_session(void);
-
-/* Do the once-a-second work that is too expensive for a frame boundary: redraw
- * the bottom-screen status readout if it is due, and present it.
- *
- * `slack` is how many ticks are left in this frame's slot before the next frame
- * is due - the pace schedule's own deadline. The readout costs ~18 ms, so it is
- * only worth starting when the slot can hold it; otherwise it waits, and the
- * stale-after-five-seconds rule in ui_idle_work() keeps the readout from
- * freezing during a long stretch of tight frames. Passing a figure the caller
- * invented defeats the point, so pass the deadline (docs/PORT-NOTES.md §27). */
-void ui_idle_work(uint64_t slack);

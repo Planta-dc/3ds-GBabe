@@ -45,6 +45,7 @@ FRONT_C := $(ROOT)/source/video.c $(ROOT)/source/audio.c \
            $(ROOT)/source/resamp.c $(ROOT)/source/decimator.c \
            $(ROOT)/source/palette.c $(ROOT)/source/config.c \
            $(ROOT)/source/log.c \
+           $(ROOT)/source/hud.c \
            $(ROOT)/source/ui.c $(ROOT)/source/ui_gfx.c \
            $(ROOT)/source/ui_screens.c $(ROOT)/source/ui_font.c
 
@@ -82,6 +83,14 @@ check:
 	$(CC) $(CFLAGS) $(CSTD) $(DEFS) $(INCLUDE) -Dmain=gbabe_main -c \
 		-o /tmp/gbabe-main.o $(ROOT)/source/main.c
 	@echo "main.c and the UI: type check ok"
+	@# The backend is C++ and includes the same headers as everything else, so
+	@# a header that is legal only in C breaks here and nowhere else. This one
+	@# shipped `_Alignas` in include/decimator.h and CI caught it in this very
+	@# file, after every other build in this tree had passed - so it is a
+	@# check now, not a hope.
+	$(CXX) $(CFLAGS) $(CXXSTD) $(DEFS) $(INCLUDE) -fsyntax-only \
+		$(ROOT)/source/emu_gambatte.cpp
+	@echo "emu_gambatte.cpp, as C++: type check ok"
 
 # Palette-independent render regression: the emulated picture is compared with
 # test/dmg-acid2-reference.ppm by shade rank, so no DMG palette can change the

@@ -1986,3 +1986,161 @@ generated from the game's own timing - so a session that slips 30 ms a second
 runs 3 % slow in wall time rather than 3 % fast in bursts. That is the right way
 round for a game: it must not speed up. If the slip turns out to be large, the
 cause is the hitch (see §24's `once:` line), not this rule.
+
+## 29. The filter was 4.9 ms because taps cost instructions, not maths
+
+0.3.10's log, fifty seconds of Croc 2:
+
+```
+fps med 59.25  p10 54.90        core 12.8  (emu 6.3, dec 4.9, draw 1.0)
+blit 1.1  post 0.4  wait 3.5    drops 5.1/s     137/252 windows below 59.5
+```
+
+`dec` - the decimator and the rate matcher - was still 4.9 ms after the rewrite
+in §27, against 1.7 ms for the box chain in 0.3.7. So the rewrite saved 1 ms of
+4.2 and the conclusion has to be the honest one: **the filter, not the code, was
+too expensive.**
+
+### Why, in instructions
+
+The console has no measurement of its own below `dec`, so the file was compiled
+for the real CPU (`zig cc -target arm-linux-gnueabi -mcpu=arm1136jf_s -O3`,
+since there is no devkitARM here) and the instructions counted. The 64-tap
+symmetric convolution came to 423 instructions per output for both ears - 6.6
+per multiply-add, with 110 stack accesses from register pressure. That is the
+shape of the problem: on an ARM11 an FIR is not arithmetic, it is loads and
+branches, and at 548 outputs a frame it adds up to more than the emulator's
+whole audio subsystem used to cost.
+
+Two things follow from that, and neither is a code tweak:
+
+1. **Two MACs per instruction.** ARMv6 has `smlabb`/`smlatt`, which multiply two
+   packed 16-bit halves of a word and accumulate. The taps are stored two to a
+   32-bit word and the history is read the same way, so an output is 64 MACs in
+   32 instructions instead of 64. The alignment this needs is free: the FIR
+   decimates by four, so every window starts on an even sample.
+2. **Half the rate needs half the taps.** The cost of a decimating FIR is
+   (taps x outputs), and there are always 548 outputs per frame. A tap covers
+   more time when the samples are further apart, so a filter at 131072 Hz with
+   32 taps has the same 22 kHz transition band as one at 262144 Hz with 64 -
+   for half the multiplies. Adding a box of 2 costs one add per stage-1 sample.
+
+The two together: 32 taps, packed, at half the rate - 328 instructions in the
+whole `decimator_run` against 548 for the previous version's *convolution
+alone*.
+
+### Better, and cheaper
+
+The measurement that decides this is the alias table in `dectest`, one tone in,
+looking for it where an alias would put it:
+
+| tone in | lands at | 0.3.10 (64 taps @ 262144) | 0.3.11 (32 taps @ 131072) | box chain |
+|---|---|---|---|---|
+| 20 kHz | 12768 Hz | −27.6 dB | **−27.3 dB** | −6.2 dB |
+| 50 kHz | 15536 Hz | −74.4 dB | **−85.3 dB** | −13.6 dB |
+| 200 kHz | 3392 Hz | −81.5 dB | **−91.7 dB** | −35.4 dB |
+| 300 kHz | 5088 Hz | −85.6 dB | **−96.4 dB** | −35.5 dB |
+| 700 kHz | 11872 Hz | −84.7 dB | **−90.4 dB** | −35.7 dB |
+
+Better at every row but the 20 kHz one, where it is the same within a third of a
+dB - that row is the transition band, and it is where the box stage's own fold
+sets the floor. So this is not a quality trade at all: it is a better filter
+that costs half as much, which is worth remembering next time a change looks
+like it has to be a compromise.
+
+The arithmetic for what that should be worth, done by compiling the file twice -
+once as it is and once with the FIR replaced by a two-tap stub, which is the
+only way to separate the filter from the rest of the decimator without the
+console:
+
+| | instructions per output |
+|---|---|
+| the decimator without a real FIR | 208 |
+| with the 32-tap FIR | 328 |
+| **the FIR itself** | **120** |
+| 0.3.10's 64-tap symmetric FIR | 423 |
+
+So the filter's share of the frame falls by 72 %. With the FIR at 3.2 ms in
+0.3.10, that is `dec` 4.9 -> about 2.7 ms and `core` 12.8 -> about 10.6, i.e.
+4 ms of slack in a 16.74 ms frame where there was none. **Expected, not
+measured** - §27 is the reason for that word, and the console's own `dec=` is
+what settles it.
+
+### The other two costs in the same log
+
+* **`hud 17.9 ms/s`, every second.** The readout was being drawn in nine bands
+  of ~2 ms "so each fits in the idle time", and there is no idle time on a Game
+  Boy Color game: `wait` is 0.0 ms in the seconds that matter. Nine frames a
+  second carrying work a frame cannot absorb is nine dropped presents - the
+  `drop` count - so it is now one whole draw, only when the frame's slot can
+  hold 18 ms, and otherwise every two seconds (`HUD_STALE_S`). One dropped
+  present every two seconds against nine a second: 0.5 % against a `drop` rate
+  that was 6 % of all presentations.
+* **`log 44.6 ms`, every fourth second.** One 1.5 KiB write to the SD card costs
+  44 ms - two frames and an audio hiccup, three times in ten seconds. The buffer
+  is 8 KiB now, which is twelve seconds of lines and one hitch instead of three,
+  at the cost of at most twelve seconds of log if the console dies.
+
+One thing this release got wrong and the fix is worth its own paragraph: the
+padding `_Alignas(4)` in include/decimator.h is C, and the header is included by
+source/emu_gambatte.cpp, which is C++. Every build in this tree passed - the
+host `check`, all seven bench tests, the libretro core - and CI failed in the one
+file that compiles the header as C++. The local `check` target compiled main.c
+and nothing else, so the backend had never been syntax-checked outside the
+console build. It now is: `make -C tools/host check` compiles emu_gambatte.cpp as
+C++ with `-fsyntax-only`, which is the check that would have caught this before
+the push. The header uses `__attribute__((aligned(4)))` now, which is spelled the
+same in both languages.
+
+## 30. The status readout was the frame drops, so it moved onto the game frame
+
+§13, §24 and §27 each took a piece out of the bottom-screen status readout:
+banding the present, then moving it into the vblank wait, then keying the
+postponement on the loop's real deadline. The console log after §27 still
+dropped frames, and the user's verdict on 0.3.11 was that the mitigation had
+not bought much. The readout was still the problem, and the diagnosis in
+§27's own last paragraph was right: a full readout is 4.2 ms of drawing plus
+13.3 ms of presenting - 17.6 ms, one whole frame - and even spread over eight
+bands of 2 ms it stole from frames that had no slack to give, nine presents a
+second. No amount of scheduling makes 17.6 ms of work free; the work itself
+had to go.
+
+It has. The readout is no longer a separate overlay:
+
+* **It lives on the game frame.** The strip is drawn *into* the 160x144 RGB565
+  framebuffer the core just rendered (`hud_draw()`, called from the frame loop
+  immediately before `video_draw_frame()`), so it is scaled, transposed and
+  presented by the machinery that is already running - the banded loop in
+  `video.c` - and its marginal cost is the ~3,000 pixel writes of the strip
+  itself, a few hundredths of a millisecond. There is no second present, no
+  second 153 KiB cache flush, and nothing left to schedule into a vblank wait.
+* **It is small because it can be.** Two lines of 5x7 text on an opaque 16-row
+  bar across the top of the image: the frame rate (green at 55+, red below),
+  the frame time and the worst frame of the last second, then the machine
+  (DMG/CGB, ROM size, MBC) and the two costs a frame is made of, `core` and
+  `blit`. What fell away - the title, the frame-budget bar, the six-stat grid,
+  the "what is limiting it" sentence - was all bottom-screen UI furniture; the
+  numbers it carried are still in the once-a-second `perf` log line, which is
+  where a report should quote them anyway. The full split is a log line, not a
+  screen.
+* **It costs what it costs, visibly.** The strip is drawn only on frames that
+  are actually presented (inside the `video_begin_frame_try()` branch), every
+  presented frame, so it can never desynchronise from the image and never
+  leaves a stale bar behind. Its cost lands in `draw`, where the log can show
+  it - a strip that was too expensive would show up as a `draw` above ~1 ms,
+  and the toggle (`hud=off`, the same key as before) turns it off entirely.
+
+The old `ui_idle_work()`, `scr_hud()`, the banded bottom-screen present path
+for the readout and the `hud:` log line are gone; the banded present machinery
+itself stays, because the menus still use it (`ui_present()`). The strip is
+not in the host test path at all - `hud_draw()` is only called from `main.c`'s
+frame loop - which is why `make -C tools/host acid2` still renders
+pixel-identical frames (0 of 23,040 differ) after the change.
+
+What to check on the console, and the reason this is a structural change
+rather than another schedule: with the strip on, the `perf` line should show
+`drop` near zero on the games that dropped before, and `draw` should not move
+(the strip is inside the present that was already happening). If `drop` is
+still nonzero, the next suspects are the ones §27 named - the present path's
+own `blit` cost (2.3-2.4 ms of CPU per frame the GPU could be doing) and the
+decimator - because the readout is now off the list.
