@@ -2066,3 +2066,14 @@ until a log arrives - §27 is the reason for saying "expected" and not "is".
   44 ms - two frames and an audio hiccup, three times in ten seconds. The buffer
   is 8 KiB now, which is twelve seconds of lines and one hitch instead of three,
   at the cost of at most twelve seconds of log if the console dies.
+
+One thing this release got wrong and the fix is worth its own paragraph: the
+padding `_Alignas(4)` in include/decimator.h is C, and the header is included by
+source/emu_gambatte.cpp, which is C++. Every build in this tree passed - the
+host `check`, all seven bench tests, the libretro core - and CI failed in the one
+file that compiles the header as C++. The local `check` target compiled main.c
+and nothing else, so the backend had never been syntax-checked outside the
+console build. It now is: `make -C tools/host check` compiles emu_gambatte.cpp as
+C++ with `-fsyntax-only`, which is the check that would have caught this before
+the push. The header uses `__attribute__((aligned(4)))` now, which is spelled the
+same in both languages.

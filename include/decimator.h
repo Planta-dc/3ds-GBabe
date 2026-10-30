@@ -85,10 +85,12 @@ typedef struct
 	/* The last DECIMATOR_TAPS stage-1 samples, held twice over so that the
 	 * window a convolution reads is always contiguous - see "the doubled
 	 * ring" below. Every sample is written at pos and at pos + TAPS. */
-	/* 4-byte aligned because stage 2 reads them two samples at a time, as
-	 * packed 32-bit words (see source/decimator.c). */
-	_Alignas(4) int16_t hist_l[2 * DECIMATOR_TAPS];
-	_Alignas(4) int16_t hist_r[2 * DECIMATOR_TAPS];
+	/* Aligned to 4 bytes because the FIR reads them two samples at a time,
+	 * as packed 32-bit words (see source/decimator.c). `aligned()` rather
+	 * than `_Alignas` because this header is included from C++ as well, and
+	 * C++ spells it differently. */
+	int16_t hist_l[2 * DECIMATOR_TAPS] __attribute__((aligned(4)));
+	int16_t hist_r[2 * DECIMATOR_TAPS] __attribute__((aligned(4)));
 } decimator;
 
 void decimator_reset(decimator *d);
