@@ -1986,3 +1986,83 @@ generated from the game's own timing - so a session that slips 30 ms a second
 runs 3 % slow in wall time rather than 3 % fast in bursts. That is the right way
 round for a game: it must not speed up. If the slip turns out to be large, the
 cause is the hitch (see §24's `once:` line), not this rule.
+
+## 29. The filter was 4.9 ms because taps cost instructions, not maths
+
+0.3.10's log, fifty seconds of Croc 2:
+
+```
+fps med 59.25  p10 54.90        core 12.8  (emu 6.3, dec 4.9, draw 1.0)
+blit 1.1  post 0.4  wait 3.5    drops 5.1/s     137/252 windows below 59.5
+```
+
+`dec` - the decimator and the rate matcher - was still 4.9 ms after the rewrite
+in §27, against 1.7 ms for the box chain in 0.3.7. So the rewrite saved 1 ms of
+4.2 and the conclusion has to be the honest one: **the filter, not the code, was
+too expensive.**
+
+### Why, in instructions
+
+The console has no measurement of its own below `dec`, so the file was compiled
+for the real CPU (`zig cc -target arm-linux-gnueabi -mcpu=arm1136jf_s -O3`,
+since there is no devkitARM here) and the instructions counted. The 64-tap
+symmetric convolution came to 423 instructions per output for both ears - 6.6
+per multiply-add, with 110 stack accesses from register pressure. That is the
+shape of the problem: on an ARM11 an FIR is not arithmetic, it is loads and
+branches, and at 548 outputs a frame it adds up to more than the emulator's
+whole audio subsystem used to cost.
+
+Two things follow from that, and neither is a code tweak:
+
+1. **Two MACs per instruction.** ARMv6 has `smlabb`/`smlatt`, which multiply two
+   packed 16-bit halves of a word and accumulate. The taps are stored two to a
+   32-bit word and the history is read the same way, so an output is 64 MACs in
+   32 instructions instead of 64. The alignment this needs is free: the FIR
+   decimates by four, so every window starts on an even sample.
+2. **Half the rate needs half the taps.** The cost of a decimating FIR is
+   (taps x outputs), and there are always 548 outputs per frame. A tap covers
+   more time when the samples are further apart, so a filter at 131072 Hz with
+   32 taps has the same 22 kHz transition band as one at 262144 Hz with 64 -
+   for half the multiplies. Adding a box of 2 costs one add per stage-1 sample.
+
+The two together: 32 taps, packed, at half the rate - 328 instructions in the
+whole `decimator_run` against 548 for the previous version's *convolution
+alone*.
+
+### Better, and cheaper
+
+The measurement that decides this is the alias table in `dectest`, one tone in,
+looking for it where an alias would put it:
+
+| tone in | lands at | 0.3.10 (64 taps @ 262144) | 0.3.11 (32 taps @ 131072) | box chain |
+|---|---|---|---|---|
+| 20 kHz | 12768 Hz | −27.6 dB | **−27.3 dB** | −6.2 dB |
+| 50 kHz | 15536 Hz | −74.4 dB | **−85.3 dB** | −13.6 dB |
+| 200 kHz | 3392 Hz | −81.5 dB | **−91.7 dB** | −35.4 dB |
+| 300 kHz | 5088 Hz | −85.6 dB | **−96.4 dB** | −35.5 dB |
+| 700 kHz | 11872 Hz | −84.7 dB | **−90.4 dB** | −35.7 dB |
+
+Better at every row but the 20 kHz one, where it is the same within a third of a
+dB - that row is the transition band, and it is where the box stage's own fold
+sets the floor. So this is not a quality trade at all: it is a better filter
+that costs half as much, which is worth remembering next time a change looks
+like it has to be a compromise.
+
+Expected on the console: `dec` 4.9 -> about 2.5 ms, `core` 12.8 -> about 10.5,
+and that is 4 ms of slack in a 16.74 ms frame where there was none. Unverified
+until a log arrives - §27 is the reason for saying "expected" and not "is".
+
+### The other two costs in the same log
+
+* **`hud 17.9 ms/s`, every second.** The readout was being drawn in nine bands
+  of ~2 ms "so each fits in the idle time", and there is no idle time on a Game
+  Boy Color game: `wait` is 0.0 ms in the seconds that matter. Nine frames a
+  second carrying work a frame cannot absorb is nine dropped presents - the
+  `drop` count - so it is now one whole draw, only when the frame's slot can
+  hold 18 ms, and otherwise every two seconds (`HUD_STALE_S`). One dropped
+  present every two seconds against nine a second: 0.5 % against a `drop` rate
+  that was 6 % of all presentations.
+* **`log 44.6 ms`, every fourth second.** One 1.5 KiB write to the SD card costs
+  44 ms - two frames and an audio hiccup, three times in ten seconds. The buffer
+  is 8 KiB now, which is twelve seconds of lines and one hitch instead of three,
+  at the cost of at most twelve seconds of log if the console dies.

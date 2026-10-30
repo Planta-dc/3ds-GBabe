@@ -51,6 +51,13 @@ static bool      last_scan_ok;
 static unsigned hud_frames;
 static u64      hud_last_tick;
 static bool     hud_due;         /* the status readout needs a redraw */
+
+/* How stale the bottom-screen readout is allowed to get when the frame loop
+ * cannot spare 18 ms for it. Two seconds is a compromise the console forced:
+ * every redraw costs one dropped presentation, so a one-second readout is a
+ * 1 % drop rate for a number nobody is reading that closely, and the log has a
+ * `perf` line every second regardless. */
+#define HUD_STALE_S 2
 /* Slack the loop had in the last frame, and how long a redraw has been
  * postponed. See ui_idle_work(): the readout must never cost a frame while the
  * console is busy, and it must not freeze either. */
@@ -1012,10 +1019,9 @@ void ui_log_session(void)
  * previous buffer until the swap at the end. */
 void ui_idle_work(uint64_t slack)
 {
-	static bool presenting;
 	static u64 render_ticks, band_ticks, worst_band, drawn;
 	static unsigned bands, skipped;
-	bool whole = false;
+	static bool presenting;
 
 	if (!presenting && hud_due)
 	{
@@ -1024,52 +1030,41 @@ void ui_idle_work(uint64_t slack)
 		if (!g_cfg.show_hud || !emu_loaded())
 			return;
 
-		/* Rendering the readout is 4.2 ms in one go and presenting it is
-		 * another 13.3, both measured on the console - 17.6 ms of work in
-		 * a loop that has 0.85 ms of slack in a good second. It used to
-		 * be spread over nine frames of ~2 ms, which sounded kind and was
-		 * not: a frame budget with no slack in it loses a present to any
-		 * extra millisecond, so the readout cost nine late frames a
-		 * second. The console log showed it as 6.4 dropped presents a
-		 * second, against the nine frames a second that carried HUD work.
+		/* The readout costs 17.6 ms to draw and present - 4.3 ms of
+		 * rendering and 13.3 ms of transposing it into the bottom
+		 * screen - and the loop has 0.85 ms of slack in a good second.
+		 * It cannot be made to fit: it is a twentieth of the console's
+		 * whole capacity, appearing in the middle of a frame that has
+		 * nothing left.
 		 *
-		 * So the cost is confined to as few frames as possible instead,
-		 * and only taken when the loop can afford it. `slack` is what is
-		 * left of this frame's slot - the `wait` figure in the log, and
-		 * the pace schedule's own deadline, not a guess. Three cases:
+		 * It used to be spread over nine frames of ~2 ms "so each fits",
+		 * which was wrong for a reason worth writing down: a frame either
+		 * meets its deadline or it does not, so nine frames each 2 ms
+		 * over are nine dropped presents - and `drop` in the console log
+		 * was 5 a second at 59.70 fps, where nothing else was over
+		 * budget.
 		 *
-		 *   slack >= 18 ms   draw the whole thing now, one glassy frame;
-		 *   slack >= 2 ms    one band, as before, the rest next frame;
-		 *   otherwise        postpone - unless the readout has been stale
-		 *                    for five seconds, because one hitch every
-		 *                    five seconds beats a frozen readout, and both
-		 *                    beat nine late frames every second.
-		 *
-		 * The numbers are in the log either way: `perf` once a second,
-		 * `session` when the game goes away. `hud=off` is the way to
-		 * never pay for it at all. */
+		 * So it is one whole draw, as rarely as the readout allows:
+		 * immediately if this frame's slot can hold it (never, in
+		 * practice, on a Game Boy Color game), otherwise every
+		 * HUD_STALE - one dropped present every two seconds, one
+		 * per cent of a per cent of the frames, instead of nine a
+		 * second. The `perf` line in the log is once a second either
+		 * way, and `hud=off` costs nothing at all. */
 		const u64 now = svcGetSystemTick();
-		const bool stale = drawn == 0 || now - drawn > SYSCLOCK_ARM11 * 5;
-		const bool tight = slack < SYSCLOCK_ARM11 / 500 /* 2 ms */;
+		const bool stale = drawn == 0 ||
+				   now - drawn > SYSCLOCK_ARM11 * HUD_STALE_S;
 
-		whole = slack >= SYSCLOCK_ARM11 * 18 / 1000;
-
-		if (!whole && tight)
+		if (slack < SYSCLOCK_ARM11 * 18 / 1000 && !stale)
 		{
-			if (!stale)
-			{
-				skipped++;
-				hud_due = true;
-				return;
-			}
-
-			whole = true; /* stale and no slack: take the hitch */
+			skipped++;
+			hud_due = true;
+			return;
 		}
 
 		if (skipped != 0)
 		{
-			log_line("hud: drawn after %u postponed frames, %s",
-				 skipped, whole ? "in one go" : "one band a frame");
+			log_line("hud: drawn after %u postponed frames", skipped);
 			skipped = 0;
 		}
 
@@ -1090,9 +1085,11 @@ void ui_idle_work(uint64_t slack)
 	if (!presenting)
 		return;
 
-	/* `whole` is only true on the frame that starts the redraw: a banded
-	 * redraw does one band per frame and comes back for the next. */
-	do {
+	/* One band per call until the screen is done. The caller comes back
+	 * once a frame, so a whole draw lands in the frame that started it:
+	 * `slack` has already decided that this frame can afford it. */
+	for (;;)
+	{
 		const u64 t0 = svcGetSystemTick();
 		const bool done = ui_present_band(UI_W / 8);
 		const u64 took = svcGetSystemTick() - t0;
@@ -1102,9 +1099,9 @@ void ui_idle_work(uint64_t slack)
 			worst_band = took;
 		bands++;
 
-		if (!done)
-			return;
-	} while (whole);
+		if (done)
+			break;
+	}
 
 	ui_present_swap();
 	presenting = false;

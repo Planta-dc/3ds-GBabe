@@ -16,7 +16,7 @@
 
 /* Plenty for the ~40 lines a second this writes, small enough to stay in the
  * L1 for its whole life. */
-#define LOG_BUF 2048
+#define LOG_BUF 8192
 
 /* Stop growing here: the first minutes are the interesting ones, and an
  * unbounded log on a 2 GB card is an SD card filling up silently. */
@@ -158,7 +158,15 @@ void log_flush(void)
  * and a second of lines is ~500 bytes, so writing it every second spends a
  * hitch to move a quarter of a buffer: wait until it is three quarters full
  * (four seconds of lines) or has been waiting five seconds, and the writes go
- * down four-fold at no cost but how much a crash could lose. */
+ * down four-fold at no cost but how much a crash could lose.
+ *
+ * Both were then measured, and both were too small: the console log shows
+ * `once: ... log 44.6 ms` every fourth second - one SD write of 1.5 KiB costs
+ * 44 ms, which is two dropped frames and an audio hiccup, three times in ten
+ * seconds. So the buffer is 8 KiB and the write happens when it is three
+ * quarters full: twelve seconds of lines, one hitch, and at most twelve
+ * seconds of log lost to a crash - which is a fine trade for a diagnostic
+ * file whose whole purpose is to be read after the fact. */
 void log_flush_soft(void)
 {
 	const u64 now = svcGetSystemTick();
