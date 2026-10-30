@@ -2048,9 +2048,23 @@ sets the floor. So this is not a quality trade at all: it is a better filter
 that costs half as much, which is worth remembering next time a change looks
 like it has to be a compromise.
 
-Expected on the console: `dec` 4.9 -> about 2.5 ms, `core` 12.8 -> about 10.5,
-and that is 4 ms of slack in a 16.74 ms frame where there was none. Unverified
-until a log arrives - §27 is the reason for saying "expected" and not "is".
+The arithmetic for what that should be worth, done by compiling the file twice -
+once as it is and once with the FIR replaced by a two-tap stub, which is the
+only way to separate the filter from the rest of the decimator without the
+console:
+
+| | instructions per output |
+|---|---|
+| the decimator without a real FIR | 208 |
+| with the 32-tap FIR | 328 |
+| **the FIR itself** | **120** |
+| 0.3.10's 64-tap symmetric FIR | 423 |
+
+So the filter's share of the frame falls by 72 %. With the FIR at 3.2 ms in
+0.3.10, that is `dec` 4.9 -> about 2.7 ms and `core` 12.8 -> about 10.6, i.e.
+4 ms of slack in a 16.74 ms frame where there was none. **Expected, not
+measured** - §27 is the reason for that word, and the console's own `dec=` is
+what settles it.
 
 ### The other two costs in the same log
 
