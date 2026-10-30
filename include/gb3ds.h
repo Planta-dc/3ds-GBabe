@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define GBABE_VERSION       "0.3.9"
+#define GBABE_VERSION       "0.3.10"
 
 /* Which build this is, stamped in by the Makefile (date + git revision).
  *
@@ -114,7 +114,8 @@ typedef struct
 	uint64_t wait;   /* slept, waiting for the next frame to be due         */
 	uint64_t frame;  /* the whole frame, start to start                     */
 	unsigned late;   /* frames that started after their slot                */
-	unsigned resyncs;/* backlogs thrown away                                */
+	unsigned resyncs;/* slots given up instead of being replayed            */
+	uint64_t slip;   /* ticks of emulated time those slots cost             */
 	/* Frames whose picture was not shown: the panel still held the buffer
 	 * when the loop offered the swap (video_begin_frame_try() said no), so
 	 * the previous picture stayed up for one more panel period. It costs no

@@ -483,7 +483,8 @@ int main(int argc, char **argv)
 						    frame_start > prev_end) ?
 						   frame_start - prev_end : 0;
 				unsigned late, resyncs;
-				pace_take_counters(&pace, &late, &resyncs);
+				u64 slip;
+				pace_take_counters(&pace, &late, &resyncs, &slip);
 
 				/* The presents this window had to drop, as a
 				 * window figure: frame_skipped is the running
@@ -526,6 +527,7 @@ int main(int argc, char **argv)
 					.frame = after_post - (prev_end ? prev_end : frame_start),
 					.late = late,
 					.resyncs = resyncs,
+					.slip = slip,
 					.dropped = dropped,
 				};
 

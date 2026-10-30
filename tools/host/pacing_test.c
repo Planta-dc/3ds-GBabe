@@ -108,8 +108,9 @@ static void test_early_is_not_behind(void)
 	      p.next == 5000 + FRAME);
 }
 
-/* One frame overruns by 12 ms. The next frame is still due at the slot it
- * always was: the loop pulls back on time instead of carrying the delay. */
+/* One frame overruns by 12 ms - more than the slip tolerance - so the slots it
+ * missed are given up rather than replayed: the next frame is a whole period
+ * from now, not from the slot that has already gone by. */
 static void test_one_late_frame(void)
 {
 	pace_state p = { 0 };
@@ -123,36 +124,83 @@ static void test_one_late_frame(void)
 		printf("  !! second frame not due\n");
 
 	check("a 12 ms late frame is counted", p.late == 1);
-	check("a 12 ms late frame is not a resync", p.resyncs == 0);
-	check("the next slot is unmoved by one late frame",
-	      p.next == slot + FRAME);
+	check("a 12 ms late frame gives up its slot", p.resyncs == 1);
+	check("what it gave up is measured", p.slip == 12 * MS);
+	check("the next frame is a whole period from when this one started",
+	      p.next == slot + 12 * MS + FRAME);
+	check("no frame starts less than a period after the previous one",
+	      p.next - (slot + 12 * MS) == FRAME);
 }
 
-/* Jitter: every frame is woken 3 ms after its slot. That is not the machine
- * being slow, and the schedule must not drift. */
-static void test_jitter(void)
+/* Sub-tolerance lateness is absorbed: the schedule stays absolute, so a loop
+ * that always wakes 0.4 ms late runs at exactly the intended rate and never
+ * drifts. */
+static void test_small_jitter_is_absorbed(void)
 {
 	pace_state p = { 0 };
-	const uint64_t t0 = 12345;
-	uint64_t framed = 0;
-	uint64_t slot = t0;
+	const uint64_t t0 = 5000;
+	uint64_t now = t0;
 
 	pace_restart(&p);
 	p.next = t0;
 
-	for (int i = 0; i < 3000; i++)
+	for (int i = 0; i < 2000; i++)
 	{
-		if (!pace_due(&p, slot + 3 * MS, FRAME))
+		now += pace_wait(&p, now);
+		now += MS / 2; /* the sleep overshoot */
+		if (!pace_due(&p, now, FRAME))
 			break;
-		framed++;
-		slot += FRAME;
 	}
 
-	check("3000 jittered frames all ran", framed == 3000);
-	check("3 ms of jitter is not counted as late", p.late == 0);
-	check("jitter never resyncs", p.resyncs == 0);
-	check("jitter does not accumulate into the schedule",
-	      p.next == t0 + 3000 * FRAME);
+	check("sub-tolerance jitter gives up nothing", p.slip == 0);
+	check("sub-tolerance jitter never re-anchors", p.resyncs == 0);
+	check("sub-tolerance jitter does not accumulate",
+	      p.next == t0 + 2000 * FRAME);
+}
+
+/* Wakes that are consistently later than the slip tolerance. Those are not
+ * hitches - there is nothing to catch up on, the loop is simply late every
+ * time - and the rule re-anchors, which costs exactly the lateness per frame.
+ *
+ * That is a real cost and it is the reason the tolerance is 2 ms and not zero:
+ * the loop sleeps to `slot - frame/8` and then polls, so its lateness on the
+ * console is a few hundred microseconds (see `wait` in the log). Two
+ * milliseconds is ten times that, while still being small enough that catching
+ * up after a hitch is never visible. What this test pins down is the direction
+ * of the error: a late-waking loop runs *slower* than the Game Boy, never
+ * faster. */
+static void test_late_wakes_never_run_fast(void)
+{
+	pace_state p = { 0 };
+	const uint64_t t0 = 12345;
+	uint64_t now = t0, first = 0;
+	unsigned framed = 0;
+
+	pace_restart(&p);
+	p.next = t0;
+
+	for (unsigned i = 0; i < 3000; i++)
+	{
+		now += pace_wait(&p, now);
+		now += 3 * MS; /* woken late, every time */
+		if (!pace_due(&p, now, FRAME))
+			break;
+		if (first == 0)
+			first = now;
+		framed++;
+	}
+
+	/* 3000 starts are 2999 periods, not 3000 - measuring from the first
+	 * start is the only way this number means anything. */
+	const double seconds = (double)(now - first) / (double)SYSCLOCK_ARM11;
+	const double hz = (double)(framed - 1) / seconds;
+
+	printf("3000 frames woken 3 ms late: %.4f Hz\n", hz);
+	check("a late-waking loop still runs every frame", framed == 3000);
+	check("a late-waking loop runs at the intended rate, not below it",
+	      hz > 59.71 && hz <= 59.73);
+	check("only the first wake is a hitch once it is the norm",
+	      p.resyncs == 1);
 }
 
 /* The lid was shut for a fifth of a second: one resync, one new schedule, and
@@ -177,25 +225,79 @@ static void test_stall(void)
 	check("the cadence returns after a resync", p.resyncs == 1);
 }
 
-/* Three frames behind is still catchable - the loop can run them back to back
- * and be on time again. Four is not: catching up would mean four frames of
- * emulation in the time of one. Check both sides of that boundary exactly. */
-static void test_resync_boundary(void)
+/* The point of PACE_SLIP_TICKS: after a hitch the emulator must never run
+ * faster than the Game Boy to catch up.
+ *
+ * The old rule let it run up to three frames back to back, and the console log
+ * shows what that looks like from outside - whole seconds at 61.7 and 63.3 fps,
+ * right after the 24 ms and 56 ms frames that caused them. A game that
+ * occasionally plays at 103 % is a game that speeds up, which is what the user
+ * reported.
+ *
+ * This drives the real loop shape - sleep to the slot, run the frame's work,
+ * come back - and asserts two things: no two frames ever start closer together
+ * than a frame period (minus the 2 ms tolerance), and no one-second window
+ * contains more frames than 59.7275 Hz allows. */
+static void test_no_catch_up(void)
 {
 	pace_state p = { 0 };
+	const uint64_t t0 = 1000;
+	const uint64_t work = 12 * MS;      /* a comfortable frame */
+	const uint64_t hitch = 33 * MS;     /* the once-a-second SD write */
+	uint64_t now = t0;
+	static uint64_t start[400];
+	unsigned n = 0;
+	signed long long closest = (signed long long)FRAME;
 
 	pace_restart(&p);
-	pace_due(&p, 0, FRAME); /* the schedule is now at 1F */
 
-	pace_state three = p;
-	pace_due(&three, 4 * FRAME, FRAME); /* 3F after the slot */
-	check("three frames behind does not resync", three.resyncs == 0);
-	check("three frames behind is late", three.late == 1);
+	for (unsigned i = 0; i < 400; i++)
+	{
+		now += pace_wait(&p, now);
+		if (!pace_due(&p, now, FRAME))
+			break;
 
-	pace_state four = p;
-	pace_due(&four, 5 * FRAME, FRAME); /* 4F after the slot */
-	check("four frames behind resyncs", four.resyncs == 1);
-	check("the resync keeps the frame that was due", four.late == 1);
+		if (i > 0 && n > 0)
+		{
+			const signed long long gap =
+				(signed long long)(now - start[n - 1]);
+			if (gap < closest)
+				closest = gap;
+		}
+
+		start[n++] = now;
+		now += work + ((i == 30 || i == 31 || i == 32) ? hitch : 0);
+	}
+
+	check("a hitch does not make the emulator run fast",
+	      closest >= (signed long long)(FRAME - PACE_SLIP_TICKS(FRAME)));
+
+	/* Any one-second window: 400 frames at 12 ms of work plus three hitches
+	 * is 7.1 s, so there is room for several windows to check. */
+	unsigned worst_window = 0;
+
+	for (unsigned a = 0; a < n; a++)
+	{
+		unsigned c = 0;
+
+		for (unsigned b = a; b < n && start[b] - start[a] < SYSCLOCK_ARM11;
+		     b++)
+			c++;
+
+		if (c > worst_window)
+			worst_window = c;
+	}
+
+	printf("busiest second after the hitches: %u frames "
+	       "(the Game Boy allows 59)\n", worst_window);
+	check("no second contains more frames than the Game Boy has",
+	      worst_window <= 60);
+
+	printf("closest two frame starts: %.3f ms (a frame is %.3f ms)\n",
+	       (double)closest * 1000.0 / (double)SYSCLOCK_ARM11,
+	       (double)FRAME * 1000.0 / (double)SYSCLOCK_ARM11);
+
+	check("the hitches were given up, not replayed", p.slip > 0);
 }
 
 /* A long run: a million frames must not drift, and must not accumulate a
@@ -219,17 +321,20 @@ static void test_counters(void)
 {
 	pace_state p = { 0 };
 	unsigned late = 0, resyncs = 0;
+	uint64_t slip = 0;
 
 	pace_restart(&p);
 	pace_due(&p, 0, FRAME);
 	pace_due(&p, FRAME + 10 * MS, FRAME); /* one late */
 
-	pace_take_counters(&p, &late, &resyncs);
+	pace_take_counters(&p, &late, &resyncs, &slip);
 	check("a late frame reaches the counter", late == 1);
-	check("no resync reaches the counter", resyncs == 0);
+	check("a late frame is a slot given up", resyncs == 1);
+	check("the time it cost reaches the counter", slip == 10 * MS);
 
-	pace_take_counters(&p, &late, &resyncs);
-	check("the counters are cleared when read", late == 0 && resyncs == 0);
+	pace_take_counters(&p, &late, &resyncs, &slip);
+	check("the counters are cleared when read",
+	      late == 0 && resyncs == 0 && slip == 0);
 }
 
 /* Not pacing, but it lives in the same window of ticks and it was wrong for two
@@ -317,9 +422,10 @@ int main(void)
 	test_one_minute();
 	test_early_is_not_behind();
 	test_one_late_frame();
-	test_jitter();
+	test_small_jitter_is_absorbed();
+	test_late_wakes_never_run_fast();
 	test_stall();
-	test_resync_boundary();
+	test_no_catch_up();
 	test_long_run();
 	test_counters();
 	test_autosave_interval();

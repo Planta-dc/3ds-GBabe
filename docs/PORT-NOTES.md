@@ -1920,3 +1920,69 @@ happened.
 If `drop` does not fall to near zero with this, then §25's panel story was right
 after all and the present path is the thing to attack - `blit` is 2.3-2.4 ms of
 CPU work per frame that the GPU could be doing (the next structural change).
+
+## 28. "It sometimes runs too fast": the loop was catching up
+
+The console log has seconds at 61.7 and 63.3 fps, always right after a long
+frame:
+
+```
+t=  8.16  fps=59.9   worst=23.4   wait=2.5  pace_late=0
+t= 11.20  fps=61.5   worst=24.0   wait=2.2  pace_late=6
+t= 21.24  fps=61.7   worst=24.3   wait=2.6  pace_late=6
+t= 85.55  fps=59.9   worst=56.4   wait=4.1  pace_late=7  drop=29
+```
+
+The Game Boy runs at 59.7275 frames a second. A whole second at 61.7 is not
+measurement noise, it is the emulator playing the game *faster* than the Game
+Boy did - which is what "it speeds up sometimes" is.
+
+The cause was in `pace_due()`, and it was deliberate. The schedule is absolute:
+frame N is due at `start + N x 16.744 ms`, so a frame that wakes late does not
+push every later frame along. The cost of that is that a frame which overran
+leaves the *next* frame's slot in the past - and the loop then starts it
+immediately, and the one after that, until it has caught up. That was capped at
+three frames of catch-up (`PACE_RESYNC_FRAMES`), so a 33 ms hitch was replayed
+as two frames back to back at ~80 fps, and the second in which that happened
+counted 61-63 frames. The audio was never wrong - it is generated from the
+game's own clock - but the game itself ran at up to 103 % for a moment, and
+that is visible.
+
+A hitch is now **given up, not replayed**:
+
+* a frame that starts later than usual by more than an eighth of a frame
+  (2.09 ms) is a hitch. The slots it missed are not emulated at all; the next
+  frame is scheduled a whole period from *now*, so the loop can never run
+  faster than the Game Boy;
+* "later than usual" is measured against `late_ref`, a slow average of how late
+  frames actually start on this console. That distinction is the whole design:
+  a loop that wakes 0.4 ms after every deadline is on time, and re-anchoring on
+  that would cost 0.4 ms a frame - 2.4 % slow, for ever. Steady lateness costs
+  nothing, and only a jump above it is a hitch;
+* the cost is counted: `slip=` in `perf` is the emulated time given up in that
+  second, and the `session:` line ends with `N slots given up (D ms not
+  replayed)`. Zero means the session never missed a slot; 33 ms a second means
+  the once-a-second hitch is still there and the game clock is 3.3 % behind the
+  wall clock - slower, never faster.
+
+Verified on the host (`make -C tools/host pacetest`), because this is exactly
+the kind of arithmetic that cannot be provoked on demand on a console:
+
+| case | result |
+|---|---|
+| a minute of on-time frames | 59.7275 Hz, no latency, no slips |
+| 0.5 ms late every frame (a slow wake) | rate exact, 0 slips - steady lateness is free |
+| 3 ms late every frame | 59.724 Hz, 1 slip: the first wake re-anchors, then it is the norm |
+| three 33 ms hitches among 400 frames | closest two starts 16.743 ms, busiest second 60 frames - no catch-up |
+
+The last row is the point: before, the hitches were replayed at up to 80 fps
+inside a second and that second counted 61-63 frames; now the second still
+counts 59-60 and the game simply resumes.
+
+One consequence to be honest about: the emulation's clock now lags the wall
+clock by the total slip. Nothing else is looking at the wall clock - the panel
+is double buffered and presented when a frame is ready, and the sound is
+generated from the game's own timing - so a session that slips 30 ms a second
+runs 3 % slow in wall time rather than 3 % fast in bursts. That is the right way
+round for a game: it must not speed up. If the slip turns out to be large, the
+cause is the hitch (see §24's `once:` line), not this rule.

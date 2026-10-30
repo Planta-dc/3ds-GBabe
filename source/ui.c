@@ -69,13 +69,16 @@ static unsigned sess_windows;
 static unsigned sess_frames;
 static unsigned sess_late;
 static unsigned sess_dropped;
+static unsigned sess_resyncs;
+static unsigned sess_slip_ms;
 static double   sess_fps_sum;
 static double   sess_fps_min;   /* the worst whole-second average */
 static u64      sess_frame_ticks, sess_core_ticks, sess_emu_ticks;
 static u64      sess_palette;
 static u64      sess_worst;     /* slowest frame of the session, in ticks */
 static unsigned hud_late;    /* frames that started after their slot      */
-static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
+static unsigned hud_resyncs; /* slots given up instead of replayed        */
+static unsigned hud_slip_ms; /* how much emulated time they cost, ms      */
 static unsigned hud_dropped; /* presents the panel was too busy for       */
 
 /* ------------------------------------------------------------------------- */
@@ -821,6 +824,7 @@ void ui_note_frame(const gbabe_frame_cost *c)
 {
 	hud_late += c->late;
 	hud_resyncs += c->resyncs;
+	hud_slip_ms += (unsigned)(c->slip * 1000ull / (u64)SYSCLOCK_ARM11);
 	hud_dropped += c->dropped;
 	hud_frames++;
 	hud_sum_core += c->core;
@@ -891,7 +895,8 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f emu=%.1f "
 		 "dec=%.1f push=%.1f draw=%.1f blit=%.1f "
 		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums pal=%u "
-		 "sync_free=%u sync_late=%u pace_late=%u resync=%u drop=%u", g_perf.fps,
+		 "sync_free=%u sync_late=%u pace_late=%u resync=%u slip=%ums "
+		 "drop=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms,
 		 g_perf.emu_ms, g_perf.audio_ms, g_perf.push_ms,
 		 g_perf.draw_ms, g_perf.blit_ms,
@@ -903,12 +908,14 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
 				   g_perf.post_ms + g_perf.wait_ms),
 		 audio_queue_ms(), g_perf.palette, sync_free, sync_late,
-		 hud_late, hud_resyncs, hud_dropped);
+		 hud_late, hud_resyncs, hud_slip_ms, hud_dropped);
 
 	sess_windows++;
 	sess_frames += hud_frames;
 	sess_late += hud_late;
 	sess_dropped += hud_dropped;
+	sess_resyncs += hud_resyncs;
+	sess_slip_ms += hud_slip_ms;
 	sess_fps_sum += hud_fps;
 	if (sess_windows == 1 || hud_fps < sess_fps_min)
 		sess_fps_min = hud_fps;
@@ -920,7 +927,7 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		sess_worst = hud_worst;
 
 	hud_frames = 0;
-	hud_late = hud_resyncs = hud_dropped = 0;
+	hud_late = hud_resyncs = hud_slip_ms = hud_dropped = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
 		hud_sum_wait = hud_sum_frame = 0;
 	hud_sum_emu = hud_sum_audio = hud_sum_push = hud_sum_draw = 0;
@@ -977,7 +984,17 @@ void ui_log_session(void)
 		 (double)sess_dropped * 100.0 / n,
 		 (double)sess_worst * ticks_to_ms);
 
+	/* And what the pacing did with the hitches, which is the other half of
+	 * "how did it run": `slip` is emulated time the loop refused to replay,
+	 * i.e. milliseconds the game clock fell behind the wall clock so that it
+	 * never had to run faster than a Game Boy. Zero means the session never
+	 * missed a slot. */
+	log_line("session: %u slots given up (%u ms not replayed, %.2f %% of "
+		 "the session)", sess_resyncs, sess_slip_ms,
+		 (double)sess_slip_ms / ((double)sess_windows * 10.0));
+
 	sess_windows = sess_frames = sess_late = 0;
+	sess_resyncs = sess_slip_ms = 0;
 	sess_fps_sum = sess_fps_min = 0.0;
 	sess_frame_ticks = sess_core_ticks = sess_emu_ticks = 0;
 	sess_palette = sess_worst = 0;
