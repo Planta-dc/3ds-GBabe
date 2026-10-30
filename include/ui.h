@@ -52,8 +52,12 @@ void ui_note_frame(const gbabe_frame_cost *cost);
 void ui_log_session(void);
 
 /* Do the once-a-second work that is too expensive for a frame boundary: redraw
- * the bottom-screen status readout if it is due, and spend one band of its
- * present. Call it in the idle time between frames, where the loop would
- * otherwise be asleep - it is ~16 ms of work in 8 slices of ~2 ms, and in one
- * go it costs a whole frame (docs/PORT-NOTES.md §13). */
-void ui_idle_work(void);
+ * the bottom-screen status readout if it is due, and present it.
+ *
+ * `slack` is how many ticks are left in this frame's slot before the next frame
+ * is due - the pace schedule's own deadline. The readout costs ~18 ms, so it is
+ * only worth starting when the slot can hold it; otherwise it waits, and the
+ * stale-after-five-seconds rule in ui_idle_work() keeps the readout from
+ * freezing during a long stretch of tight frames. Passing a figure the caller
+ * invented defeats the point, so pass the deadline (docs/PORT-NOTES.md §27). */
+void ui_idle_work(uint64_t slack);

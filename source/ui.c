@@ -54,8 +54,6 @@ static bool     hud_due;         /* the status readout needs a redraw */
 /* Slack the loop had in the last frame, and how long a redraw has been
  * postponed. See ui_idle_work(): the readout must never cost a frame while the
  * console is busy, and it must not freeze either. */
-static u64      last_idle;
-static unsigned hud_postponed;
 static float    hud_fps;
 static u64      hud_sum_core, hud_sum_blit, hud_sum_sync, hud_sum_post,
                 hud_sum_wait, hud_sum_frame;
@@ -71,13 +69,16 @@ static unsigned sess_windows;
 static unsigned sess_frames;
 static unsigned sess_late;
 static unsigned sess_dropped;
+static unsigned sess_resyncs;
+static unsigned sess_slip_ms;
 static double   sess_fps_sum;
 static double   sess_fps_min;   /* the worst whole-second average */
 static u64      sess_frame_ticks, sess_core_ticks, sess_emu_ticks;
 static u64      sess_palette;
 static u64      sess_worst;     /* slowest frame of the session, in ticks */
 static unsigned hud_late;    /* frames that started after their slot      */
-static unsigned hud_resyncs; /* thrown-away backlogs (visible jumps)      */
+static unsigned hud_resyncs; /* slots given up instead of replayed        */
+static unsigned hud_slip_ms; /* how much emulated time they cost, ms      */
 static unsigned hud_dropped; /* presents the panel was too busy for       */
 
 /* ------------------------------------------------------------------------- */
@@ -821,9 +822,9 @@ static void hud_render(void)
 
 void ui_note_frame(const gbabe_frame_cost *c)
 {
-	last_idle = c->wait;
 	hud_late += c->late;
 	hud_resyncs += c->resyncs;
+	hud_slip_ms += (unsigned)(c->slip * 1000ull / (u64)SYSCLOCK_ARM11);
 	hud_dropped += c->dropped;
 	hud_frames++;
 	hud_sum_core += c->core;
@@ -894,7 +895,8 @@ void ui_note_frame(const gbabe_frame_cost *c)
 	log_line("perf fps=%.1f frame=%.1f worst=%.1f core=%.1f emu=%.1f "
 		 "dec=%.1f push=%.1f draw=%.1f blit=%.1f "
 		 "post=%.1f sync=%.1f wait=%.1f other=%.1f audio=%ums pal=%u "
-		 "sync_free=%u sync_late=%u pace_late=%u resync=%u drop=%u", g_perf.fps,
+		 "sync_free=%u sync_late=%u pace_late=%u resync=%u slip=%ums "
+		 "drop=%u", g_perf.fps,
 		 g_perf.frame_ms, g_perf.worst_ms, g_perf.core_ms,
 		 g_perf.emu_ms, g_perf.audio_ms, g_perf.push_ms,
 		 g_perf.draw_ms, g_perf.blit_ms,
@@ -906,12 +908,14 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		g_perf.frame_ms - (g_perf.core_ms + g_perf.blit_ms +
 				   g_perf.post_ms + g_perf.wait_ms),
 		 audio_queue_ms(), g_perf.palette, sync_free, sync_late,
-		 hud_late, hud_resyncs, hud_dropped);
+		 hud_late, hud_resyncs, hud_slip_ms, hud_dropped);
 
 	sess_windows++;
 	sess_frames += hud_frames;
 	sess_late += hud_late;
 	sess_dropped += hud_dropped;
+	sess_resyncs += hud_resyncs;
+	sess_slip_ms += hud_slip_ms;
 	sess_fps_sum += hud_fps;
 	if (sess_windows == 1 || hud_fps < sess_fps_min)
 		sess_fps_min = hud_fps;
@@ -923,7 +927,7 @@ void ui_note_frame(const gbabe_frame_cost *c)
 		sess_worst = hud_worst;
 
 	hud_frames = 0;
-	hud_late = hud_resyncs = hud_dropped = 0;
+	hud_late = hud_resyncs = hud_slip_ms = hud_dropped = 0;
 	hud_sum_core = hud_sum_blit = hud_sum_sync = hud_sum_post =
 		hud_sum_wait = hud_sum_frame = 0;
 	hud_sum_emu = hud_sum_audio = hud_sum_push = hud_sum_draw = 0;
@@ -980,7 +984,17 @@ void ui_log_session(void)
 		 (double)sess_dropped * 100.0 / n,
 		 (double)sess_worst * ticks_to_ms);
 
+	/* And what the pacing did with the hitches, which is the other half of
+	 * "how did it run": `slip` is emulated time the loop refused to replay,
+	 * i.e. milliseconds the game clock fell behind the wall clock so that it
+	 * never had to run faster than a Game Boy. Zero means the session never
+	 * missed a slot. */
+	log_line("session: %u slots given up (%u ms not replayed, %.2f %% of "
+		 "the session)", sess_resyncs, sess_slip_ms,
+		 (double)sess_slip_ms / ((double)sess_windows * 10.0));
+
 	sess_windows = sess_frames = sess_late = 0;
+	sess_resyncs = sess_slip_ms = 0;
 	sess_fps_sum = sess_fps_min = 0.0;
 	sess_frame_ticks = sess_core_ticks = sess_emu_ticks = 0;
 	sess_palette = sess_worst = 0;
@@ -996,11 +1010,12 @@ void ui_log_session(void)
  * overran. It is now spent one band of panel columns per frame: eight frames of
  * ~2 ms, each of which fits in the wait, and the panel keeps showing the
  * previous buffer until the swap at the end. */
-void ui_idle_work(void)
+void ui_idle_work(uint64_t slack)
 {
 	static bool presenting;
-	static u64 render_ticks, band_ticks, worst_band;
-	static unsigned bands;
+	static u64 render_ticks, band_ticks, worst_band, drawn;
+	static unsigned bands, skipped;
+	bool whole = false;
 
 	if (!presenting && hud_due)
 	{
@@ -1009,24 +1024,56 @@ void ui_idle_work(void)
 		if (!g_cfg.show_hud || !emu_loaded())
 			return;
 
-		/* Rendering the readout is 4.2 ms in one go, measured on the
-		 * console, and it lands inside a frame like any other work: the
-		 * log showed one frame every single second over 25 ms, which is
-		 * a visible hitch, and it was this. Only start it when the last
-		 * frame actually had that much slack; if the console is too busy
-		 * to ever have it, redraw anyway every ten seconds or so rather
-		 * than leaving a readout that looks frozen. Turning the readout
-		 * off is the way to never pay for it at all - the once-a-second
-		 * `perf` line and the `session` summary carry the same numbers. */
-		if (last_idle < SYSCLOCK_ARM11 / 200 /* 5 ms */ &&
-		    hud_postponed < 10)
+		/* Rendering the readout is 4.2 ms in one go and presenting it is
+		 * another 13.3, both measured on the console - 17.6 ms of work in
+		 * a loop that has 0.85 ms of slack in a good second. It used to
+		 * be spread over nine frames of ~2 ms, which sounded kind and was
+		 * not: a frame budget with no slack in it loses a present to any
+		 * extra millisecond, so the readout cost nine late frames a
+		 * second. The console log showed it as 6.4 dropped presents a
+		 * second, against the nine frames a second that carried HUD work.
+		 *
+		 * So the cost is confined to as few frames as possible instead,
+		 * and only taken when the loop can afford it. `slack` is what is
+		 * left of this frame's slot - the `wait` figure in the log, and
+		 * the pace schedule's own deadline, not a guess. Three cases:
+		 *
+		 *   slack >= 18 ms   draw the whole thing now, one glassy frame;
+		 *   slack >= 2 ms    one band, as before, the rest next frame;
+		 *   otherwise        postpone - unless the readout has been stale
+		 *                    for five seconds, because one hitch every
+		 *                    five seconds beats a frozen readout, and both
+		 *                    beat nine late frames every second.
+		 *
+		 * The numbers are in the log either way: `perf` once a second,
+		 * `session` when the game goes away. `hud=off` is the way to
+		 * never pay for it at all. */
+		const u64 now = svcGetSystemTick();
+		const bool stale = drawn == 0 || now - drawn > SYSCLOCK_ARM11 * 5;
+		const bool tight = slack < SYSCLOCK_ARM11 / 500 /* 2 ms */;
+
+		whole = slack >= SYSCLOCK_ARM11 * 18 / 1000;
+
+		if (!whole && tight)
 		{
-			hud_postponed++;
-			hud_due = true;
-			return;
+			if (!stale)
+			{
+				skipped++;
+				hud_due = true;
+				return;
+			}
+
+			whole = true; /* stale and no slack: take the hitch */
 		}
 
-		hud_postponed = 0;
+		if (skipped != 0)
+		{
+			log_line("hud: drawn after %u postponed frames, %s",
+				 skipped, whole ? "in one go" : "one band a frame");
+			skipped = 0;
+		}
+
+		drawn = now;
 
 		const u64 t0 = svcGetSystemTick();
 		hud_render();
@@ -1043,23 +1090,25 @@ void ui_idle_work(void)
 	if (!presenting)
 		return;
 
-	const u64 t0 = svcGetSystemTick();
-	const bool done = ui_present_band(UI_W / 8);
-	const u64 took = svcGetSystemTick() - t0;
+	/* `whole` is only true on the frame that starts the redraw: a banded
+	 * redraw does one band per frame and comes back for the next. */
+	do {
+		const u64 t0 = svcGetSystemTick();
+		const bool done = ui_present_band(UI_W / 8);
+		const u64 took = svcGetSystemTick() - t0;
 
-	band_ticks += took;
-	if (took > worst_band)
-		worst_band = took;
-	bands++;
+		band_ticks += took;
+		if (took > worst_band)
+			worst_band = took;
+		bands++;
 
-	if (!done)
-		return;
+		if (!done)
+			return;
+	} while (whole);
 
 	ui_present_swap();
 	presenting = false;
 
-	/* The split, once a second: if `present` stays near 16 ms total but no
-	 * band is over ~2 ms, the work is free and no frame can be lost to it. */
 	const double ms = 1000.0 / SYSCLOCK_ARM11;
 	log_line("hud: render %.1f ms + present %.1f ms in %u bands "
 		 "(worst band %.1f ms)", (double)render_ticks * ms,

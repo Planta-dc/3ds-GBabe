@@ -435,7 +435,8 @@ static void timing(void)
 
 	printf("this filter  %6.3f ms/frame\n", now);
 	printf("box filters  %6.3f ms/frame  (%.2fx)\n", was, was / now);
-	printf("(x86, indicative only - the console's `dec=` is the measurement)\n");
+	printf("(x86. NOT a predictor of the console: this said the sinc was 1.24x\n");
+	printf(" faster and it was 3.5x slower there. See docs/PORT-NOTES.md 27.\n");
 }
 
 int main(void)

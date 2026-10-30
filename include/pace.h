@@ -37,19 +37,42 @@
  * previous frame overran its budget. */
 #define PACE_LATE_TICKS(frame_ticks) ((frame_ticks) / 2)
 
-/* How far behind the loop has to fall before it stops trying to catch up.
- * Catching up four frames means running them back to back, which would dump
- * four frames of emulation into the time of one - a visible jump, and it leaves
- * the schedule permanently ahead. Re-anchoring is the honest thing to do; it
- * is what happens after the lid is opened, the menu closes or the SD card
- * stalls. */
-#define PACE_RESYNC_FRAMES 4
+/* How late a frame may start and still be caught up.
+ *
+ * Catching up means starting the next frame early, which is the emulator
+ * running *faster* than the Game Boy: three frames of catch-up is three frames
+ * played at up to 4x speed, back to back, right after a hitch. The console log
+ * shows it - one-second windows at 61.7 and 63.3 fps immediately after a 24 ms
+ * or 56 ms frame - and that is the "it sometimes speeds up" the user hears.
+ *
+ * So a frame that starts later than usual by more than this much is treated as
+ * a hitch: the slots it missed are given up rather than replayed, and the next
+ * frame is scheduled a full period from *now*, so the emulator never runs
+ * faster than 100 %. The game clock lags the wall clock by the hitch,
+ * permanently - the right way round, because the game's own speed is the thing
+ * that must not lie. The sound is generated from the game's clock, so the pitch
+ * does not move either way: re-anchoring shifts the phase once, it does not
+ * slow the steady state.
+ *
+ * "Later than usual" and not "later than zero" is the whole of it. A loop that
+ * wakes 0.4 ms after every deadline is not having hitches - it is on time, on
+ * this hardware - and re-anchoring on that would cost 0.4 ms per frame, i.e.
+ * 2.4 % slow, for ever. So the comparison is against `late_ref`, a slow average
+ * of how late frames actually start here: steady lateness costs nothing, a jump
+ * above it is a hitch and only the jump is given up.
+ *
+ * An eighth of a frame is 2.09 ms - ten times the wake-up overshoot this loop
+ * actually sees (`wait - frame/8` in frame_due(), then a poll), small enough
+ * that catching one up is invisible. */
+#define PACE_SLIP_TICKS(frame_ticks) ((frame_ticks) / 8)
 
 typedef struct
 {
 	uint64_t next;    /* tick the next frame is due; 0 = no schedule yet */
 	unsigned late;    /* frames that started a whole frame or more late   */
-	unsigned resyncs; /* schedules re-anchored after falling behind       */
+	unsigned resyncs; /* schedules re-anchored instead of caught up       */
+	uint64_t slip;    /* ticks of slot time given up rather than replayed */
+	uint64_t late_ref;/* what starting on time looks like on this console */
 } pace_state;
 
 /* Forget the schedule but keep the counters: the loop was stopped (menu, ROM
@@ -57,17 +80,21 @@ typedef struct
 static inline void pace_restart(pace_state *p)
 {
 	p->next = 0;
+	p->late_ref = 0;
 }
 
 /* The counters are read and cleared once a second by the HUD. */
 static inline void pace_take_counters(pace_state *p, unsigned *late,
-				      unsigned *resyncs)
+				      unsigned *resyncs, uint64_t *slip)
 {
 	if (late != NULL)
 		*late = p->late;
 	if (resyncs != NULL)
 		*resyncs = p->resyncs;
+	if (slip != NULL)
+		*slip = p->slip;
 	p->late = p->resyncs = 0;
+	p->slip = 0;
 }
 
 /* Ticks until the next frame's slot; 0 if it is already due. */
@@ -87,23 +114,40 @@ static inline bool pace_due(pace_state *p, uint64_t now, uint64_t frame_ticks)
 		return false; /* still early: the caller sleeps */
 
 	const uint64_t slot = p->next;
+	const uint64_t late_by = now - slot;
+
+	/* The frame after this one is normally due one period after the slot
+	 * this one was meant to use: an absolute schedule, so a sleeping loop
+	 * that wakes late does not accumulate into the frame rate. */
 	p->next = slot + frame_ticks;
 
 	/* Started long after the slot it was meant to use, i.e. the previous
-	 * frame overran. The schedule itself is left alone - the next slot is
-	 * still where it was, so the loop pulls back on time instead of
-	 * carrying the delay for ever. */
-	if (now - slot > PACE_LATE_TICKS(frame_ticks))
+	 * frame overran. */
+	if (late_by > PACE_LATE_TICKS(frame_ticks))
 		p->late++;
 
-	/* Signed on purpose. Unsigned, "now is behind the next slot" wraps to a
-	 * huge number and reads as "enormously late", which is the bug this
-	 * file exists to stop coming back. */
-	if ((int64_t)(now - p->next) >=
-	    (int64_t)((PACE_RESYNC_FRAMES - 1) * frame_ticks))
+	/* Later than this console usually starts, by more than the tolerance:
+	 * a hitch. Keeping the schedule would mean replaying the backlog - the
+	 * loop would start the next frame immediately, and the one after that,
+	 * until it had caught up, which is the emulator running faster than the
+	 * Game Boy. Give those slots up instead and start the next frame a
+	 * whole period from now, so the emulator never exceeds its intended
+	 * speed. `slip` says what that cost, `late_ref` restarts from what this
+	 * frame's start says about the machine. */
+	if (late_by > p->late_ref + PACE_SLIP_TICKS(frame_ticks))
 	{
+		p->slip += late_by - p->late_ref;
 		p->next = now + frame_ticks;
 		p->resyncs++;
+		p->late_ref = late_by;
+	}
+	else if (late_by > p->late_ref)
+	{
+		p->late_ref += (late_by - p->late_ref) / 8;
+	}
+	else
+	{
+		p->late_ref -= (p->late_ref - late_by) / 8;
 	}
 
 	return true;

@@ -47,7 +47,7 @@ TARGET      :=  gbabe
 #---------------------------------------------------------------------------------
 VERSION_MAJOR   :=  0
 VERSION_MINOR   :=  3
-VERSION_MICRO   :=  8
+VERSION_MICRO   :=  10
 
 APP_PRODUCT_CODE :=  CTR-H-GBABE
 APP_UNIQUE_ID    :=  0xEABE1

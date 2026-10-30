@@ -411,7 +411,12 @@ int main(int argc, char **argv)
 				 * says which one it is. */
 				u64 t = svcGetSystemTick();
 
-				ui_idle_work();
+				/* The readout is only worth starting if
+				 * the rest of this frame's slot can hold
+				 * it; `pace.next` is when the next frame
+				 * is due, so this is the loop's own
+				 * answer rather than a guess. */
+				ui_idle_work(pace.next > t ? pace.next - t : 0);
 
 				const u64 t_hud = svcGetSystemTick();
 
@@ -478,7 +483,8 @@ int main(int argc, char **argv)
 						    frame_start > prev_end) ?
 						   frame_start - prev_end : 0;
 				unsigned late, resyncs;
-				pace_take_counters(&pace, &late, &resyncs);
+				u64 slip;
+				pace_take_counters(&pace, &late, &resyncs, &slip);
 
 				/* The presents this window had to drop, as a
 				 * window figure: frame_skipped is the running
@@ -521,6 +527,7 @@ int main(int argc, char **argv)
 					.frame = after_post - (prev_end ? prev_end : frame_start),
 					.late = late,
 					.resyncs = resyncs,
+					.slip = slip,
 					.dropped = dropped,
 				};
 

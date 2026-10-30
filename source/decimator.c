@@ -8,6 +8,9 @@
 
 #include <string.h>
 
+/* The unrolled loop above spells out 32 pairs because DECIMATOR_TAPS is 64. */
+_Static_assert(DECIMATOR_TAPS == 64, "convolve() is written for 64 taps");
+
 /* A packed sample: left in the low half, right in the high half. Reading the
  * core's buffer as 32-bit words rather than as two 16-bit halves halves the
  * number of loads for the same bytes - on an ARM11 with no L2, the loads are
@@ -52,18 +55,46 @@ void decimator_reset(decimator *d)
 	memset(d, 0, sizeof *d);
 }
 
-/* One output sample: the 64 taps over the 64 most recent stage-1 samples.
+/* One output sample: 64 taps over the 64 most recent stage-1 samples, which are
+ * the contiguous run at `h` (see the doubled ring in include/decimator.h).
  *
- * `hist` holds them oldest first. A symmetric FIR reads a time-reversed window
- * exactly as it reads a forward one, so the taps are applied in order and no
- * index arithmetic goes in the inner loop. The sum cannot overflow int32:
- * |sample| <= 32768 and the taps sum to 32768, so |acc| <= 2^30. */
-static inline int16_t convolve(const int16_t *hist)
-{
-	int32_t acc = 0;
+ * The taps are symmetric, so tap[k] pairs with tap[63-k] and one multiply does
+ * both: acc += tap[k] * (h[k] + h[63-k]). Thirty-two multiplies instead of
+ * sixty-four, at the cost of thirty-two adds, which is the right trade on a
+ * machine that can add two registers in one cycle and multiply in two.
+ *
+ * Four accumulators, because a single one serialises: each smlabb waits for the
+ * previous one's result, and on an in-order core that stall is the loop. The
+ * sum cannot overflow int32: |h| <= 32768 and the taps sum to 32768, so
+ * |acc| <= 2^30, and two int16 added into an int32 is exact.
+ */
+/* always_inline is not decoration: left to itself the compiler outlined this
+ * as a real function call, twice per output, and spilled most of the state
+ * around it. Verified by compiling the file for arm1136jf_s and counting - it
+ * is the difference between `bl convolve` and a straight-line loop. */
+#define FIR_PAIR(k, acc) \
+	(acc) += (int32_t)taps[(k)] * \
+		 (h[(k)] + h[DECIMATOR_TAPS - 1 - (k)])
 
-	for (int k = 0; k < DECIMATOR_TAPS; k++)
-		acc += (int32_t)taps[k] * hist[k];
+static inline __attribute__((always_inline)) int16_t convolve(const int16_t *h)
+{
+	int32_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+
+	/* Fully unrolled: 32 pairs is a compile-time constant, and leaving the
+	 * loop to the compiler cost a compare and a branch per four pairs plus
+	 * a counter to keep. Measured as instructions in an arm1136 build, which
+	 * is the only measurement available here that means anything - see the
+	 * note about the x86 timing in docs/PORT-NOTES.md §27. */
+	FIR_PAIR(0,  a0); FIR_PAIR(1,  a1); FIR_PAIR(2,  a2); FIR_PAIR(3,  a3);
+	FIR_PAIR(4,  a0); FIR_PAIR(5,  a1); FIR_PAIR(6,  a2); FIR_PAIR(7,  a3);
+	FIR_PAIR(8,  a0); FIR_PAIR(9,  a1); FIR_PAIR(10, a2); FIR_PAIR(11, a3);
+	FIR_PAIR(12, a0); FIR_PAIR(13, a1); FIR_PAIR(14, a2); FIR_PAIR(15, a3);
+	FIR_PAIR(16, a0); FIR_PAIR(17, a1); FIR_PAIR(18, a2); FIR_PAIR(19, a3);
+	FIR_PAIR(20, a0); FIR_PAIR(21, a1); FIR_PAIR(22, a2); FIR_PAIR(23, a3);
+	FIR_PAIR(24, a0); FIR_PAIR(25, a1); FIR_PAIR(26, a2); FIR_PAIR(27, a3);
+	FIR_PAIR(28, a0); FIR_PAIR(29, a1); FIR_PAIR(30, a2); FIR_PAIR(31, a3);
+
+	int32_t acc = (a0 + a1) + (a2 + a3);
 
 	acc = (acc + (1 << 14)) >> 15;
 
@@ -74,29 +105,30 @@ static inline int16_t convolve(const int16_t *hist)
 	return (int16_t)acc;
 }
 
-/* A stage-1 sample is ready: put it in the tail, and every eighth one completes
- * a block of 64 - which is one output sample. */
+/* A stage-1 sample is ready: write it into the doubled ring - twice, so that
+ * every window of 64 is contiguous - and every eighth one completes an output. */
 static inline void push(decimator *d, int16_t l, int16_t r, int16_t *out,
 			unsigned *written)
 {
-	const unsigned at = DECIMATOR_TAPS + d->pending;
+	const unsigned p = d->pos;
 
-	d->hist_l[at] = l;
-	d->hist_r[at] = r;
+	d->hist_l[p] = l;
+	d->hist_l[p + DECIMATOR_TAPS] = l;
+	d->hist_r[p] = r;
+	d->hist_r[p + DECIMATOR_TAPS] = r;
+	d->pos = (p + 1) & (DECIMATOR_TAPS - 1);
 
 	if (++d->pending < 8)
 		return;
 
 	d->pending = 0;
 
-	out[*written * 2] = convolve(d->hist_l);
-	out[*written * 2 + 1] = convolve(d->hist_r);
+	/* The newest sample is at `p`, so the 64 samples ending there start at
+	 * p + 1 - see the doubled ring in include/decimator.h. Reading the copy
+	 * in the upper half is what makes that run stay inside the array. */
+	out[*written * 2] = convolve(&d->hist_l[p + 1]);
+	out[*written * 2 + 1] = convolve(&d->hist_r[p + 1]);
 	(*written)++;
-
-	/* Drop the eight oldest and make room for the next eight: the 64 live
-	 * samples are hist[8..71], and they become hist[0..63]. */
-	memmove(d->hist_l, d->hist_l + 8, sizeof d->hist_l[0] * DECIMATOR_TAPS);
-	memmove(d->hist_r, d->hist_r + 8, sizeof d->hist_r[0] * DECIMATOR_TAPS);
 }
 
 unsigned decimator_run(decimator *d, const uint32_t *in, unsigned frames,

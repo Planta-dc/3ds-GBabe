@@ -46,13 +46,17 @@ extern "C" {
  * lets everything above 131 kHz through at its own -3.9 dB per octave and this
  * filter is what stops it.
  *
- * The history is a flat array of DECIMATOR_TAPS + 8, not a ring: eight new
- * stage-1 samples go in the tail, and one output is computed over the leading
- * 64 (contiguous, and in the order the taps want, because a symmetric filter
- * reads a time-reversed window the same way round). Then the array is shifted
- * down by eight: one memmove of 128 bytes per channel per output, 256 bytes in
- * all, once per 64 input samples. It keeps the inner loop a straight read,
- * which on an ARM11 with no L2 is the whole cost of this thing.
+ * The history is a doubled ring of 2 * DECIMATOR_TAPS: every stage-1 sample is
+ * written at `pos` and at `pos + TAPS`, so the last 64 samples are always the
+ * contiguous run starting at `pos + 1` and no shifting is needed. (It used to
+ * shift the array down by eight with two memmove()s per output - see
+ * docs/PORT-NOTES.md 27, where the console measured what that cost.)
+ *
+ * The convolution uses the filter's symmetry: tap[k] * (x[k] + x[63-k]) does
+ * two taps with one multiply, so an output is 32 multiplies, not 64. That is
+ * not a micro-optimisation on this hardware - the ARM11 has no L2 and no NEON,
+ * and the console measured the straight 64-tap loop at 5.9 ms a frame, more
+ * than a third of a 16.7 ms frame for audio alone.
  */
 #define DECIMATOR_TAPS 64
 
@@ -61,10 +65,12 @@ typedef struct
 	int32_t sum_l, sum_r;  /* stage 1: 8 input samples -> one sample */
 	uint8_t count1;        /* input samples into the current stage-1 group, 0-7 */
 	uint8_t pending;       /* stage-1 samples since the last output, 0-7 */
-	/* The last DECIMATOR_TAPS stage-1 samples, oldest first, then 8 slots for
-	 * the ones that have arrived since the last output. */
-	int16_t hist_l[DECIMATOR_TAPS + 8];
-	int16_t hist_r[DECIMATOR_TAPS + 8];
+	uint8_t pos;           /* where the next stage-1 sample goes, 0..63 */
+	/* The last DECIMATOR_TAPS stage-1 samples, held twice over so that the
+	 * window a convolution reads is always contiguous - see "the doubled
+	 * ring" below. Every sample is written at pos and at pos + TAPS. */
+	int16_t hist_l[2 * DECIMATOR_TAPS];
+	int16_t hist_r[2 * DECIMATOR_TAPS];
 } decimator;
 
 void decimator_reset(decimator *d);

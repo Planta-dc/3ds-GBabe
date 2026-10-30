@@ -57,6 +57,8 @@ typedef struct
 	                       * long, which is a comb filter at the block    *
 	                       * rate, so it is worth keeping small           */
 	int margin_us;        /* submit margin currently in use               */
+	int cmd_us;           /* part of it that is the csndPlaySound() call  */
+	int track_us;         /* part of it that is tracked scheduling slack  */
 	int worst_late_us;    /* worst lateness seen since audio_init()       */
 	unsigned queue_ms;    /* audio buffered ahead of the hardware         */
 	int rate_meas_q16;    /* measured production rate, 16.16 (65536 = the
