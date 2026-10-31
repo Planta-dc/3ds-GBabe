@@ -570,12 +570,15 @@ static bool run_action(int act, int delta, bool *close)
 	case ACT_MONO:
 		g_cfg.audio_mono = !g_cfg.audio_mono;
 		log_line("setting audio_mono=%d", g_cfg.audio_mono);
-		config_save();
 		/* Mono/stereo change requires reinitializing audio */
 		audio_exit();
 		if (!audio_init())
+		{
 			g_cfg.audio_on = false;
+			log_line("audio init failed after mono toggle, disabling audio");
+		}
 		audio_set_enabled(g_cfg.audio_on && !g_cfg.fast_forward);
+		config_save();
 		return true;
 
 	case ACT_HUD:
