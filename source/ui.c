@@ -395,6 +395,7 @@ enum
 	ACT_VIDEO,
 	ACT_SKIP,
 	ACT_SOUND,
+	ACT_MONO,
 	ACT_HUD,
 	ACT_LOG,
 };
@@ -412,6 +413,7 @@ static const ui_row settings_rows[] = {
 	{ "Video", NULL, UI_ROW_CHOICE },
 	{ "Frameskip", NULL, UI_ROW_CHOICE },
 	{ "Sound", NULL, UI_ROW_TOGGLE },
+	{ "Mono audio", NULL, UI_ROW_TOGGLE },
 	{ "Status on screen", NULL, UI_ROW_TOGGLE },
 	{ "Debug log", NULL, UI_ROW_TOGGLE },
 };
@@ -420,7 +422,7 @@ static const ui_row settings_rows[] = {
 static const int game_actions[] = { ACT_RESUME, ACT_RESET, ACT_LOAD,
 				    ACT_QUIT };
 static const int settings_actions[] = { ACT_PALETTE, ACT_VIDEO, ACT_SKIP,
-					ACT_SOUND, ACT_HUD, ACT_LOG };
+					ACT_SOUND, ACT_MONO, ACT_HUD, ACT_LOG };
 
 static const char *const menu_tabs[] = { "Game", "Settings" };
 #define MENU_TABS ((int)(sizeof menu_tabs / sizeof menu_tabs[0]))
@@ -444,6 +446,7 @@ static const char *menu_note(int tab, int sel)
 	case ACT_VIDEO: return "How the 160x144 screen is scaled up.";
 	case ACT_SKIP: return "Fold an occasional frame when running late.";
 	case ACT_SOUND: return "Turn the emulated audio output on or off.";
+	case ACT_MONO: return "Mono audio for better performance on Old 3DS.";
 	case ACT_LOG: return "Writes sdmc:/3ds/gbabe/debug.log.";
 	default: return "The status readout on this screen.";
 	}
@@ -468,8 +471,9 @@ static void draw_menu(int tab, int sel)
 		rows[1].value = scale_label(g_cfg.scale);
 		rows[2].value = frameskip_label(g_cfg.frameskip);
 		rows[3].value = g_cfg.audio_on ? "on" : "off";
-		rows[4].value = g_cfg.show_hud ? "on" : "off";
-		rows[5].value = g_cfg.debug_log ? "on" : "off";
+		rows[4].value = g_cfg.audio_mono ? "on" : "off";
+		rows[5].value = g_cfg.show_hud ? "on" : "off";
+		rows[6].value = g_cfg.debug_log ? "on" : "off";
 	}
 
 	ui_menu m = {
@@ -561,6 +565,17 @@ static bool run_action(int act, int delta, bool *close)
 		audio_set_enabled(g_cfg.audio_on);
 		log_line("setting sound=%d", g_cfg.audio_on);
 		config_save();
+		return true;
+
+	case ACT_MONO:
+		g_cfg.audio_mono = !g_cfg.audio_mono;
+		log_line("setting audio_mono=%d", g_cfg.audio_mono);
+		config_save();
+		/* Mono/stereo change requires reinitializing audio */
+		audio_exit();
+		if (!audio_init())
+			g_cfg.audio_on = false;
+		audio_set_enabled(g_cfg.audio_on && !g_cfg.fast_forward);
 		return true;
 
 	case ACT_HUD:
