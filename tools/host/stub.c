@@ -291,9 +291,9 @@ u32 CSND_VOL(float left, float right)
 	return 0;
 }
 
-void CSND_SetVol(u32 channel, u32 vol)
+void CSND_SetVol(u32 channel, u32 chnVolumes, u32 capVolumes)
 {
-	(void)channel; (void)vol;
+	(void)channel; (void)chnVolumes; (void)capVolumes;
 	/* Stub - real implementation sets the volume register */
 }
 
