@@ -276,12 +276,11 @@ void CSND_SetPlayStateR(u32 channel, u32 value)
 }
 
 /* Stub implementations for manual CSND setup (used by audio.c start_block) */
-void CSND_SetChnRegs(u32 channel, u32 flags, u32 physaddr0, u32 physaddr1, u32 totalbytesize)
+void CSND_SetChnRegs(u32 flags, u32 physaddr0, u32 physaddr1, u32 totalbytesize, u32 chnVolumes, u32 capVolumes)
 {
-	(void)physaddr0; (void)physaddr1; (void)totalbytesize; (void)flags;
-	/* The rate is encoded in the flags for the host stub.
-	 * In the real implementation, the sample rate is set separately, but
-	 * for the stub we just need to track that the channel is being used. */
+	(void)physaddr0; (void)physaddr1; (void)totalbytesize; (void)chnVolumes; (void)capVolumes;
+	/* The channel is encoded in the flags (SOUND_CHANNEL). Extract it. */
+	const u32 channel = (flags >> 0) & 0x1F;
 	if (channel < CSND_NUM_CHANNELS)
 		block_rate[channel] = 32768; /* Use the standard output rate */
 }
@@ -292,12 +291,6 @@ u32 CSND_VOL(float left, float right)
 	 * For the host stub, we don't need the actual value. */
 	(void)left; (void)right;
 	return 0;
-}
-
-void CSND_SetVol(u32 channel, u32 chnVolumes, u32 capVolumes)
-{
-	(void)channel; (void)chnVolumes; (void)capVolumes;
-	/* Stub - real implementation sets the volume register */
 }
 
 void CSND_SetPlayState(u32 channel, u32 value)
