@@ -283,7 +283,7 @@ void CSND_SetChnRegs(u32 channel, u32 flags, u32 physaddr0, u32 physaddr1, u32 t
 	 * In the real implementation, the sample rate is set separately, but
 	 * for the stub we just need to track that the channel is being used. */
 	if (channel < CSND_NUM_CHANNELS)
-		block_rate[channel] = OUT_RATE; /* Use the standard output rate */
+		block_rate[channel] = 32768; /* Use the standard output rate */
 }
 
 u32 CSND_VOL(float left, float right)
