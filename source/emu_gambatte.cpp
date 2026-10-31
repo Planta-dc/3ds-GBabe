@@ -55,25 +55,6 @@
 
 namespace {
 
-/* Convert stereo sound buffer to mono by averaging left and right channels.
- * Input: stereo samples packed as 32-bit (left in low 16, right in high 16)
- * Output: mono samples packed as 32-bit (same value in low and high 16)
- * This allows the decimator to process mono, roughly halving the workload. */
-static void convert_stereo_to_mono(gambatte::uint_least32_t *dst,
-				 const gambatte::uint_least32_t *src, unsigned samples)
-{
-	for (unsigned i = 0; i < samples; i++)
-	{
-		const int32_t l = (int16_t)(src[i] & 0xFFFFu);
-		const int32_t r = (int16_t)(src[i] >> 16);
-		const int32_t mono = (l + r) / 2;
-		const int16_t mono_clamped = (mono > 32767) ? 32767 : 
-						     (mono < -32768) ? -32768 : (int16_t)mono;
-		dst[i] = (uint32_t)(uint16_t)mono_clamped | 
-			     ((uint32_t)(uint16_t)mono_clamped << 16);
-	}
-}
-
 /* Gambatte's InputGetter is polled from inside the emulation. Its bit values
  * are the same as enum gb_button, so the joypad mask passes straight through. */
 class Pad : public gambatte::InputGetter
@@ -133,18 +114,16 @@ const unsigned RUN_SAMPLES  = 2064;
 const unsigned SOUND_BUF    = RUN_SAMPLES + 2064; /* core may overshoot      */
 gambatte::uint_least32_t sound_buf[SOUND_BUF];
 
-/* Mono conversion buffer for performance mode. When enabled, stereo is
- * averaged to mono before decimation, reducing audio processing by ~50%. */
-static gambatte::uint_least32_t sound_buf_mono[SOUND_BUF];
-
 /* One runFor() call produces at most 4128 samples, which is 64 output frames
  * at 32768 Hz; 72 leaves room for a block that overruns. */
 int16_t audio_out[72 * 2];
 
-/* Performance mode: convert stereo to mono before decimation to save CPU.
- * This trades audio accuracy (stereo -> mono) for ~50% reduction in audio
- * processing time. Enable this for maximum performance on Old 3DS. */
-#define PERF_MONO_AUDIO 1
+/* One runFor() call produces at most 4128 samples, which is 64 output frames
+ * at 32768 Hz; 96 leaves room for a block that overruns, and the rate matcher
+ * stretches by up to 20 % when the console is short of time, so 72 frames
+ * can become 90: 96 is the round number above that. */
+int16_t audio_play[96 * 2];
+
 resamp   shaper;
 
 /* ------------------------------------------------------------------------- */
@@ -618,17 +597,7 @@ extern "C" void emu_run_frame(void)
 		 * actually wanted. */
 		if (samples > 0 && audio_enabled())
 		{
-			/* Performance mode: convert stereo to mono before decimation.
-		 * This reduces audio processing by ~50% at the cost of stereo sound.
-		 * Controlled by g_cfg.audio_mono in config. */
-		const gambatte::uint_least32_t *decim_input = sound_buf;
-		if (g_cfg.audio_mono)
-		{
-			convert_stereo_to_mono(sound_buf_mono, sound_buf, samples);
-			decim_input = sound_buf_mono;
-		}
-		
-		const unsigned out = decimator_run(&stage, decim_input,
+			const unsigned out = decimator_run(&stage, sound_buf,
 							   samples, audio_out);
 			unsigned n = 0;
 
