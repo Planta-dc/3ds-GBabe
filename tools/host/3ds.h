@@ -200,6 +200,14 @@ Result CSND_UpdateInfo(bool waitDone);
 Result csndIsPlaying(u32 channel, u8 *status);
 Result CSND_FlushDataCache(const void *adr, u32 size);
 Result csndExecCmds(bool waitDone);
+
+/* Sound flags (from libctru) */
+#define SOUND_CHANNEL(n)     ((u32)(n) & 0x1F)
+#define SOUND_ENABLE         BIT(14)
+#define SOUND_ONE_SHOT       (0 << 10)
+#define SOUND_FORMAT_16BIT   (1 << 12)
+#define CSND_TIMER(n)        (0x3FEC3FC / ((u32)(n)))
+
 void   CSND_SetPlayStateR(u32 channel, u32 value);
 void   CSND_SetChnRegs(u32 flags, u32 physaddr0, u32 physaddr1, u32 totalbytesize, u32 chnVolumes, u32 capVolumes);
 u32    CSND_VOL(float left, float right);
