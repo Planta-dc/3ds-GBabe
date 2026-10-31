@@ -48,6 +48,7 @@ namespace gambatte
       ,  bufferSize_(0)
       ,  bufferPos_(0)
       ,  lastUpdate_(0)
+      ,  cycleCounter_(0)
       ,  soVol_(0)
       ,  rsum_(0x8000) // initialize to 0x8000 to prevent borrows from high word, xor away later
       ,  enabled_(false)
@@ -62,6 +63,7 @@ namespace gambatte
 
    void PSG::reset()
    {
+      cycleCounter_ = 0;
       ch1_.reset();
       ch2_.reset();
       ch3_.reset();
@@ -89,6 +91,7 @@ namespace gambatte
       ch4_.loadState(state);
 
       lastUpdate_ = state.cpu.cycleCounter;
+      cycleCounter_ = state.spu.cycleCounter;
       setSoVolume(state.mem.ioamhram.get()[0x124]);
       mapSo(state.mem.ioamhram.get()[0x125]);
       enabled_ = state.mem.ioamhram.get()[0x126] >> 7 & 1;
@@ -96,12 +99,14 @@ namespace gambatte
 
    void PSG::accumulateChannels(const unsigned long cycles)
    {
+      unsigned long const cc = cycleCounter_;
       uint_least32_t *const buf = buffer_ + bufferPos_;
       std::memset(buf, 0, cycles * sizeof(uint_least32_t));
-      ch1_.update(buf, soVol_, cycles);
-      ch2_.update(buf, soVol_, cycles);
-      ch3_.update(buf, soVol_, cycles);
-      ch4_.update(buf, soVol_, cycles);
+      ch1_.update(buf, soVol_, cc, cc + cycles);
+      ch2_.update(buf, soVol_, cc, cc + cycles);
+      ch3_.update(buf, soVol_, cc, cc + cycles);
+      ch4_.update(buf, soVol_, cc, cc + cycles);
+      cycleCounter_ = (cc + cycles) % SoundUnit::counter_max;
    }
 
    void PSG::generateSamples(unsigned long const cycleCounter, bool const doubleSpeed)
