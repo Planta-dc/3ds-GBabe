@@ -318,11 +318,11 @@ static void start_block(void)
 	for (int e = 0; e < ears; e++)
 		CSND_FlushDataCache(blocks[slot][e], BLOCK_BYTES);
 
-	/* Start both ears together to avoid stereo image skew.
-	 * csndPlaySound() calls csndExecCmds(true) for each channel, which
-	 * means the second ear starts one IPC round-trip after the first.
-	 * Instead, set up both channels' registers manually and call
-	 * csndExecCmds(true) once, so both ears start simultaneously. */
+		/* Start both ears together to avoid stereo image skew.
+		 * csndPlaySound() calls csndExecCmds(true) for each channel, which
+		 * means the second ear starts one IPC round-trip after the first.
+		 * Instead, set up both channels' registers manually and call
+		 * csndExecCmds(true) once, so both ears start simultaneously. */
 	const u64 t0 = svcGetSystemTick();
 	bool any_fail = false;
 
@@ -336,14 +336,15 @@ static void start_block(void)
 
 		/* Replicate csndPlaySound() body for SOUND_ONE_SHOT | SOUND_FORMAT_16BIT */
 		const u32 phys_addr = osConvertVirtToPhys(blocks[slot][e]);
+		const u32 volumes = CSND_VOL(1.0f, pan);
+		const u32 timer = CSND_TIMER(OUT_RATE);
 
-		/* Set channel registers: channel, flags, buffer addresses, size */
-		CSND_SetChnRegs(channels[slot][e],
-				SOUND_ONE_SHOT | SOUND_FORMAT_16BIT,
-				phys_addr, 0, BLOCK_BYTES);
+		/* Encode channel into flags, like csndPlaySound does */
+		u32 flags = SOUND_ENABLE | SOUND_CHANNEL(channels[slot][e]) |
+			   SOUND_ONE_SHOT | SOUND_FORMAT_16BIT | (timer << 16);
 
-		/* Set volume with pan: channel, left/right volumes, capture volumes */
-		CSND_SetVol(channels[slot][e], CSND_VOL(1.0f, pan), 0);
+		/* Set channel registers: flags, buffer addresses, size, volumes */
+		CSND_SetChnRegs(flags, phys_addr, 0, BLOCK_BYTES, volumes, volumes);
 
 		/* Start the channel */
 		CSND_SetPlayState(channels[slot][e], 1);
