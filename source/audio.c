@@ -45,6 +45,7 @@
 
 #include <3ds/allocator/linear.h>
 
+#include "gb3ds.h"
 #include "log.h"
 #include "resamp.h"
 
@@ -319,9 +320,14 @@ static void start_block(void)
 		CSND_FlushDataCache(blocks[slot][e], BLOCK_BYTES);
 
 		const u64 t0 = svcGetSystemTick();
+		/* Pan: left channel to left speaker (-1.0), right to right (+1.0).
+		 * A CSND channel is mono but has separate left/right volumes, so
+		 * pan steers it to the correct ear. 0.0 for both would mix both
+		 * channels into both speakers. */
+		const float pan = stereo ? (e == 0 ? -1.0f : 1.0f) : 0.0f;
 		Result rc = csndPlaySound(channels[slot][e],
 					  SOUND_ONE_SHOT | SOUND_FORMAT_16BIT,
-					  OUT_RATE, 1.0f, 0.0f,
+					  OUT_RATE, 1.0f, pan,
 					  blocks[slot][e], NULL, BLOCK_BYTES);
 		cmd_ticks = smooth(cmd_ticks, svcGetSystemTick() - t0);
 		update_margin();
@@ -540,10 +546,14 @@ bool audio_init(void)
 	}
 
 	/* Stereo needs two channels per slot. If the service will not give us
-	 * four, fall back to one channel per slot and mix down to mono: wrong
-	 * stereo image, right pitch and right timing. */
+	 * four, or if mono mode is requested for performance, fall back to one
+	 * channel per slot and mix down to mono: wrong stereo image, right pitch
+	 * and right timing. */
 	int ch[SLOTS * EARS];
-	stereo = pick_channels(SLOTS * EARS, ch);
+	
+	/* Check if mono is forced in config for performance */
+	bool want_stereo = !g_cfg.audio_mono;
+	stereo = want_stereo && pick_channels(SLOTS * EARS, ch);
 
 	if (!stereo && !pick_channels(SLOTS, ch))
 	{
@@ -766,7 +776,9 @@ void audio_push_frames(const int16_t *stereo_frames, unsigned frames)
 	rate_frac &= 0xFFFF;
 
 	fifo_push((const s16 *)stereo_frames, frames);
-	audio_pump();
+	/* Note: audio_pump() is now called only from the idle loop in main.c,
+	 * not from here. This keeps the CSND IPC out of the frame path.
+	 * See docs/PORT-NOTES.md section 20. */
 }
 
 void audio_get_stats(audio_stats *out)

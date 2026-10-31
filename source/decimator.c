@@ -1,6 +1,10 @@
 /**
- * The 2 MHz -> 32768 Hz decimator: two box filters, then a windowed-sinc
+ * The 2 MHz -> 32768 Hz decimator: fused box filter, then a windowed-sinc
  * lowpass. See include/decimator.h.
+ *
+ * The two box stages (8:1 then 2:1) are fused into a single 16:1 box filter
+ * to eliminate intermediate state and reduce memory traffic. See
+ * docs/PORT-NOTES.md section 20 for details.
  *
  * MIT licensed.
  */
@@ -83,27 +87,18 @@ void decimator_reset(decimator *d)
 }
 
 /* Each output is the average of DECIMATE_FIR consecutive stage-2 samples,
- * where a stage-2 sample is itself the average of two stage-1 samples and a
- * stage-1 sample the average of eight inputs: 8 x 2 x 4 = 64, one output per 64
- * inputs. See include/decimator.h for why the filter lives at the stage-2 rate
- * and not the stage-1 one. */
+ * where a stage-2 sample is the average of 16 input samples (fused stage1+stage2):
+ * 16 x 4 = 64, one output per 64 inputs. 
+ * 
+ * Stage 1 was box8, stage 2 was box2. Fused: box16 (equivalent to box8 then box2).
+ * See docs/PORT-NOTES.md section 20 for the optimization details. */
 static inline void push(decimator *d, int16_t l, int16_t r, int16_t *out,
 			unsigned *written)
 {
-	/* Stage 2: a box of two. Two adds here instead of a tap this long in
-	 * the FIR, which would have cost a multiply and two loads. */
-	d->sum2_l += l;
-	d->sum2_r += r;
-
-	if (++d->count2 < DECIMATE_BOX2)
-		return;
-
-	d->count2 = 0;
-
-	const int16_t ml = (int16_t)(d->sum2_l >> 1);
-	const int16_t mr = (int16_t)(d->sum2_r >> 1);
-
-	d->sum2_l = d->sum2_r = 0;
+	/* l and r are already the average of 16 input samples, divided by 4.
+	 * We need to divide by 4 more to get the final /16. */
+	const int16_t ml = (int16_t)(l >> 2);
+	const int16_t mr = (int16_t)(r >> 2);
 
 	/* The doubled ring: written twice so that every window of
 	 * DECIMATOR_TAPS is contiguous, no shifting. */
@@ -135,35 +130,53 @@ unsigned decimator_run(decimator *d, const uint32_t *in, unsigned frames,
 	int32_t sum_l = d->sum_l, sum_r = d->sum_r;
 	unsigned i = 0;
 
-	/* Fast path: one stage-1 group per eight inputs, no branch per sample.
+	/* Fast path: one fused stage1+2 group per sixteen inputs, no branch per sample.
 	 * This is the common case - every runFor() call in the backend hands
-	 * over 2064 samples, which divides by 8 exactly, and the state starts
-	 * aligned. */
+	 * over 2064 samples, which divides by 16 exactly (2064 / 16 = 129), and
+	 * the state starts aligned. 
+	 * 
+	 * Fused: instead of box8 then box2, we do box16 directly.
+	 * 16 input samples -> 1 stage2 sample (divided by 16 = 4 in push + 4 here).
+	 * See docs/PORT-NOTES.md section 20. */
 	if (d->count1 == 0)
 	{
-		while (i + 8 <= frames)
+		while (i + 16 <= frames)
 		{
+			/* Process 16 samples (8 uint32_t) for one stage2 output */
 			const uint32_t v0 = in[i + 0], v1 = in[i + 1];
 			const uint32_t v2 = in[i + 2], v3 = in[i + 3];
 			const uint32_t v4 = in[i + 4], v5 = in[i + 5];
 			const uint32_t v6 = in[i + 6], v7 = in[i + 7];
+			const uint32_t v8 = in[i + 8], v9 = in[i + 9];
+			const uint32_t v10 = in[i + 10], v11 = in[i + 11];
+			const uint32_t v12 = in[i + 12], v13 = in[i + 13];
+			const uint32_t v14 = in[i + 14], v15 = in[i + 15];
 
 			const int32_t l = left_of(v0) + left_of(v1) +
 					  left_of(v2) + left_of(v3) +
 					  left_of(v4) + left_of(v5) +
-					  left_of(v6) + left_of(v7);
+					  left_of(v6) + left_of(v7) +
+					  left_of(v8) + left_of(v9) +
+					  left_of(v10) + left_of(v11) +
+					  left_of(v12) + left_of(v13) +
+					  left_of(v14) + left_of(v15);
 			const int32_t r = right_of(v0) + right_of(v1) +
 					  right_of(v2) + right_of(v3) +
 					  right_of(v4) + right_of(v5) +
-					  right_of(v6) + right_of(v7);
+					  right_of(v6) + right_of(v7) +
+					  right_of(v8) + right_of(v9) +
+					  right_of(v10) + right_of(v11) +
+					  right_of(v12) + right_of(v13) +
+					  right_of(v14) + right_of(v15);
 
-			push(d, (int16_t)(l >> 3), (int16_t)(r >> 3), out, &written);
-			i += 8;
+			/* Divide by 4 here (16/4 = 4), push will divide by 4 more */
+			push(d, (int16_t)(l >> 2), (int16_t)(r >> 2), out, &written);
+			i += 16;
 		}
 	}
 
 	/* Tail, and the general case for a caller that hands over a block that
-	 * does not divide by 8. */
+	 * does not divide by 16. */
 	for (; i < frames; i++)
 	{
 		const uint32_t v = in[i];
@@ -171,10 +184,11 @@ unsigned decimator_run(decimator *d, const uint32_t *in, unsigned frames,
 		sum_l += left_of(v);
 		sum_r += right_of(v);
 
-		if (++d->count1 == 8)
+		if (++d->count1 == 16)
 		{
 			d->count1 = 0;
-			push(d, (int16_t)(sum_l >> 3), (int16_t)(sum_r >> 3),
+			/* Divide by 4 here, push will divide by 4 more (total /16) */
+			push(d, (int16_t)(sum_l >> 2), (int16_t)(sum_r >> 2),
 			     out, &written);
 			sum_l = sum_r = 0;
 		}
