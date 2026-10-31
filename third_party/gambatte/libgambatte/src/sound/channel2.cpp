@@ -83,9 +83,7 @@ void Channel2::setSo(unsigned long soMask) {
 }
 
 void Channel2::reset() {
-	// cycleCounter >> 12 & 7 represents the frame sequencer position.
-	cycleCounter_ &= 0xFFF;
-	cycleCounter_ += ~(cycleCounter_ + 2) << 1 & 0x1000;
+	cycleCounter_ = 0;
 
 	dutyUnit_.reset();
 	envelopeUnit_.reset();
@@ -113,47 +111,46 @@ void Channel2::loadState(SaveState const &state) {
 	master_ = state.spu.ch2.master;
 }
 
-void Channel2::update(uint_least32_t *buf, unsigned long const soBaseVol, unsigned long cycles) {
+void Channel2::update(uint_least32_t *buf, unsigned long const soBaseVol, unsigned long cc, unsigned long const end) {
 	unsigned long const outBase = envelopeUnit_.dacIsOn() ? soBaseVol & soMask_ : 0;
 	unsigned long const outLow = outBase * (0 - 15ul);
-	unsigned long const endCycles = cycleCounter_ + cycles;
 
-	for (;;) {
+	while (cc < end) {
 		unsigned long const outHigh = master_
 		                            ? outBase * (envelopeUnit_.getVolume() * 2 - 15ul)
 		                            : outLow;
-		unsigned long const nextMajorEvent = std::min(nextEventUnit->counter(), endCycles);
+		unsigned long const nextMajorEvent = std::min(nextEventUnit->counter(), end);
 		unsigned long out = dutyUnit_.isHighState() ? outHigh : outLow;
 
 		while (dutyUnit_.counter() <= nextMajorEvent) {
 			*buf += out - prevOut_;
 			prevOut_ = out;
-			buf += dutyUnit_.counter() - cycleCounter_;
-			cycleCounter_ = dutyUnit_.counter();
+			buf += dutyUnit_.counter() - cc;
+			cc = dutyUnit_.counter();
 
 			dutyUnit_.event();
 			out = dutyUnit_.isHighState() ? outHigh : outLow;
 		}
 
-		if (cycleCounter_ < nextMajorEvent) {
+		if (cc < nextMajorEvent) {
 			*buf += out - prevOut_;
 			prevOut_ = out;
-			buf += nextMajorEvent - cycleCounter_;
-			cycleCounter_ = nextMajorEvent;
+			buf += nextMajorEvent - cc;
+			cc = nextMajorEvent;
 		}
 
 		if (nextEventUnit->counter() == nextMajorEvent) {
 			nextEventUnit->event();
 			setEvent();
-		} else
-			break;
+		}
 	}
 
-	if (cycleCounter_ >= SoundUnit::counter_max) {
-		dutyUnit_.resetCounters(cycleCounter_);
-		lengthCounter_.resetCounters(cycleCounter_);
-		envelopeUnit_.resetCounters(cycleCounter_);
-		cycleCounter_ -= SoundUnit::counter_max;
+	cycleCounter_ = cc;
+
+	if (cc >= SoundUnit::counter_max) {
+		dutyUnit_.resetCounters(cc);
+		lengthCounter_.resetCounters(cc);
+		envelopeUnit_.resetCounters(cc);
 	}
 }
 

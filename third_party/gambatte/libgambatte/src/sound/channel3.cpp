@@ -84,10 +84,7 @@ void Channel3::setSo(unsigned long soMask) {
 }
 
 void Channel3::reset() {
-	// cycleCounter >> 12 & 7 represents the frame sequencer position.
-	cycleCounter_ &= 0xFFF;
-	cycleCounter_ += ~(cycleCounter_ + 2) << 1 & 0x1000;
-
+	cycleCounter_ = 0;
 	sampleBuf_ = 0;
 }
 
@@ -142,28 +139,25 @@ void Channel3::updateWaveCounter(unsigned long const cc) {
 	}
 }
 
-void Channel3::update(uint_least32_t *buf, unsigned long const soBaseVol, unsigned long cycles) {
-	unsigned long const outBase = nr0_/* & 0x80*/ ? soBaseVol & soMask_ : 0;
+void Channel3::update(uint_least32_t *buf, unsigned long const soBaseVol, unsigned long cc, unsigned long const end) {
+	unsigned long const outBase = nr0_ ? soBaseVol & soMask_ : 0;
 
 	if (outBase && rshift_ != 4) {
-		unsigned long const endCycles = cycleCounter_ + cycles;
-
-		for (;;) {
+		while (std::min(waveCounter_, lengthCounter_.counter()) <= end) {
 			unsigned long const nextMajorEvent =
-				std::min(lengthCounter_.counter(), endCycles);
+				std::min(lengthCounter_.counter(), end);
 			unsigned long out = master_
 				? ((sampleBuf_ >> (~wavePos_ << 2 & 4) & 0xF) >> rshift_) * 2 - 15ul
 				: 0 - 15ul;
 			out *= outBase;
+			unsigned long cnt = waveCounter_, prevOut = prevOut_;
 
-			while (waveCounter_ <= nextMajorEvent) {
-				*buf += out - prevOut_;
-				prevOut_ = out;
-				buf += waveCounter_ - cycleCounter_;
-				cycleCounter_ = waveCounter_;
-
-				lastReadTime_ = waveCounter_;
-				waveCounter_ += toPeriod(nr3_, nr4_);
+			while (cnt <= nextMajorEvent) {
+				*buf += out - prevOut;
+				prevOut = out;
+				buf += cnt - cc;
+				cc = cnt;
+				cnt += toPeriod(nr3_, nr4_);
 				++wavePos_;
 				wavePos_ &= 0x1F;
 				sampleBuf_ = waveRam_[wavePos_ >> 1];
@@ -171,40 +165,54 @@ void Channel3::update(uint_least32_t *buf, unsigned long const soBaseVol, unsign
 				out *= outBase;
 			}
 
-			if (cycleCounter_ < nextMajorEvent) {
-				*buf += out - prevOut_;
-				prevOut_ = out;
-				buf += nextMajorEvent - cycleCounter_;
-				cycleCounter_ = nextMajorEvent;
+			if (cnt != waveCounter_) {
+				prevOut_ = prevOut;
+				waveCounter_ = cnt;
+				lastReadTime_ = cc;
 			}
 
-			if (lengthCounter_.counter() == nextMajorEvent) {
+			if (cc < nextMajorEvent) {
+				*buf += out - prevOut_;
+				prevOut_ = out;
+				buf += nextMajorEvent - cc;
+				cc = nextMajorEvent;
+			}
+
+			if (lengthCounter_.counter() == nextMajorEvent)
 				lengthCounter_.event();
-			} else
-				break;
+		}
+
+		if (cc < end) {
+			unsigned long out = master_
+				? ((sampleBuf_ >> (~wavePos_ << 2 & 4) & 0xF) >> rshift_) * 2 - 15ul
+				: 0 - 15ul;
+			out *= outBase;
+			*buf += out - prevOut_;
+			prevOut_ = out;
+			cc = end;
 		}
 	} else {
 		unsigned long const out = outBase * (0 - 15ul);
 		*buf += out - prevOut_;
 		prevOut_ = out;
-		cycleCounter_ += cycles;
-
-		while (lengthCounter_.counter() <= cycleCounter_) {
+		cc = end;
+		while (lengthCounter_.counter() <= cc) {
 			updateWaveCounter(lengthCounter_.counter());
 			lengthCounter_.event();
 		}
 
-		updateWaveCounter(cycleCounter_);
+		updateWaveCounter(cc);
 	}
 
-	if (cycleCounter_ >= SoundUnit::counter_max) {
-		lengthCounter_.resetCounters(cycleCounter_);
+	cycleCounter_ = cc;
+
+	if (cc >= SoundUnit::counter_max) {
+		lengthCounter_.resetCounters(cc);
 
 		if (waveCounter_ != SoundUnit::counter_disabled)
 			waveCounter_ -= SoundUnit::counter_max;
 
 		lastReadTime_ -= SoundUnit::counter_max;
-		cycleCounter_ -= SoundUnit::counter_max;
 	}
 }
 

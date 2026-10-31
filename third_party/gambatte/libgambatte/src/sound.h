@@ -83,6 +83,7 @@ private:
 	std::size_t bufferSize_;
 	std::size_t bufferPos_;
 	unsigned long lastUpdate_;
+	unsigned long cycleCounter_;
 	unsigned long soVol_;
 	uint_least32_t rsum_;
 	bool enabled_;

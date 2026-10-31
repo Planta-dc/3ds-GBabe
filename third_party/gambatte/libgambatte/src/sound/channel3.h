@@ -42,7 +42,7 @@ public:
 	void setNr3(unsigned data) { nr3_ = data; }
 	void setNr4(unsigned data);
 	void setSo(unsigned long soMask);
-	void update(uint_least32_t *buf, unsigned long soBaseVol, unsigned long cycles);
+	void update(uint_least32_t *buf, unsigned long soBaseVol, unsigned long cc, unsigned long end);
 
 	unsigned waveRamRead(unsigned index) const {
 		if (master_) {

@@ -187,9 +187,7 @@ void Channel4::setSo(unsigned long soMask) {
 }
 
 void Channel4::reset() {
-	// cycleCounter >> 12 & 7 represents the frame sequencer position.
-	cycleCounter_ &= 0xFFF;
-	cycleCounter_ += ~(cycleCounter_ + 2) << 1 & 0x1000;
+	cycleCounter_ = 0;
 
 	lfsr_.reset(cycleCounter_);
 	envelopeUnit_.reset();
@@ -216,45 +214,47 @@ void Channel4::loadState(SaveState const &state) {
 	master_ = state.spu.ch4.master;
 }
 
-void Channel4::update(uint_least32_t *buf, unsigned long const soBaseVol, unsigned long cycles) {
+void Channel4::update(uint_least32_t *buf, unsigned long const soBaseVol, unsigned long cc, unsigned long const end) {
 	unsigned long const outBase = envelopeUnit_.dacIsOn() ? soBaseVol & soMask_ : 0;
 	unsigned long const outLow = outBase * (0 - 15ul);
-	unsigned long const endCycles = cycleCounter_ + cycles;
 
-	for (;;) {
+	while (cc < end) {
 		unsigned long const outHigh = outBase * (envelopeUnit_.getVolume() * 2 - 15ul);
-		unsigned long const nextMajorEvent = std::min(nextEventUnit_->counter(), endCycles);
+		unsigned long const nextMajorEvent = std::min(nextEventUnit_->counter(), end);
 		unsigned long out = lfsr_.isHighState() ? outHigh : outLow;
 
-		while (lfsr_.counter() <= nextMajorEvent) {
-			*buf += out - prevOut_;
-			prevOut_ = out;
-			buf += lfsr_.counter() - cycleCounter_;
-			cycleCounter_ = lfsr_.counter();
-
-			lfsr_.event();
-			out = lfsr_.isHighState() ? outHigh : outLow;
+		if (lfsr_.counter() <= nextMajorEvent) {
+			Lfsr lfsr = lfsr_;
+			while (lfsr.counter() <= nextMajorEvent) {
+				*buf += out - prevOut_;
+				prevOut_ = out;
+				buf += lfsr.counter() - cc;
+				cc = lfsr.counter();
+				lfsr.event();
+				out = lfsr.isHighState() ? outHigh : outLow;
+			}
+			lfsr_ = lfsr;
 		}
 
-		if (cycleCounter_ < nextMajorEvent) {
+		if (cc < nextMajorEvent) {
 			*buf += out - prevOut_;
 			prevOut_ = out;
-			buf += nextMajorEvent - cycleCounter_;
-			cycleCounter_ = nextMajorEvent;
+			buf += nextMajorEvent - cc;
+			cc = nextMajorEvent;
 		}
 
 		if (nextEventUnit_->counter() == nextMajorEvent) {
 			nextEventUnit_->event();
 			setEvent();
-		} else
-			break;
+		}
 	}
 
-	if (cycleCounter_ >= SoundUnit::counter_max) {
-		lengthCounter_.resetCounters(cycleCounter_);
-		lfsr_.resetCounters(cycleCounter_);
-		envelopeUnit_.resetCounters(cycleCounter_);
-		cycleCounter_ -= SoundUnit::counter_max;
+	cycleCounter_ = cc;
+
+	if (cc >= SoundUnit::counter_max) {
+		lengthCounter_.resetCounters(cc);
+		lfsr_.resetCounters(cc);
+		envelopeUnit_.resetCounters(cc);
 	}
 }
 
