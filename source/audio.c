@@ -336,15 +336,14 @@ static void start_block(void)
 
 		/* Replicate csndPlaySound() body for SOUND_ONE_SHOT | SOUND_FORMAT_16BIT */
 		const u32 phys_addr = osConvertVirtToPhys(blocks[slot][e]);
-		const u32 loop_addr = 0; /* SOUND_ONE_SHOT: no loop */
 
-		/* Set channel registers: sample address, loop address, rate, format */
+		/* Set channel registers: channel, flags, buffer addresses, size */
 		CSND_SetChnRegs(channels[slot][e],
-				phys_addr, loop_addr,
-				OUT_RATE, SOUND_FORMAT_16BIT);
+				SOUND_ONE_SHOT | SOUND_FORMAT_16BIT,
+				phys_addr, 0, BLOCK_BYTES);
 
-		/* Set volume with pan: volume 1.0, pan as calculated */
-		CSND_SetVol(channels[slot][e], CSND_VOL(1.0f, pan));
+		/* Set volume with pan: channel, left/right volumes, capture volumes */
+		CSND_SetVol(channels[slot][e], CSND_VOL(1.0f, pan), 0);
 
 		/* Start the channel */
 		CSND_SetPlayState(channels[slot][e], 1);
