@@ -275,6 +275,58 @@ void CSND_SetPlayStateR(u32 channel, u32 value)
 		block_end[channel] = svcGetSystemTick();
 }
 
+/* Stub implementations for manual CSND setup (used by audio.c start_block) */
+void CSND_SetChnRegs(u32 channel, u32 addr0, u32 addr1, u32 rate, u32 flags)
+{
+	(void)addr0; (void)addr1; (void)flags;
+	if (channel < CSND_NUM_CHANNELS && rate != 0)
+		block_rate[channel] = rate;
+}
+
+u32 CSND_VOL(float left, float right)
+{
+	/* In the real libctru, this packs volume/pan into a u32 register value.
+	 * For the host stub, we don't need the actual value. */
+	(void)left; (void)right;
+	return 0;
+}
+
+void CSND_SetVol(u32 channel, u32 vol)
+{
+	(void)channel; (void)vol;
+	/* Stub - real implementation sets the volume register */
+}
+
+void CSND_SetPlayState(u32 channel, u32 value)
+{
+	if (channel < CSND_NUM_CHANNELS)
+	{
+		if (value == 0)
+		{
+			/* Stop playback */
+			block_end[channel] = svcGetSystemTick();
+		}
+		else
+		{
+			/* Start playback - track this as a block submission.
+			 * BLOCK_SAMPLES is 1024, so the block duration is based on the
+			 * channel's rate (set by CSND_SetChnRegs). */
+			const u64 now = svcGetSystemTick();
+			const u32 frames = 1024; /* BLOCK_SAMPLES */
+			block_end[channel] = now + (u64)((double)frames * SYSCLOCK_ARM11 / block_rate[channel]);
+
+			if (g_host_csnd_count < HOST_CSND_MAX_BLOCKS)
+			{
+				g_host_csnd_blocks[g_host_csnd_count].start = now;
+				g_host_csnd_blocks[g_host_csnd_count].ticks = block_end[channel] - now;
+				g_host_csnd_blocks[g_host_csnd_count].channel = channel;
+				g_host_csnd_blocks[g_host_csnd_count].frames = frames;
+				g_host_csnd_count++;
+			}
+		}
+	}
+}
+
 Result csndPlaySound(int chn, u32 flags, u32 sampleRate, float vol, float pan,
 		     void *data0, void *data1, u32 size)
 {

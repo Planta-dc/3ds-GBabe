@@ -314,34 +314,61 @@ static void start_block(void)
 			memset(dst + got, 0, (BLOCK_SAMPLES - got) * sizeof(s16));
 	}
 
+	/* Flush all buffers before they are visible to the DSP. */
 	for (int e = 0; e < ears; e++)
-	{
-		/* The DSP reads this buffer: flush it before it is visible. */
 		CSND_FlushDataCache(blocks[slot][e], BLOCK_BYTES);
 
-		const u64 t0 = svcGetSystemTick();
+	/* Start both ears together to avoid stereo image skew.
+	 * csndPlaySound() calls csndExecCmds(true) for each channel, which
+	 * means the second ear starts one IPC round-trip after the first.
+	 * Instead, set up both channels' registers manually and call
+	 * csndExecCmds(true) once, so both ears start simultaneously. */
+	const u64 t0 = svcGetSystemTick();
+	bool any_fail = false;
+
+	for (int e = 0; e < ears; e++)
+	{
 		/* Pan: left channel to left speaker (-1.0), right to right (+1.0).
 		 * A CSND channel is mono but has separate left/right volumes, so
 		 * pan steers it to the correct ear. 0.0 for both would mix both
 		 * channels into both speakers. */
 		const float pan = stereo ? (e == 0 ? -1.0f : 1.0f) : 0.0f;
-		Result rc = csndPlaySound(channels[slot][e],
-					  SOUND_ONE_SHOT | SOUND_FORMAT_16BIT,
-					  OUT_RATE, 1.0f, pan,
-					  blocks[slot][e], NULL, BLOCK_BYTES);
-		cmd_ticks = smooth(cmd_ticks, svcGetSystemTick() - t0);
-		update_margin();
 
-		if (R_FAILED(rc))
+		/* Replicate csndPlaySound() body for SOUND_ONE_SHOT | SOUND_FORMAT_16BIT */
+		const u32 phys_addr = osConvertVirtToPhys(blocks[slot][e]);
+		const u32 loop_addr = 0; /* SOUND_ONE_SHOT: no loop */
+
+		/* Set channel registers: sample address, loop address, rate, format */
+		CSND_SetChnRegs(channels[slot][e],
+				phys_addr, loop_addr,
+				OUT_RATE, SOUND_FORMAT_16BIT);
+
+		/* Set volume with pan: volume 1.0, pan as calculated */
+		CSND_SetVol(channels[slot][e], CSND_VOL(1.0f, pan));
+
+		/* Start the channel */
+		CSND_SetPlayState(channels[slot][e], 1);
+
+		/* Check if the channel was accepted (it might be in use) */
+		if (!(csndChannels & BIT(channels[slot][e])))
 		{
-			/* Channel refused (another app owns it?): go quiet for
-			 * good rather than leaving a half-started stream. */
 			log_line("audio: channel %d refused, running silent",
 				 channels[slot][e]);
-			csnd_ok = false;
-			scheduled = false;
-			return;
+			any_fail = true;
 		}
+	}
+
+	/* Submit all commands at once so both ears start together */
+	csndExecCmds(true);
+
+	cmd_ticks = smooth(cmd_ticks, svcGetSystemTick() - t0);
+	update_margin();
+
+	if (any_fail)
+	{
+		csnd_ok = false;
+		scheduled = false;
+		return;
 	}
 
 	slot_next ^= 1;
