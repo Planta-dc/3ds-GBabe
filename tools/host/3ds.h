@@ -201,9 +201,9 @@ Result csndIsPlaying(u32 channel, u8 *status);
 Result CSND_FlushDataCache(const void *adr, u32 size);
 Result csndExecCmds(bool waitDone);
 void   CSND_SetPlayStateR(u32 channel, u32 value);
-void   CSND_SetChnRegs(u32 channel, u32 addr0, u32 addr1, u32 rate, u32 flags);
+void   CSND_SetChnRegs(u32 channel, u32 flags, u32 physaddr0, u32 physaddr1, u32 totalbytesize);
 u32    CSND_VOL(float left, float right);
-void   CSND_SetVol(u32 channel, u32 vol);
+void   CSND_SetVol(u32 channel, u32 chnVolumes, u32 capVolumes);
 void   CSND_SetPlayState(u32 channel, u32 value);
 Result csndPlaySound(int chn, u32 flags, u32 sampleRate, float vol, float pan,
 		     void *data0, void *data1, u32 size);
