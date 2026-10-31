@@ -126,6 +126,16 @@ int16_t audio_play[96 * 2];
 
 resamp   shaper;
 
+/* DC blocker: one-pole high-pass filter to remove DC offset from Gambatte's
+ * audio. Coefficient 0.99847 gives an 8 Hz corner at 32768 Hz sample rate.
+ * Uses the standard form: y[n] = x[n] - x[n-1] + coeff * y[n-1]
+ * State for each channel (left and right): previous input and previous output. */
+static float dc_prev_in_l = 0.0f;
+static float dc_prev_in_r = 0.0f;
+static float dc_prev_out_l = 0.0f;
+static float dc_prev_out_r = 0.0f;
+const float DC_COEFF = 0.99847f;
+
 /* ------------------------------------------------------------------------- */
 /* Save files                                                                */
 /* ------------------------------------------------------------------------- */
@@ -383,9 +393,11 @@ extern "C" void emu_unload(void)
 	error_pending = false;
 	memset(&info, 0, sizeof info);
 
-	/* A new game is new audio: the rate matcher must not carry a fractional
-	 * position from the old one. */
+	/* A new game is new audio: reset state to avoid carrying over from old game */
+	decimator_reset(&stage);
 	resamp_reset(&shaper);
+	dc_prev_in_l = dc_prev_in_r = 0.0f;
+	dc_prev_out_l = dc_prev_out_r = 0.0f;
 }
 
 extern "C" const char *emu_load(const char *path)
@@ -493,6 +505,10 @@ extern "C" void emu_reset(void)
 	emu_flush_save();
 	error_pending = false;
 	core->reset();
+
+	/* Reset DC blocker state to avoid clicks on reset */
+	dc_prev_in_l = dc_prev_in_r = 0.0f;
+	dc_prev_out_l = dc_prev_out_r = 0.0f;
 
 	/* reset() re-runs the power-on sequence, which drops the DMG palette
 	 * colours the front-end had pushed in. */
@@ -603,6 +619,32 @@ extern "C" void emu_run_frame(void)
 
 			if (out > 0)
 			{
+				/* Remove DC offset: one-pole high-pass filter with 8 Hz corner.
+				 * Gambatte's PSG lacks a high-pass filter, causing a ~-13246 mean
+				 * DC offset (40% full scale), clipping risk, and loud pops on
+				 * underruns. This filter removes the DC component while
+				 * preserving the waveform.
+				 * Formula: y[n] = x[n] - x[n-1] + coeff * y[n-1] */
+				for (unsigned i = 0; i < out; i++)
+				{
+					const float in_l = (float)audio_out[i * 2];
+					const float in_r = (float)audio_out[i * 2 + 1];
+					
+					/* Apply DC blocker to left channel */
+					const float out_l = in_l - dc_prev_in_l + DC_COEFF * dc_prev_out_l;
+					/* Apply DC blocker to right channel */
+					const float out_r = in_r - dc_prev_in_r + DC_COEFF * dc_prev_out_r;
+					
+					/* Update state for next iteration */
+					dc_prev_in_l = in_l;
+					dc_prev_in_r = in_r;
+					dc_prev_out_l = out_l;
+					dc_prev_out_r = out_r;
+					
+					audio_out[i * 2] = (int16_t)out_l;
+					audio_out[i * 2 + 1] = (int16_t)out_r;
+				}
+
 				/* 548.6 samples a frame is only the right
 				 * number if the frame rate is right, and it is
 				 * not always: stretch or squeeze to follow the
