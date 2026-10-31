@@ -31,7 +31,11 @@ static const int32_t taps[DECIMATOR_TAPS / 2] = {
 	    -1704168,      3866683,       524318,            0,
 };
 
-/* Extract 16-bit halves from packed 32-bit words. */
+/* Signed 16-bit halves of a packed word, sign-extended to 32 bits. */
+static inline int32_t left_of(uint32_t v)  { return (int16_t)(v & 0xFFFFu); }
+static inline int32_t right_of(uint32_t v) { return (int16_t)(v >> 16); }
+
+/* Extract 16-bit halves from packed 32-bit words (for the FIR). */
 #define LO(v) ((int32_t)(int16_t)(uint16_t)((v) & 0xFFFFu))
 #define HI(v) ((int32_t)(int16_t)(uint16_t)((uint32_t)(v) >> 16))
 
@@ -178,9 +182,3 @@ unsigned decimator_run(decimator *d, const uint32_t *in, unsigned frames,
 
 	return written;
 }
-
-/* left_of and right_of: the core packs stereo into a u32 (left low, right
- * high), and the old code handed that buffer to a int16_t * and did two
- * 16-bit loads. On an ARM11 with no L2 the loads are the cost. */
-static inline int32_t left_of(uint32_t v)  { return (int16_t)(v & 0xFFFFu); }
-static inline int32_t right_of(uint32_t v) { return (int16_t)(v >> 16); }
