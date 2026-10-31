@@ -65,10 +65,12 @@ void config_load(void)
 			g_cfg.palette = atoi(val);
 		else if (!strcmp(key, "frameskip"))
 			g_cfg.frameskip = atoi(val);
-		else if (!strcmp(key, "audio"))
-			g_cfg.audio_on = atoi(val) != 0;
-		else if (!strcmp(key, "hud"))
-			g_cfg.show_hud = atoi(val) != 0;
+	else if (!strcmp(key, "audio"))
+		g_cfg.audio_on = atoi(val) != 0;
+	else if (!strcmp(key, "audio_mono"))
+		g_cfg.audio_mono = atoi(val) != 0;
+	else if (!strcmp(key, "hud"))
+		g_cfg.show_hud = atoi(val) != 0;
 		else if (!strcmp(key, "log"))
 			g_cfg.debug_log = atoi(val) != 0;
 		else if (!strcmp(key, "rom"))
@@ -97,6 +99,7 @@ void config_save(void)
 	fprintf(f, "palette=%d\n", g_cfg.palette);
 	fprintf(f, "frameskip=%d\n", g_cfg.frameskip);
 	fprintf(f, "audio=%d\n", g_cfg.audio_on ? 1 : 0);
+	fprintf(f, "audio_mono=%d\n", g_cfg.audio_mono ? 1 : 0);
 	fprintf(f, "hud=%d\n", g_cfg.show_hud ? 1 : 0);
 	fprintf(f, "log=%d\n", g_cfg.debug_log ? 1 : 0);
 	fprintf(f, "rom=%s\n", g_cfg.rom_path);
