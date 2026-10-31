@@ -1,4 +1,4 @@
-/** The 2 MHz -> 32768 Hz audio decimator: fused box filter, then a 32-tap
+/** The 2 MHz -> 32768 Hz audio decimator: two box filters, then a 32-tap
  * windowed sinc. MIT. */
 #pragma once
 
@@ -33,10 +33,6 @@ extern "C" {
  * box stages - 8, then 2 - before the filter, which puts it at 131072 Hz with
  * 32 taps instead of 262144 Hz with 64. Twice as sharp for half the work.
  *
- * The two box stages have since been fused into a single 16:1 box filter to
- * eliminate intermediate state and reduce memory traffic. See docs/PORT-NOTES.md
- * section 20. The aliasing characteristics are unchanged.
- *
  * Measured on the host (tools/host/dectest.c) by putting one loud tone in and
  * looking for it where it would land if the conversion aliased it - the figure
  * is the alias, re a full-scale tone:
@@ -55,14 +51,14 @@ extern "C" {
  *
  * ## How the samples move
  *
- * The history is a doubled ring of 2 x DECIMATOR_TAPS: every stage2 sample is
+ * The history is a doubled ring of 2 x DECIMATOR_TAPS: every stage-2 sample is
  * written at `pos` and at `pos + TAPS`, so the last TAPS samples are always the
  * contiguous run starting at `pos + 1` and nothing is ever shifted. (It used to
  * shift the array down by eight with two memmove()s per output - see
  * docs/PORT-NOTES.md 27, where the console measured what that cost.)
  *
- * Stage 3 (the FIR) reads that run as packed 32-bit words - two int16 samples -
- * and the taps are stored packed the same way, so one `smlabb`/`smlatt` does two
+ * Stage 3 reads that run as packed 32-bit words - two int16 samples - and the
+ * taps are stored packed the same way, so one `smlabb`/`smlatt` does two
  * multiply-accumulates. That is not a micro-optimisation: this console is
  * instruction-bound, not maths-bound, and the straightforward version of the
  * same filter needs about three instructions per multiply and 6.6 for the
@@ -80,11 +76,13 @@ extern "C" {
 
 typedef struct
 {
-	int32_t sum_l, sum_r;  /* fused stage 1+2: 16 input samples -> one stage2 sample */
-	uint8_t count1;        /* input samples into the current group, 0-15 */
-	uint8_t pending;       /* stage2 samples since the last output, 0-3 */
-	uint8_t pos;           /* where the next stage2 sample goes, 0..31 */
-	/* The last DECIMATOR_TAPS stage2 samples, held twice over so that the
+	int32_t sum_l, sum_r;  /* stage 1: 8 input samples -> one sample    */
+	int32_t sum2_l, sum2_r;/* stage 2: 2 stage-1 samples -> one sample  */
+	uint8_t count2;        /* stage-1 samples into the stage-2 group, 0-1 */
+	uint8_t count1;        /* input samples into the current stage-1 group, 0-7 */
+	uint8_t pending;       /* stage-1 samples since the last output, 0-7 */
+	uint8_t pos;           /* where the next stage-1 sample goes, 0..63 */
+	/* The last DECIMATOR_TAPS stage-1 samples, held twice over so that the
 	 * window a convolution reads is always contiguous - see "the doubled
 	 * ring" below. Every sample is written at pos and at pos + TAPS. */
 	/* Aligned to 4 bytes because the FIR reads them two samples at a time,
