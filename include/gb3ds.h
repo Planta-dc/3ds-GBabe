@@ -133,6 +133,7 @@ typedef struct
 	int  palette;      /* index into the palette table, 0 = auto */
 	int  frameskip;    /* 0 = off (default), 1 = skip when running late */
 	bool audio_on;
+	bool audio_mono;   /* true = mono (faster), false = stereo (accurate) */
 	bool show_hud;     /* draw a status line on the bottom screen */
 	bool debug_log;    /* write sdmc:/3ds/gbabe/debug.log       */
 	bool fast_forward; /* session only, not persisted */

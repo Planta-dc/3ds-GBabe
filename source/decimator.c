@@ -1,5 +1,5 @@
 /**
- * The 2 MHz -> 32768 Hz decimator: two box filters, then a windowed-sinc
+ * The 2 MHz -> 32768 Hz audio decimator: two box filters, then a windowed-sinc
  * lowpass. See include/decimator.h.
  *
  * MIT licensed.
@@ -31,14 +31,11 @@ static const int32_t taps[DECIMATOR_TAPS / 2] = {
 	    -1704168,      3866683,       524318,            0,
 };
 
-/* A packed sample: left in the low half, right in the high half. Reading the
- * core's buffer as 32-bit words rather than as two 16-bit halves halves the
- * number of loads for the same bytes - on an ARM11 with no L2, the loads are
- * the cost. */
+/* Signed 16-bit halves of a packed word, sign-extended to 32 bits. */
 static inline int32_t left_of(uint32_t v)  { return (int16_t)(v & 0xFFFFu); }
 static inline int32_t right_of(uint32_t v) { return (int16_t)(v >> 16); }
 
-/* Signed 16-bit halves of a packed word, sign-extended to 32 bits. */
+/* Extract 16-bit halves from packed 32-bit words (for the FIR). */
 #define LO(v) ((int32_t)(int16_t)(uint16_t)((v) & 0xFFFFu))
 #define HI(v) ((int32_t)(int16_t)(uint16_t)((uint32_t)(v) >> 16))
 

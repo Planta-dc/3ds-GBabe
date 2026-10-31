@@ -110,8 +110,6 @@ decimator stage;
 
 /* 35112 stereo samples per frame, in 2064-sample calls (the core's own
  * front-end uses the same step size). */
-/* 35112 stereo samples per frame, in 2064-sample calls (the core's own
- * front-end uses the same step size). */
 const unsigned RUN_SAMPLES  = 2064;
 const unsigned SOUND_BUF    = RUN_SAMPLES + 2064; /* core may overshoot      */
 gambatte::uint_least32_t sound_buf[SOUND_BUF];
@@ -120,11 +118,12 @@ gambatte::uint_least32_t sound_buf[SOUND_BUF];
  * at 32768 Hz; 72 leaves room for a block that overruns. */
 int16_t audio_out[72 * 2];
 
-/* And then the rate matcher. It stretches by up to 20 % when the console is
- * short of time, so 72 frames can become 90: 96 is the round number above
- * that, and resamp_run() is told the real capacity rather than trusting the
- * clamp to keep inside it. */
+/* One runFor() call produces at most 4128 samples, which is 64 output frames
+ * at 32768 Hz; 96 leaves room for a block that overruns, and the rate matcher
+ * stretches by up to 20 % when the console is short of time, so 72 frames
+ * can become 90: 96 is the round number above that. */
 int16_t audio_play[96 * 2];
+
 resamp   shaper;
 
 /* ------------------------------------------------------------------------- */

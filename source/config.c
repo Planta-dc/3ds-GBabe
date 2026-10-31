@@ -28,6 +28,7 @@ void config_defaults(void)
 	g_cfg.palette = 0;      /* auto */
 	g_cfg.frameskip = 0;    /* off */
 	g_cfg.audio_on = true;
+	g_cfg.audio_mono = false; /* stereo by default, set to true for performance */
 	g_cfg.show_hud = true;
 	g_cfg.debug_log = true; /* on by default: it is the only way to see why a
 				  build is slow on someone else's console */
