@@ -334,20 +334,24 @@ static void start_block(void)
 		 * channels into both speakers. */
 		const float pan = stereo ? (e == 0 ? -1.0f : 1.0f) : 0.0f;
 
-		/* Replicate csndPlaySound() body for SOUND_ONE_SHOT | SOUND_FORMAT_16BIT */
+		/* Replicate csndPlaySound() body for SOUND_ONE_SHOT | SOUND_FORMAT_16BIT.
+		 * csndPlaySound() does NOT call CSND_SetPlayState: the SOUND_ENABLE
+		 * flag in CSND_SetChnRegs starts the channel. Calling CSND_SetPlayState
+		 * afterwards restarts it from position 0, chopping the stream into
+		 * 1024-sample blocks that each begin again. */
 		const u32 phys_addr = osConvertVirtToPhys(blocks[slot][e]);
 		const u32 volumes = CSND_VOL(1.0f, pan);
-		const u32 timer = CSND_TIMER(OUT_RATE);
+		u32 timer = CSND_TIMER(OUT_RATE);
+		if (timer < 0x0042) timer = 0x0042;
+		else if (timer > 0xFFFF) timer = 0xFFFF;
 
 		/* Encode channel into flags, like csndPlaySound does */
 		u32 flags = SOUND_ENABLE | SOUND_CHANNEL(channels[slot][e]) |
 			   SOUND_ONE_SHOT | SOUND_FORMAT_16BIT | (timer << 16);
 
-		/* Set channel registers: flags, buffer addresses, size, volumes */
+		/* Set channel registers: flags, buffer addresses, size, volumes.
+		 * SOUND_ENABLE starts playback; no CSND_SetPlayState needed. */
 		CSND_SetChnRegs(flags, phys_addr, 0, BLOCK_BYTES, volumes, volumes);
-
-		/* Start the channel */
-		CSND_SetPlayState(channels[slot][e], 1);
 
 		/* Check if the channel was accepted (it might be in use) */
 		if (!(csndChannels & BIT(channels[slot][e])))
