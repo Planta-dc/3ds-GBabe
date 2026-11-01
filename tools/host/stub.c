@@ -275,14 +275,36 @@ void CSND_SetPlayStateR(u32 channel, u32 value)
 		block_end[channel] = svcGetSystemTick();
 }
 
-/* Stub implementations for manual CSND setup (used by audio.c start_block) */
+/* Stub implementations for manual CSND setup (used by audio.c start_block).
+ * CSND_SetChnRegs with SOUND_ENABLE starts playback, exactly as it does on
+ * the real hardware and as csndPlaySound relies on. Record the block so the
+ * host continuity test can verify it. */
 void CSND_SetChnRegs(u32 flags, u32 physaddr0, u32 physaddr1, u32 totalbytesize, u32 chnVolumes, u32 capVolumes)
 {
-	(void)physaddr0; (void)physaddr1; (void)totalbytesize; (void)chnVolumes; (void)capVolumes;
+	(void)physaddr0; (void)physaddr1; (void)chnVolumes; (void)capVolumes;
 	/* The channel is encoded in the flags (SOUND_CHANNEL). Extract it. */
 	const u32 channel = (flags >> 0) & 0x1F;
 	if (channel < CSND_NUM_CHANNELS)
+	{
 		block_rate[channel] = 32768; /* Use the standard output rate */
+
+		/* SOUND_ENABLE in the flags starts playback, like CSND_SetPlayState(1). */
+		if (flags & SOUND_ENABLE)
+		{
+			const u64 now = svcGetSystemTick();
+			const u32 frames = totalbytesize / sizeof(s16);
+			block_end[channel] = now + (u64)((double)frames * SYSCLOCK_ARM11 / block_rate[channel]);
+
+			if (g_host_csnd_count < HOST_CSND_MAX_BLOCKS)
+			{
+				g_host_csnd_blocks[g_host_csnd_count].start = now;
+				g_host_csnd_blocks[g_host_csnd_count].ticks = block_end[channel] - now;
+				g_host_csnd_blocks[g_host_csnd_count].channel = channel;
+				g_host_csnd_blocks[g_host_csnd_count].frames = frames;
+				g_host_csnd_count++;
+			}
+		}
+	}
 }
 
 u32 CSND_VOL(float left, float right)

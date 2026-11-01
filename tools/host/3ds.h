@@ -126,12 +126,9 @@ extern unsigned g_host_csnd_count;
 int g_host_csnd_report(void);
 void g_host_csnd_reset(void);
 
-#define SOUND_ENABLE BIT(12)
 #define SOUND_FORMAT(v) ((v) << 12)
 #define SOUND_LOOPMODE(v) ((v) << 10)
-#define SOUND_ONE_SHOT SOUND_LOOPMODE(CSND_LOOPMODE_ONESHOT)
 #define SOUND_REPEAT SOUND_LOOPMODE(CSND_LOOPMODE_NORMAL)
-#define SOUND_FORMAT_16BIT SOUND_FORMAT(CSND_ENCODING_PCM16)
 
 /* libctru's own value and, importantly, its own *type*: an integer constant
  * (include/3ds/os.h). It used to be a double here, which hid two bugs that the
@@ -204,8 +201,8 @@ Result csndExecCmds(bool waitDone);
 /* Sound flags (from libctru) */
 #define SOUND_CHANNEL(n)     ((u32)(n) & 0x1F)
 #define SOUND_ENABLE         BIT(14)
-#define SOUND_ONE_SHOT       (0 << 10)
-#define SOUND_FORMAT_16BIT   (1 << 12)
+#define SOUND_ONE_SHOT       SOUND_LOOPMODE(CSND_LOOPMODE_ONESHOT)
+#define SOUND_FORMAT_16BIT   SOUND_FORMAT(CSND_ENCODING_PCM16)
 #define CSND_TIMER(n)        (0x3FEC3FC / ((u32)(n)))
 
 void   CSND_SetPlayStateR(u32 channel, u32 value);
